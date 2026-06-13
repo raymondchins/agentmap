@@ -6,20 +6,13 @@
 
 **The repo map your coding agent is _forced_ to use — ~98% fewer tokens to understand your TS/JS codebase.**
 
-Your AI coding agent doesn't actually *know* your codebase — every session it re-learns it by
-opening files and running grep after grep just to figure out what connects to what, burning
-thousands of tokens (and your money) before it writes a single line. agentmap fixes that: it's
-a **queryable, ranked code-relationship map for TypeScript/JavaScript repos** the agent queries
-in one shot instead.
-
-The payoff: ask it to *"add a field to the dashboard"* or *"fix the login bug"* and the agent's
-first move is always the same — hunt down which files are involved, what imports them, and what
-already exists so it doesn't rebuild it. agentmap answers that hunt in
-**~98% fewer tokens on average** (up to **99.9% per task**) than letting it read files one by
-one — via personalized PageRank importance, Aider-style symbol ranking, a token-budgeted digest,
-and a single `--any`
-router (file → symbol → feature → live git-grep), all wired into the agent loop so it actually
-gets used, not just published.
+Your AI coding agent re-learns your codebase every session — opening files and grepping to find
+what connects to what, burning tokens before it writes a line. agentmap gives it a **queryable,
+ranked code-relationship map for TypeScript/JavaScript repos** instead — a `ts-morph` import/symbol
+graph ranked by personalized PageRank. Ask it to *"add a field"* or *"fix the login bug"* and it
+finds the right files, their imports, and what already exists in
+**~98% fewer tokens on average** (up to **99.9% per task**) — kept current by a post-commit
+auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 
 [![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
 [![CI](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg)](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml)
