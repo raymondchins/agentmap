@@ -7,12 +7,12 @@ Two small, dependency-free files wire both up.
 
 ```
 hooks/
-  repomap-nudge.mjs   PreToolUse(Grep) nudge → "use agentmap --any first"
-  post-commit         git hook → rebuilds .claude/repomap.json after each commit
+  agentmap-nudge.mjs  PreToolUse(Grep) nudge → "use agentmap --any first"
+  post-commit         git hook → rebuilds .claude/agentmap.json after each commit
   INSTALL.md          ← you are here
 ```
 
-Both are pure Node/bash stdlib. The only runtime dependency is `agentmap`
+Both are pure Node/POSIX sh stdlib. The only runtime dependency is `agentmap`
 itself (`ts-morph`), used when the map (re)builds.
 
 ---
@@ -21,23 +21,34 @@ itself (`ts-morph`), used when the map (re)builds.
 
 - **Node 18+** on PATH.
 - **agentmap available in the repo.** Either:
-  - drop `repomap.mjs` at the repo root (or `scripts/repomap.mjs`), or
-  - install it: `npm i -D agentmap` (then `npx agentmap` works), or
-  - install it globally: `npm i -g agentmap` (then `agentmap` works).
+  - drop `agentmap.mjs` at the repo root (or `scripts/agentmap.mjs`), or
+  - install it: `npm i -D @raymondchins/agentmap` (then `npx @raymondchins/agentmap` works), or
+  - install it globally: `npm i -g @raymondchins/agentmap` (then `agentmap` works).
 - The repo must have a `tsconfig.json` (agentmap reads it to find source files).
+
+**Caveats:**
+
+- **git hooks run under a non-login shell.** If you manage Node via `nvm`,
+  `nvm` won't be sourced and `node` may not be on PATH inside the hook. Use
+  a system-level Node install (or Volta / Corepack) so the hook can find
+  `node` without shell profile sourcing. Add an explicit `export PATH=...`
+  line at the top of the hook if needed.
+- **Windows:** Git for Windows runs hooks under its bundled `sh`, not bash.
+  The hook script is POSIX sh — do **not** use bash-specific syntax if you
+  customise it.
 
 Smoke-test it builds:
 
 ```bash
-node repomap.mjs        # or: npx agentmap
-# → repomap: N files | M features | top hub: ...
+node agentmap.mjs        # or: npx @raymondchins/agentmap
+# → agentmap: N files | M features | top hub: ...
 ```
 
-This writes `.claude/repomap.json`. Add it to `.gitignore` (it's a derived
+This writes `.claude/agentmap.json`. Add it to `.gitignore` (it's a derived
 artifact, rebuilt on every commit):
 
 ```bash
-echo ".claude/repomap.json" >> .gitignore
+echo ".claude/agentmap.json" >> .gitignore
 ```
 
 ---
@@ -54,7 +65,7 @@ Keep it in the repo so it's version-controlled and path-stable:
 
 ```bash
 mkdir -p .claude/hooks
-cp hooks/repomap-nudge.mjs .claude/hooks/repomap-nudge.mjs
+cp hooks/agentmap-nudge.mjs .claude/hooks/agentmap-nudge.mjs
 ```
 
 ### b. Register it in `.claude/settings.json`
@@ -71,7 +82,7 @@ every Grep tool call; the script decides whether to nudge.
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/repomap-nudge.mjs\""
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs\""
           }
         ]
       }
@@ -87,10 +98,10 @@ reload) to pick it up.
 ### c. Verify
 
 ```bash
-echo '{"tool_input":{"pattern":"<Heading"}}' | node .claude/hooks/repomap-nudge.mjs
+echo '{"tool_input":{"pattern":"<Heading"}}' | node .claude/hooks/agentmap-nudge.mjs
 # → {"hookSpecificOutput":{...,"additionalContext":"This Grep looks like ..."}}
 
-echo '{"tool_input":{"pattern":"bg-white"}}'  | node .claude/hooks/repomap-nudge.mjs
+echo '{"tool_input":{"pattern":"bg-white"}}'  | node .claude/hooks/agentmap-nudge.mjs
 # → (no output — raw-string sweeps are left alone)
 ```
 
@@ -103,13 +114,25 @@ Runs detached + silenced (commit returns instantly) and **skips during
 rebase / merge / cherry-pick / bisect / revert** so it doesn't fire on every
 replayed commit.
 
+**Easiest way — use the built-in installer flag:**
+
+```bash
+agentmap --install-hooks
+```
+
+This copies `hooks/post-commit` to `.git/hooks/post-commit`, chmods it, ensures
+`.claude/agentmap.json` is in `.gitignore`, and prints the Claude Code
+`settings.json` PreToolUse snippet — all in one step.
+
+**Manual alternative:**
+
 ```bash
 cp hooks/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
-It auto-locates the builder: `./repomap.mjs` → `./scripts/repomap.mjs` →
-global `agentmap` → `npx --no-install agentmap`. If none is found it no-ops.
+It auto-locates the builder: `./agentmap.mjs` → `./scripts/agentmap.mjs` →
+global `agentmap` → `npx --no-install @raymondchins/agentmap`. If none is found it no-ops.
 
 ### Verify
 
@@ -117,7 +140,7 @@ global `agentmap` → `npx --no-install agentmap`. If none is found it no-ops.
 git commit --allow-empty -m "test: agentmap post-commit"
 # wait a moment for the background rebuild, then:
 git rev-parse --short HEAD
-node -e "console.log(require('./.claude/repomap.json').generatedSha)"
+node -e "console.log(require('./.claude/agentmap.json').generatedSha)"
 # the two SHAs should match
 ```
 
@@ -132,20 +155,20 @@ node -e "console.log(require('./.claude/repomap.json').generatedSha)"
 Drop this as `hooks/install.sh` in your repo (or run inline) to wire both at
 once from the repo root:
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+```sh
+#!/usr/bin/env sh
+set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 HOOKS="$ROOT/hooks"   # where these files live in your repo
 
 # PreToolUse nudge
 mkdir -p "$ROOT/.claude/hooks"
-cp "$HOOKS/repomap-nudge.mjs" "$ROOT/.claude/hooks/repomap-nudge.mjs"
+cp "$HOOKS/agentmap-nudge.mjs" "$ROOT/.claude/hooks/agentmap-nudge.mjs"
 
 # Merge the PreToolUse(Grep) hook into .claude/settings.json (needs jq).
 SETTINGS="$ROOT/.claude/settings.json"
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-CMD='node "$CLAUDE_PROJECT_DIR/.claude/hooks/repomap-nudge.mjs"'
+CMD='node "$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs"'
 jq --arg cmd "$CMD" '
   .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{
     matcher: "Grep",
@@ -158,9 +181,9 @@ cp "$HOOKS/post-commit" "$ROOT/.git/hooks/post-commit"
 chmod +x "$ROOT/.git/hooks/post-commit"
 
 # Ignore the derived map + first build
-grep -qxF ".claude/repomap.json" "$ROOT/.gitignore" 2>/dev/null \
-  || echo ".claude/repomap.json" >> "$ROOT/.gitignore"
-( cd "$ROOT" && { node repomap.mjs || npx agentmap; } ) >/dev/null 2>&1 || true
+grep -qxF ".claude/agentmap.json" "$ROOT/.gitignore" 2>/dev/null \
+  || echo ".claude/agentmap.json" >> "$ROOT/.gitignore"
+( cd "$ROOT" && { node agentmap.mjs || npx @raymondchins/agentmap; } ) || true
 
 echo "agentmap wired: PreToolUse nudge + post-commit refresh installed."
 ```
@@ -168,7 +191,7 @@ echo "agentmap wired: PreToolUse nudge + post-commit refresh installed."
 Run it:
 
 ```bash
-bash hooks/install.sh
+sh hooks/install.sh
 ```
 
 (The `jq` merge is idempotent-ish but appends — run once. Without `jq`, paste
@@ -178,7 +201,7 @@ the snippet from step 1b by hand.)
 
 ## How they reinforce each other
 
-1. You commit → **post-commit** rebuilds `.claude/repomap.json` in the
+1. You commit → **post-commit** rebuilds `.claude/agentmap.json` in the
    background → the map is always current.
 2. The agent reaches for a who-imports / reuse / `<Component>` grep →
    **PreToolUse nudge** fires → the agent runs `agentmap --any <query>` and

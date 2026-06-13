@@ -7,8 +7,8 @@ Real captures from running agentmap against a **154-file public Next.js repo (ve
 ### `--hubs` — what matters most, ranked by PageRank
 
 ```
-$ node repomap.mjs --hubs
-repomap: 154 files (sha 2becdb4)
+$ node agentmap.mjs --hubs
+agentmap: 154 files (sha 2becdb4)
 hubs (PageRank importance):
   lib/utils.ts (deg 52, pr 0.105171)
   lib/db/schema.ts (deg 21, pr 0.073744)
@@ -30,7 +30,7 @@ hubs (PageRank importance):
 ### `--symbols 8` — the 8 highest-value symbols in the codebase
 
 ```
-$ node repomap.mjs --symbols 8
+$ node agentmap.mjs --symbols 8
 top 8 ranked symbols (Aider-style):
   0.109902  lib/utils.ts → cn (FunctionDeclaration)
   0.036013  lib/types.ts → ChatMessage (TypeAliasDeclaration)
@@ -49,8 +49,8 @@ top 8 ranked symbols (Aider-style):
 ### `--map --tokens 400` — a token-budgeted repo digest you can paste into a prompt
 
 ```
-$ node repomap.mjs --map --tokens 400
-# repomap (154 files, sha 2becdb4) — focus: global, budget ~400 tok
+$ node agentmap.mjs --map --tokens 400
+# agentmap (154 files, sha 2becdb4) — focus: global, budget ~400 tok
 
 lib/utils.ts:
   cn (FunctionDeclaration)
@@ -86,7 +86,7 @@ lib/db/schema.ts:
 ### `--relates lib/db/schema.ts` — blast radius + transitively related files
 
 ```
-$ node repomap.mjs --relates lib/db/schema.ts
+$ node agentmap.mjs --relates lib/db/schema.ts
 relates: lib/db/schema.ts  (pr 0.073744)
 exports (14): user(VariableDeclaration), User(TypeAliasDeclaration), chat(VariableDeclaration), Chat(TypeAliasDeclaration), message(VariableDeclaration), DBMessage(TypeAliasDeclaration), vote(VariableDeclaration), Vote(TypeAliasDeclaration), document(VariableDeclaration), Document(TypeAliasDeclaration), suggestion(VariableDeclaration), Suggestion(TypeAliasDeclaration), stream(VariableDeclaration), Stream(TypeAliasDeclaration)
 imports (0): —
@@ -111,7 +111,7 @@ related (random-walk relevance):
 ### `--any cn` — one router that auto-resolves file vs. symbol vs. feature vs. live grep
 
 ```
-$ node repomap.mjs --any cn
+$ node agentmap.mjs --any cn
 [structure] 1 symbol, 0 feature match for "cn"
   lib/utils.ts → cn (FunctionDeclaration)
 ```

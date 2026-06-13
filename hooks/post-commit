@@ -1,15 +1,18 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # ============================================================================
 #  agentmap — git post-commit hook
 #
-#  Rebuilds .claude/repomap.json after each commit so the map an agent reads is
+#  Rebuilds .claude/agentmap.json after each commit so the map an agent reads is
 #  never stale. Runs in the background and detached so it never slows the commit.
 #
 #  Guards:
 #   - Skips during rebase / merge / cherry-pick / bisect (avoids rebuilding on
 #     every replayed commit — the map rebuilds once the operation finishes and
 #     you commit normally).
-#   - No-ops cleanly if Node or repomap.mjs is missing.
+#   - No-ops cleanly if Node or agentmap.mjs is missing.
+#   - nvm caveat: git hooks run in a non-login shell that does not source nvm
+#     (or ~/.bashrc / ~/.zshrc), so `node` may be absent on PATH. The
+#     `command -v node || exit 0` guard below no-ops cleanly in that case.
 #
 #  Install: copy to .git/hooks/post-commit and `chmod +x` it (see hooks/INSTALL.md).
 # ============================================================================
@@ -25,21 +28,26 @@ for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD BISECT_LOG RE
   fi
 done
 
-# Locate the builder: prefer a local repomap.mjs, else the installed `agentmap`.
+# Locate the builder: prefer a local agentmap.mjs, else the installed `agentmap`.
+# We cd "$ROOT" before running, so use RELATIVE paths — avoids word-splitting on
+# spaces in the repo path (POSIX sh has no arrays; quoting $RUNNER at invocation
+# would bundle cmd+args into one token and break argument passing).
 RUNNER=""
-if [ -f "$ROOT/repomap.mjs" ]; then
-  RUNNER="node $ROOT/repomap.mjs"
-elif [ -f "$ROOT/scripts/repomap.mjs" ]; then
-  RUNNER="node $ROOT/scripts/repomap.mjs"
+if [ -f "$ROOT/agentmap.mjs" ]; then
+  RUNNER="node ./agentmap.mjs"
+elif [ -f "$ROOT/scripts/agentmap.mjs" ]; then
+  RUNNER="node ./scripts/agentmap.mjs"
 elif command -v agentmap >/dev/null 2>&1; then
+  # Bare binary name — the installed binary is named `agentmap` (no scope).
   RUNNER="agentmap"
 elif command -v npx >/dev/null 2>&1; then
-  RUNNER="npx --no-install agentmap"
+  # Fetch form MUST use the scoped package name to avoid the unrelated agentmap@0.11.0.
+  RUNNER="npx --no-install @raymondchins/agentmap"
 else
   exit 0
 fi
 
-# Need Node for the .mjs paths.
+# Need Node for the .mjs paths; nvm users may not have it in hook PATH — no-op cleanly.
 case "$RUNNER" in
   node*) command -v node >/dev/null 2>&1 || exit 0 ;;
 esac

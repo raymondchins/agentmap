@@ -1,5 +1,5 @@
 node_modules/
-.claude/repomap.json
+.claude/agentmap.json
 *.log
 .DS_Store
 graphify-out/

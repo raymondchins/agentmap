@@ -53,22 +53,22 @@ provide it."
 # install the single dependency
 npm install
 
-# build + write .claude/repomap.json for the current repo
-node repomap.mjs
+# build + write .claude/agentmap.json for the current repo
+node agentmap.mjs
 # or
 npm run map
 
 # query without rebuilding (served from cache when fresh — see invariant below)
-node repomap.mjs --hubs                 # PageRank-ranked hub files
-node repomap.mjs --symbols 30           # Aider-style ranked symbols
-node repomap.mjs --map --tokens 4096    # token-budgeted ranked digest
-node repomap.mjs --map --focus lib/foo.ts
-node repomap.mjs --any PremiumCard      # router: file → symbol → feature → git grep
-node repomap.mjs --find useAuth         # exported-symbol search
-node repomap.mjs --relates lib/foo.ts   # blast radius + random-walk relevance
-node repomap.mjs --feature dashboard    # files in a Next.js app/ feature
-node repomap.mjs --features             # list features
-node repomap.mjs --print                # raw JSON
+node agentmap.mjs --hubs                 # PageRank-ranked hub files
+node agentmap.mjs --symbols 30           # Aider-style ranked symbols
+node agentmap.mjs --map --tokens 4096    # token-budgeted ranked digest
+node agentmap.mjs --map --focus lib/foo.ts
+node agentmap.mjs --any PremiumCard      # router: file → symbol → feature → git grep
+node agentmap.mjs --find useAuth         # exported-symbol search
+node agentmap.mjs --relates lib/foo.ts   # blast radius + random-walk relevance
+node agentmap.mjs --feature dashboard    # files in a Next.js app/ feature
+node agentmap.mjs --features             # list features
+node agentmap.mjs --print                # raw JSON
 ```
 
 agentmap runs in the **target repo's** working directory and expects a
@@ -78,7 +78,7 @@ files that `tsconfig.include` typically omits).
 ## The freshness invariant (do NOT break this)
 
 agentmap's contract with the agent loop is that **a query never returns a stale
-map**. The cache at `.claude/repomap.json` is served **only when it is provably
+map**. The cache at `.claude/agentmap.json` is served **only when it is provably
 current**, which means ALL of:
 
 1. `cached.generatedSha === git rev-parse --short HEAD` (map was built at the
@@ -93,7 +93,7 @@ reflects in-flight edits. This is what makes agentmap safe to wire into a
 
 When you touch caching, building, or the schema:
 
-- **Bump `SCHEMA_VERSION`** whenever the shape of `repomap.json` changes, so old
+- **Bump `SCHEMA_VERSION`** whenever the shape of `agentmap.json` changes, so old
   caches are invalidated instead of mis-read.
 - **Never** serve the cache on a dirty tree or a mismatched SHA. Don't add a
   "skip the freshness check for speed" flag — staleness is the one failure mode
@@ -105,7 +105,7 @@ When you touch caching, building, or the schema:
 ## Style
 
 - Plain ES modules, Node 18+, no build step. The published artifact is the
-  single `repomap.mjs` file (keep the `#!/usr/bin/env node` shebang at the top).
+  single `agentmap.mjs` file (keep the `#!/usr/bin/env node` shebang at the top).
 - Determinism matters: ranking must not depend on a PRNG or unstable iteration
   order. PageRank uses a fixed node order and converges by tolerance.
 - Prefer small, commented, hand-rolled helpers over pulling in a dependency.

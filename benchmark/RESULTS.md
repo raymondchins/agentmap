@@ -96,13 +96,38 @@ ts-morph-mappable repo.
 
 ## Reproduce
 
+To reproduce the **exact numbers** in the tables above, check out the pinned shas
+after cloning — the tables are captured snapshots at those commits, not at HEAD:
+
 ```bash
-git clone https://github.com/vercel/ai-chatbot /tmp/repo
-node /path/to/agentmap/benchmark/bench.mjs /tmp/repo     # or any repo path (defaults to cwd)
+# vercel/ai-chatbot — sha 2becdb4
+git clone https://github.com/vercel/ai-chatbot /tmp/ai-chatbot
+git -C /tmp/ai-chatbot checkout 2becdb4
+node /path/to/agentmap/benchmark/bench.mjs /tmp/ai-chatbot
+
+# colinhacks/zod — sha 912f0f5
+git clone https://github.com/colinhacks/zod /tmp/zod
+git -C /tmp/zod checkout 912f0f5
+node /path/to/agentmap/benchmark/bench.mjs /tmp/zod
+
+# shadcn-ui/taxonomy — sha 298a885
+git clone https://github.com/shadcn-ui/taxonomy /tmp/taxonomy
+git -C /tmp/taxonomy checkout 298a885
+node /path/to/agentmap/benchmark/bench.mjs /tmp/taxonomy
 ```
 
-Zero-dependency script (`node:child_process` / `node:path` only). Each run appends
+Zero-dependency script (`node:child_process` / `node:fs` / `node:path` only). Each run appends
 a machine-readable `@@JSON@@{...}` footer for CI/scripting.
+
+> **File count note:** the "Files" column in the summary table is the ts-morph-mapped
+> count (only files the AST pass successfully parsed). Scenario F's headline
+> "all N source files" is the raw `find` count of `.ts/.tsx/.js/.jsx` files —
+> these two numbers differ intentionally: unmappable files (e.g. plain JS configs,
+> type-only `.d.ts` shims) appear in `find` output but are skipped by ts-morph.
+>
+> **Tokenizer note:** all token figures use `chars / 4` (the same heuristic on both
+> sides), so the saved-% ratio is stable across tokenizer versions — the absolute
+> counts shift proportionally, the percentages do not.
 
 ## Environment
 

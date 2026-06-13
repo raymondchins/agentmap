@@ -16,11 +16,12 @@
 //          (defaults to cwd; agentmap itself is resolved next to this file)
 // ============================================================================
 import { execSync, execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = resolve(process.argv[2] || process.cwd());
-const REPOMAP = join(dirname(dirname(fileURLToPath(import.meta.url))), "repomap.mjs");
+const AGENTMAP = join(dirname(dirname(fileURLToPath(import.meta.url))), "agentmap.mjs");
 
 const tok = (s) => Math.ceil((s || "").length / 4); // chars/4 — see RESULTS.md caveat
 const pct = (base, tool) => base === 0 ? 0 : Math.round(((base - tool) / base) * 1000) / 10;
@@ -37,14 +38,14 @@ function sh(cmd) {
   catch (e) { return e.stdout ? e.stdout.toString() : ""; }
 }
 // run agentmap with given flags in the target repo
-function repomap(flags) {
-  try { return execFileSync("node", [REPOMAP, ...flags], { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }); }
+function agentmap(flags) {
+  try { return execFileSync("node", [AGENTMAP, ...flags], { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 }); }
   catch (e) { return e.stdout ? e.stdout.toString() : ""; }
 }
 
 // ---- derive targets from the repo's own map (so the bench is repo-agnostic) ----
 function jsonMap() {
-  const raw = repomap(["--print"]);
+  const raw = agentmap(["--print"]);
   try { return JSON.parse(raw.trim().split("\n").pop()); } catch { return { hubs: [], files: {}, rankedSymbols: [] }; }
 }
 const map = jsonMap();
@@ -70,12 +71,24 @@ const REUSE_PREFIX = SYM ? SYM.slice(0, Math.max(4, Math.ceil(SYM.length / 2))) 
 // =====================================================================
 function scenarioA() {
   if (!HUB_FILE) return null;
-  const base = sh(`cat ${JSON.stringify(HUB_FILE)}`)
-    + sh(`${SRC_GREP} -l ${JSON.stringify(HUB_FILE.split("/").pop())} .`);
-  const tool = repomap(["--any", HUB_FILE]);
+  // readFileSync avoids a shell subprocess (no injection surface for hostile filenames)
+  let fileContent = "";
+  try { fileContent = readFileSync(join(REPO, HUB_FILE), "utf8"); } catch {}
+  // grep for files importing the hub — argv form: no shell, repo paths cannot inject
+  const basename = HUB_FILE.split("/").pop();
+  let grepOut = "";
+  try {
+    grepOut = execFileSync("grep", [
+      "-rln", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx",
+      "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=.git",
+      basename, ".",
+    ], { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 });
+  } catch (e) { grepOut = e.stdout ? e.stdout.toString() : ""; }
+  const base = fileContent + grepOut;
+  const tool = agentmap(["--any", HUB_FILE]);
   return { name: `A. Understand file deps (${HUB_FILE})`,
     baselineCmd: `cat ${HUB_FILE} + grep -rln <basename> .`,
-    toolCmd: `repomap.mjs --any ${HUB_FILE}`,
+    toolCmd: `agentmap.mjs --any ${HUB_FILE}`,
     base: tok(base), tool: tok(tool), baseChars: base.length, toolChars: tool.length };
 }
 
@@ -86,11 +99,19 @@ function scenarioA() {
 // =====================================================================
 function scenarioB() {
   if (!SYM) return null;
-  const base = sh(`${SRC_GREP} ${JSON.stringify(SYM)} .`);
-  const tool = repomap(["--find", SYM]);
+  // argv form — SYM is passed as a literal argument, never interpolated into a shell string
+  let base = "";
+  try {
+    base = execFileSync("grep", [
+      "-rn", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx",
+      "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=.git",
+      SYM, ".",
+    ], { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 });
+  } catch (e) { base = e.stdout ? e.stdout.toString() : ""; }
+  const tool = agentmap(["--find", SYM]);
   return { name: `B. Find symbol (${SYM})`,
     baselineCmd: `grep -rn ${SYM} .`,
-    toolCmd: `repomap.mjs --find ${SYM}`,
+    toolCmd: `agentmap.mjs --find ${SYM}`,
     base: tok(base), tool: tok(tool), baseChars: base.length, toolChars: tool.length };
 }
 
@@ -100,14 +121,18 @@ function scenarioB() {
 //    agentmap: --map  (token-budgeted ranked symbol digest)
 // =====================================================================
 function scenarioC() {
+  // find uses no repo-controlled arguments (no injection surface)
   const tree = sh(`find . -type d \\( -name node_modules -o -name .next -o -name .git \\) -prune -o -type f \\( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \\) -print`);
   let cats = "";
-  for (const f of OVERVIEW_FILES) cats += sh(`cat ${JSON.stringify(f)}`);
+  // readFileSync: hub file paths come from agentmap's own map, but use safe FS read anyway
+  for (const f of OVERVIEW_FILES) {
+    try { cats += readFileSync(join(REPO, f), "utf8"); } catch {}
+  }
   const base = tree + cats;
-  const tool = repomap(["--map"]);
+  const tool = agentmap(["--map"]);
   return { name: `C. Repo overview (tree + cat ${OVERVIEW_FILES.length} hub files)`,
     baselineCmd: `find . -name '*.ts*' + cat ${OVERVIEW_FILES.length} hub files`,
-    toolCmd: `repomap.mjs --map`,
+    toolCmd: `agentmap.mjs --map`,
     base: tok(base), tool: tok(tool), baseChars: base.length, toolChars: tool.length };
 }
 
@@ -118,12 +143,16 @@ function scenarioC() {
 // =====================================================================
 function scenarioD() {
   if (!HUB_FILE || DEPENDENTS.length < 3) return null;
-  let cats = sh(`cat ${JSON.stringify(HUB_FILE)}`);
-  for (const f of DEPENDENTS) cats += sh(`cat ${JSON.stringify(f)}`);
-  const tool = repomap(["--relates", HUB_FILE]);
+  // readFileSync: safe FS read, no shell injection surface
+  let cats = "";
+  try { cats = readFileSync(join(REPO, HUB_FILE), "utf8"); } catch {}
+  for (const f of DEPENDENTS) {
+    try { cats += readFileSync(join(REPO, f), "utf8"); } catch {}
+  }
+  const tool = agentmap(["--relates", HUB_FILE]);
   return { name: `D. Blast radius of ${HUB_FILE} (read its ${DEPENDENTS.length} dependents)`,
     baselineCmd: `cat ${HUB_FILE} + cat its ${DEPENDENTS.length} dependents`,
-    toolCmd: `repomap.mjs --relates ${HUB_FILE}`,
+    toolCmd: `agentmap.mjs --relates ${HUB_FILE}`,
     base: tok(cats), tool: tok(tool), baseChars: cats.length, toolChars: tool.length };
 }
 
@@ -134,12 +163,15 @@ function scenarioD() {
 // =====================================================================
 function scenarioE() {
   if (FEATURE_FILES.length < 3) return null;
+  // readFileSync: safe FS read, no shell injection surface
   let cats = "";
-  for (const f of FEATURE_FILES) cats += sh(`cat ${JSON.stringify(f)}`);
-  const tool = repomap(["--map", "--focus", FEATURE_FOCUS]);
+  for (const f of FEATURE_FILES) {
+    try { cats += readFileSync(join(REPO, f), "utf8"); } catch {}
+  }
+  const tool = agentmap(["--map", "--focus", FEATURE_FOCUS]);
   return { name: `E. Understand "${FEATURE[0]}" feature (read its ${FEATURE_FILES.length} files)`,
     baselineCmd: `cat all ${FEATURE_FILES.length} files of feature "${FEATURE[0]}"`,
-    toolCmd: `repomap.mjs --map --focus ${FEATURE_FOCUS}`,
+    toolCmd: `agentmap.mjs --map --focus ${FEATURE_FOCUS}`,
     base: tok(cats), tool: tok(tool), baseChars: cats.length, toolChars: tool.length };
 }
 
@@ -149,14 +181,18 @@ function scenarioE() {
 //    agentmap: --map  (one ranked, token-budgeted digest)
 // =====================================================================
 function scenarioF() {
+  // find uses no repo-controlled args; output paths are then read via readFileSync (no shell)
   const list = sh(`find . -type d \\( -name node_modules -o -name .next -o -name .git \\) -prune -o -type f \\( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \\) -print`).split("\n").filter(Boolean);
   if (!list.length) return null;
   let cats = "";
-  for (const f of list) cats += sh(`cat ${JSON.stringify(f)}`);
-  const tool = repomap(["--map"]);
+  // list entries are "./rel/path" from find; resolve each against REPO
+  for (const f of list) {
+    try { cats += readFileSync(join(REPO, f), "utf8"); } catch {}
+  }
+  const tool = agentmap(["--map"]);
   return { name: `F. Map whole repo (vs dumping all ${list.length} source files)`,
     baselineCmd: `cat all ${list.length} source files`,
-    toolCmd: `repomap.mjs --map`,
+    toolCmd: `agentmap.mjs --map`,
     base: tok(cats), tool: tok(tool), baseChars: cats.length, toolChars: tool.length };
 }
 
@@ -167,15 +203,26 @@ function scenarioF() {
 // =====================================================================
 function scenarioG() {
   if (!REUSE_PREFIX) return null;
-  const grep = sh(`${SRC_GREP} -l ${JSON.stringify(REUSE_PREFIX)} .`);
+  // argv form — REUSE_PREFIX is derived from SYM (a symbol name), passed as a literal arg
+  let grep = "";
+  try {
+    grep = execFileSync("grep", [
+      "-rln", "--include=*.ts", "--include=*.tsx", "--include=*.js", "--include=*.jsx",
+      "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=.git",
+      REUSE_PREFIX, ".",
+    ], { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 });
+  } catch (e) { grep = e.stdout ? e.stdout.toString() : ""; }
   const candidates = grep.split("\n").filter(Boolean).slice(0, 8);
+  // readFileSync: safe FS read for candidate files
   let cats = "";
-  for (const f of candidates) cats += sh(`cat ${JSON.stringify(f)}`);
+  for (const f of candidates) {
+    try { cats += readFileSync(join(REPO, f), "utf8"); } catch {}
+  }
   const base = grep + cats;
-  const tool = repomap(["--find", REUSE_PREFIX]);
+  const tool = agentmap(["--find", REUSE_PREFIX]);
   return { name: `G. Reuse check "${REUSE_PREFIX}*" (grep + read ${candidates.length} candidates)`,
     baselineCmd: `grep -rl ${REUSE_PREFIX} + cat ${candidates.length} candidate files`,
-    toolCmd: `repomap.mjs --find ${REUSE_PREFIX}`,
+    toolCmd: `agentmap.mjs --find ${REUSE_PREFIX}`,
     base: tok(base), tool: tok(tool), baseChars: base.length, toolChars: tool.length };
 }
 
@@ -184,7 +231,7 @@ const rows = [scenarioA(), scenarioB(), scenarioC(), scenarioD(), scenarioE(), s
 
 // environment line
 const nodeV = process.version;
-const fileCount = map.fileCount ?? Object.keys(map.files || {}).length;
+const fileCount = map.fileCount ?? Object.keys(map.files || {}).length; // map.fileCount is always present now (--print includes it)
 let sha = "";
 try { sha = execSync("git rev-parse --short HEAD", { cwd: REPO, encoding: "utf8" }).trim(); } catch {}
 

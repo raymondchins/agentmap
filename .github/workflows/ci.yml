@@ -1,0 +1,36 @@
+name: CI
+
+# Run on every push and PR. The README badge resolves against this exact file
+# name (.github/workflows/ci.yml), so do not rename it.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # Deterministic install from the lockfile (ts-morph is the only dep).
+      - name: Install dependencies
+        run: npm ci
+
+      # Black-box suite — drives the real CLI as a subprocess against temp repos.
+      - name: Run tests
+        run: node --test test/
+
+      # Smoke: the binary builds + prints a hub map against agentmap's own repo.
+      - name: Smoke (--hubs on self)
+        run: node agentmap.mjs --hubs
