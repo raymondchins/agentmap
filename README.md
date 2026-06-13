@@ -24,6 +24,36 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 
 ---
 
+## Benchmark
+
+Every task you hand a coding agent starts with the same hidden step — *find the relevant code*.
+Here's what that step costs **with vs without agentmap**, across **7 real agent tasks on 3 public
+repos**. Every figure is captured tool output, reproducible at pinned shas (`node benchmark/bench.mjs <repo>`):
+
+| The lookup an agent does before every change | [ai-chatbot](https://github.com/vercel/ai-chatbot) · 154f | [zod](https://github.com/colinhacks/zod) · 367f | [taxonomy](https://github.com/shadcn-ui/taxonomy) · 125f |
+|------|:--:|:--:|:--:|
+| **Map the whole repo** | 99.3% · **133× fewer** | 99.8% · **646× fewer** | 98.1% · 52× fewer |
+| **Blast radius** — what breaks if I touch X | 99.2% · 132× fewer | 98.8% · 84× fewer | 98.5% · 68× fewer |
+| **Reuse check** — does this already exist? | 99.9% · **776× fewer** | 97.4% · 39× fewer | 99.3% · 135× fewer |
+| **Total — all 7 tasks** | **98.3%** | **99.2%** | **96.0%** |
+
+Overall that's **25–124× fewer tokens**, peaking at **646× on a whole-repo map** and **776× on a
+reuse-before-rebuild check** — the exact lookups an agent runs before every feature or bug fix.
+Every cell is a real captured number, not a projection.
+
+**Speed:** a cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm cached query
+returns in **~0.1s** (the lazy-loaded query path added in 0.2.2) — so the agent has a ranked
+answer back before it would have finished opening the first handful of files.
+
+Honest notes: the win scales with repo size — a *trivial single-file* lookup can cost **more**
+than `cat`+`grep` (taxonomy showed −313% on that one task; we leave it in), and finding a *tiny*
+symbol in a library saves less (zod's find-symbol task: 75.9%, still 4× fewer). Numbers measure
+**context-token volume**, not answer quality or wall-clock; token est = `chars / 4` on both sides.
+
+Full per-scenario tables and all caveats: **[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
+
+---
+
 ## Why it's different
 
 Most "repo context" tools are a photocopy: they dump your repository (or a slice of it) into
@@ -114,29 +144,6 @@ it by hand:
 
 That's the "forced to use it" in the tagline: the map stays current on its own, and the
 agent is steered to it the moment it reaches for a dependency-shaped grep.
-
----
-
-## Benchmark
-
-What does "~98% fewer tokens" actually buy you? Your agent gets the same understanding of a
-codebase for a tiny fraction of the context it'd normally burn opening and grepping files — so
-runs are cheaper, answers come back faster, and far more of the context window is left for the
-real work.
-
-Measured across **7 agent tasks on 3 real public repos** — reproducible with `node benchmark/bench.mjs <repo>`:
-
-| Repo | Files | Tokens saved |
-|------|------:|-------------:|
-| [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) | 154 | **98.3%** |
-| [colinhacks/zod](https://github.com/colinhacks/zod) | 367 | **99.2%** |
-| [shadcn-ui/taxonomy](https://github.com/shadcn-ui/taxonomy) | 125 | **96.0%** |
-
-Per-task peaks (real, across the three repos): **whole-repo map 99.8%**, **reuse-before-rebuild lookup 99.9%**, **blast-radius 99.2%**, **find-symbol 99%**. Cold build (parse + PageRank + symbol graph) **~1.2s**; warm cached query **~0.2s**.
-
-Honest notes: the win scales with repo size — a *trivial single-file* `--any` lookup can actually cost **more** than `cat`+`grep` (taxonomy showed −313% on that one task; we leave it in). Numbers measure **context-token volume**, not end-to-end retrieval accuracy. Token est = `chars / 4`, applied to both sides.
-
-Full methodology, per-repo tables, and all caveats: **[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
 
 ---
 
