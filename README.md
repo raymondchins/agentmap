@@ -27,41 +27,46 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 ## Benchmark
 
 Every task you hand a coding agent starts with the same hidden step — *find the relevant code*.
-Here's what that step costs **with vs without agentmap**, across **7 real agent tasks on 3 public
-repos**. Every figure is captured tool output, reproducible at pinned shas (`node benchmark/bench.mjs <repo>`):
+Here's the token cost of that step, **reading raw files vs querying agentmap**, on a real 154-file
+Next.js app ([vercel/ai-chatbot](https://github.com/vercel/ai-chatbot)). Every figure is captured
+tool output (`node benchmark/bench.mjs <repo>` at the pinned sha):
 
 <table width="100%">
 <thead>
 <tr>
-<th align="left">Lookup the agent runs first</th>
-<th align="center"><a href="https://github.com/vercel/ai-chatbot">ai-chatbot</a></th>
-<th align="center"><a href="https://github.com/colinhacks/zod">zod</a></th>
-<th align="center"><a href="https://github.com/shadcn-ui/taxonomy">taxonomy</a></th>
+<th align="left">The question the agent has to answer first</th>
+<th align="right">Reading files</th>
+<th align="right">With agentmap</th>
+<th align="right">Saved</th>
 </tr>
 </thead>
 <tbody>
-<tr><td align="left"><b>Map the whole repo</b></td><td align="center">99.3% saved</td><td align="center">99.8% saved</td><td align="center">98.1% saved</td></tr>
-<tr><td align="left"><b>Blast radius</b></td><td align="center">99.2% saved</td><td align="center">98.8% saved</td><td align="center">98.5% saved</td></tr>
-<tr><td align="left"><b>Reuse check</b></td><td align="center">99.9% saved</td><td align="center">97.4% saved</td><td align="center">99.3% saved</td></tr>
-<tr><td align="left"><b>Total — all 7 tasks</b></td><td align="center"><b>98.3% saved</b></td><td align="center"><b>99.2% saved</b></td><td align="center"><b>96.0% saved</b></td></tr>
+<tr><td align="left">Where is this symbol defined?</td><td align="right">1,950</td><td align="right">20</td><td align="right">99%</td></tr>
+<tr><td align="left">Does a helper for this already exist? <i>(reuse)</i></td><td align="right">14,740</td><td align="right">19</td><td align="right">99.9%</td></tr>
+<tr><td align="left">What breaks if I change this file? <i>(blast radius)</i></td><td align="right">81,038</td><td align="right">616</td><td align="right">99.2%</td></tr>
+<tr><td align="left">What files make up this feature?</td><td align="right">6,121</td><td align="right">1,025</td><td align="right">83.3%</td></tr>
+<tr><td align="left">Give me a repo overview</td><td align="right">3,065</td><td align="right">1,127</td><td align="right">63.2%</td></tr>
+<tr><td align="left">Load the whole repo into context</td><td align="right">150,281</td><td align="right">1,127</td><td align="right">99.3%</td></tr>
+<tr><td align="left">What does this one file import?</td><td align="right">583</td><td align="right">517</td><td align="right">11.3%</td></tr>
+<tr><td align="left"><b>All 7 tasks combined</b></td><td align="right"><b>257,778</b></td><td align="right"><b>4,451</b></td><td align="right"><b>98.3%</b></td></tr>
 </tbody>
 </table>
 
-<sub>Tokens saved vs the agent reading raw files. <i>Blast radius</i> = what breaks if you touch a file · <i>Reuse check</i> = does it already exist before you build it.</sub>
+<sub>Context tokens the agent burns to answer each question — token est = chars/4, applied to both sides.</sub>
 
-In raw terms that's **25–124× fewer tokens** overall — up to **646×** on a whole-repo map and
-**776×** on a reuse-before-rebuild check, the exact lookups an agent runs before every feature or bug fix.
+That's the agent reaching the same answer on **58× fewer tokens** overall — and the pattern holds
+across [zod](https://github.com/colinhacks/zod) (367 files, **99.2%**) and
+[taxonomy](https://github.com/shadcn-ui/taxonomy) (125 files, **96.0%**), peaking at **646× fewer**
+on a single whole-repo map. Reproducible at pinned shas; full per-scenario tables in
+**[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
 
 **Speed:** a cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm cached query
-returns in **~0.1s** (the lazy-loaded query path added in 0.2.2) — so the agent has a ranked
-answer back before it would have finished opening the first handful of files.
+returns in **~0.1s** (the lazy-loaded path added in 0.2.2) — the agent has a ranked answer back
+before it would have finished opening the first handful of files.
 
-Honest notes: the win scales with repo size — a *trivial single-file* lookup can cost **more**
-than `cat`+`grep` (taxonomy showed −313% on that one task; we leave it in), and finding a *tiny*
-symbol in a library saves less (zod's find-symbol task: 75.9%, still 4× fewer). Numbers measure
-**context-token volume**, not answer quality or wall-clock; token est = `chars / 4` on both sides.
-
-Full per-scenario tables and all caveats: **[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
+Honest notes: the win scales with the work — the small rows above (63%, 11%) are the floor, and a
+*trivial single-file* lookup can even cost **more** than `cat`+`grep` (taxonomy's file-import task
+hit −313%; we leave it in). Numbers measure **context-token volume**, not answer quality or wall-clock.
 
 ---
 
