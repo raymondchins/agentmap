@@ -29,7 +29,7 @@ jobs:
 
       # Black-box suite — drives the real CLI as a subprocess against temp repos.
       - name: Run tests
-        run: node --test test/
+        run: node --test test/*.test.mjs
 
       # Smoke: the binary builds + prints a hub map against agentmap's own repo.
       - name: Smoke (--hubs on self)

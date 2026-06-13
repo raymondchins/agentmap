@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "map": "node agentmap.mjs",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=18"
