@@ -4,7 +4,7 @@
 
 # agentmap
 
-**The repo map your coding agent is _forced_ to use — ~98% fewer tokens to understand any codebase.**
+**The repo map your coding agent is _forced_ to use — ~98% fewer tokens to understand your TS/JS codebase.**
 
 A queryable, ranked code-relationship map for TypeScript/JavaScript repos that answers
 "understand the codebase" questions in **~98% fewer tokens on average** (up to **99.9%
