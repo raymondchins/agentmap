@@ -281,6 +281,53 @@ function identMul(ident, defineCount, mentioned) {
   return mul;
 }
 
+// Read baseUrl+paths from a tsconfig/jsconfig file. Returns null when absent.
+function readTsconfigAliasOpts(cfgPath) {
+  try {
+    const co = (JSON.parse(readFileSync(cfgPath, "utf8")) || {}).compilerOptions || {};
+    const out = {};
+    if (co.baseUrl) out.baseUrl = co.baseUrl;
+    if (co.paths) out.paths = co.paths;
+    if (!Object.keys(out).length) return null;
+    return out;
+  } catch { return null; }
+}
+
+// Collect package-level alias configs from tsconfig/jsconfig files in the repo.
+// Deepest-dir-first sort so nearestAliasConfig can pick the longest prefix match.
+function discoverPackageAliasConfigs(rootAbs, listed) {
+  const root = rootAbs.replace(/\\/g, "/");
+  const configs = [];
+  const cfgRels = listed.length
+    ? listed.filter((f) => /(^|\/)tsconfig\.json$/.test(f) || /(^|\/)jsconfig\.json$/.test(f))
+    : [];
+  for (const rel of cfgRels) {
+    const full = join(root, rel);
+    if (!existsSync(full)) continue;
+    const opts = readTsconfigAliasOpts(full);
+    if (!opts) continue;
+    configs.push({
+      dir: join(root, dirname(rel)).replace(/\\/g, "/"),
+      baseUrl: opts.baseUrl || ".",
+      paths: opts.paths || {},
+    });
+  }
+  configs.sort((a, b) => b.dir.length - a.dir.length);
+  return configs;
+}
+
+// Longest matching tsconfig dir wins (monorepo package boundary).
+function nearestAliasConfig(fromAbsDir, configs, rootAbs, rootOpts) {
+  const norm = fromAbsDir.replace(/\\/g, "/");
+  let best = null;
+  for (const c of configs) {
+    const d = c.dir;
+    if (norm === d || norm.startsWith(d + "/")) { best = c; break; } // configs sorted deepest-first
+  }
+  if (best) return best;
+  return { dir: rootAbs, baseUrl: rootOpts.baseUrl || ".", paths: rootOpts.paths || {} };
+}
+
 // Construct a ts-morph Project robustly: use tsconfig.json when present + valid;
 // else (missing / malformed / solution-style references that index 0 files) fall
 // back to broad source globs so the tool degrades gracefully instead of crashing.
@@ -296,11 +343,8 @@ function makeProject() {
     for (const cfg of ["tsconfig.json", "jsconfig.json"]) {
       try {
         if (!existsSync(cfg)) continue;
-        const co = (JSON.parse(readFileSync(cfg, "utf8")) || {}).compilerOptions || {};
-        const out = {};
-        if (co.baseUrl) out.baseUrl = co.baseUrl;
-        if (co.paths) out.paths = co.paths;
-        if (Object.keys(out).length) return out;
+        const opts = readTsconfigAliasOpts(cfg);
+        if (opts) return opts;
       } catch { /* ignore — proceed without paths */ }
     }
     return {};
@@ -329,6 +373,7 @@ function makeProject() {
   const loaded = new Set(project.getSourceFiles().map((s) => s.getFilePath()));
   const cwdp = process.cwd().replace(/\\/g, "/");
   const listed = sh("git ls-files --cached --others --exclude-standard").split("\n").filter(Boolean);
+  const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
   // `.vue` discovery: same channel as TS/JS (git ls-files when available, else
   // a broad glob fallback). We do NOT hand `.vue` straight to ts-morph (it is
   // not TS/JS). Instead, for each `.vue` file we read its `<script>` block via
@@ -390,7 +435,7 @@ function makeProject() {
     vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
     vueReal[`${cwdp}/${f}`] = true;
   }
-  return { project, vueMap, vueReal, aliasOpts };
+  return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs };
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +445,7 @@ function makeProject() {
 // ---------------------------------------------------------------------------
 function build() {
   const t0 = Date.now();
-  const { project, vueMap, vueReal, aliasOpts } = makeProject();
+  const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject();
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
   const cwd = process.cwd().replace(/\\/g, "/");
@@ -439,14 +484,15 @@ function build() {
     if (vueReal[`${abs}.vue`]) return rel(`${abs}.vue`);
     return null;
   };
-  // #3 fix: tsconfig/jsconfig baseUrl+paths alias resolution ("@/x", "~/x") for
-  // the side-effect/dynamic/require edges too. Static imports already resolve via
-  // ts-morph's getModuleSpecifierSourceFile(); without this, `import "@/lib/x"`,
-  // `import("@/lib/x")` and `require("@/lib/x")` silently formed NO edge.
+  // #3 fix + monorepo: tsconfig/jsconfig baseUrl+paths alias resolution ("@/x",
+  // "#/x", "~/x") for side-effect/dynamic/require edges AND static imports when
+  // ts-morph can't resolve (cwd tsconfig lacks package paths). Per importing
+  // file, use the nearest discovered tsconfig paths.
   const ROOTABS = process.cwd().replace(/\\/g, "/");
-  const aliasBase = aliasOpts.baseUrl ? joinPosix(ROOTABS, aliasOpts.baseUrl) : ROOTABS;
-  const aliasEntries = Object.entries(aliasOpts.paths || {});
-  const resolveAlias = (spec) => {
+  const resolveAlias = (spec, fromAbsDir) => {
+    const cfg = nearestAliasConfig(fromAbsDir, packageAliasConfigs, ROOTABS, aliasOpts);
+    const aliasBase = joinPosix(cfg.dir, cfg.baseUrl || ".");
+    const aliasEntries = Object.entries(cfg.paths || {});
     for (const [pat, targets] of aliasEntries) {
       const star = pat.indexOf("*");
       let sub = null;
@@ -466,7 +512,7 @@ function build() {
     return null;
   };
   const resolveSpec = (fromAbsDir, spec) => {
-    if (!spec.startsWith(".")) return resolveAlias(spec); // alias (baseUrl/paths) or null for non-relative
+    if (!spec.startsWith(".")) return resolveAlias(spec, fromAbsDir); // alias (baseUrl/paths) or null for non-relative
     // normalize fromAbsDir + spec into an absolute-ish posix path
     const join = (a, b) => {
       const parts = (a + "/" + b).split("/"); const st = [];
@@ -524,11 +570,16 @@ function build() {
         if (imp.getNamespaceImport()) names.push("*");
         addEdge(rel(t.getFilePath()), names.length ? names : ["*"]);
       } else {
-        // 6b: side-effect import (`import "./x"`) — no source file via ts-morph,
-        // but a relative specifier resolving in-project still counts as an edge.
+        // 6b: side-effect or alias import — ts-morph may not resolve when cwd
+        // tsconfig lacks package paths; resolveSpec uses nearest tsconfig paths.
         const spec = imp.getModuleSpecifierValue();
         const tp = resolveSpec(fromDir, spec);
-        if (tp) addEdge(tp, ["*"]);
+        if (tp) {
+          const names = imp.getNamedImports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
+          if (imp.getDefaultImport()) names.push("default");
+          if (imp.getNamespaceImport()) names.push("*");
+          addEdge(tp, names.length ? names : ["*"]);
+        }
       }
     }
     for (const exp of sf.getExportDeclarations()) {
