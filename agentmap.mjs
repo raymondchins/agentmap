@@ -64,6 +64,10 @@ const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore
 // Live content search for the --any fallback. `git grep` over tracked +
 // untracked files (skips gitignored paths like node_modules). Reads DISK, so
 // never stale. -F = fixed-string so literals like "bg-[#faf8f2]" aren't regex.
+// -i = case-insensitive BY DESIGN (discovery ergonomics, matches --find which
+// lowercases its query): a "content" hit may differ in case from the query as
+// typed, but every match is printed verbatim with file:line so the true casing
+// is always visible — results are a superset, never a falsified exact-case hit.
 // stderr ignored so "fatal: not a git repository" stays quiet in non-git repos.
 // Exclude sensitive files from the --untracked sweep so a local .env / key /
 // secrets file never gets scanned and surfaced (and via MCP fed to an LLM).
@@ -88,8 +92,11 @@ const dirtyCount = () =>
   // listed individually (default "all" folds it to "?? newdir/" and the
   // extension regex misses it → a STALE cache would be served).
   sh("git status --porcelain --untracked-files=all").split("\n").filter(Boolean).filter((l) => {
+    const xy = l.slice(0, 2);                            // porcelain status code (XY)
     let p = l.slice(3);                                  // strip "XY " status prefix
-    if (p.includes(" -> ")) p = p.split(" -> ").pop();   // rename: keep the new path
+    // only rename/copy entries use the ` old -> new ` form — gating on the status
+    // code avoids falsely splitting a plain file whose NAME contains " -> ".
+    if (/[RC]/.test(xy) && p.includes(" -> ")) p = p.split(" -> ").pop(); // rename/copy: keep new path
     p = p.replace(/^"|"$/g, "");                         // unquote space/special paths
     return /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|vue)$/.test(p);
   }).length;
@@ -107,8 +114,13 @@ const SRC_EXT = /\.(ts|tsx|mts|cts|jsx|js|mjs|cjs|vue)$/;
 function sourceFingerprint() {
   try {
     const entries = [];
-    const walk = (dir) => {
-      for (const name of readdirSync(dir)) {
+    const walk = (dir, depth) => {
+      if (depth > 40) return; // depth cap — don't fully walk a pathologically deep tree
+      // per-directory try/catch: a single permission-denied subdir must NOT abort
+      // the WHOLE walk (that would return "" and silently disable caching) — skip
+      // the unreadable dir and keep going so the fingerprint stays usable.
+      let names; try { names = readdirSync(dir); } catch { return; }
+      for (const name of names) {
         if (name === "node_modules" || name === ".git" || name === ".next") continue;
         const full = dir + "/" + name;
         let st;
@@ -118,11 +130,11 @@ function sourceFingerprint() {
         // recursion / stack overflow.
         try { st = lstatSync(full); } catch { continue; }
         if (st.isSymbolicLink()) continue;
-        if (st.isDirectory()) walk(full);
+        if (st.isDirectory()) walk(full, depth + 1);
         else if (SRC_EXT.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
       }
     };
-    walk(".");
+    walk(".", 0);
     entries.sort();
     return createHash("sha1").update(entries.join("\n")).digest("hex");
   } catch { return ""; }
@@ -347,19 +359,21 @@ function makeProject() {
     ]);
     // Non-git `.vue` fallback: walk the tree like sourceFingerprint() does.
     try {
-      const walk = (dir) => {
-        for (const name of readdirSync(dir)) {
+      const walk = (dir, depth) => {
+        if (depth > 40) return; // depth cap, matching sourceFingerprint()
+        let names; try { names = readdirSync(dir); } catch { return; } // skip unreadable dir, don't abort the whole walk
+        for (const name of names) {
           if (name === "node_modules" || name === ".git" || name === ".next") continue;
           const full = dir + "/" + name;
           // lstatSync (NOT statSync) + skip symlinks, matching sourceFingerprint():
           // a circular symlink would otherwise recurse until the stack overflows.
           let st; try { st = lstatSync(full); } catch { continue; }
           if (st.isSymbolicLink()) continue;
-          if (st.isDirectory()) walk(full);
+          if (st.isDirectory()) walk(full, depth + 1);
           else if (name.endsWith(".vue")) vueFiles.push(full.replace(/^\.\//, ""));
         }
       };
-      walk(".");
+      walk(".", 0);
     } catch { /* ignore — proceed without Vue */ }
   }
   // Build the virtual→real map and register each `<script>` block as a virtual
@@ -376,7 +390,7 @@ function makeProject() {
     vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
     vueReal[`${cwdp}/${f}`] = true;
   }
-  return { project, vueMap, vueReal };
+  return { project, vueMap, vueReal, aliasOpts };
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +400,7 @@ function makeProject() {
 // ---------------------------------------------------------------------------
 function build() {
   const t0 = Date.now();
-  const { project, vueMap, vueReal } = makeProject();
+  const { project, vueMap, vueReal, aliasOpts } = makeProject();
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
   const cwd = process.cwd().replace(/\\/g, "/");
@@ -408,8 +422,51 @@ function build() {
   // /index.*. Returns the rel key or null. Powers side-effect (6b) + dynamic
   // import()/require() (6c) edges that ts-morph's specifier resolution skips.
   const RES_EXT = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+  // posix-join that collapses "" / "." / ".." segments (no fs access).
+  const joinPosix = (a, b) => {
+    const parts = (a + "/" + b).split("/"); const st = [];
+    for (const seg of parts) { if (seg === "" || seg === ".") continue; if (seg === "..") st.pop(); else st.push(seg); }
+    return (a.startsWith("/") ? "/" : "") + st.join("/");
+  };
+  // resolve an absolute-ish path to an in-project source file, honoring
+  // extensionless + /index.* + .vue resolution (shared by relative + alias paths).
+  const tryResolveAt = (abs) => {
+    if (vueReal[abs]) return rel(abs);
+    let sf = project.getSourceFile(abs);
+    if (!sf) for (const e of RES_EXT) { sf = project.getSourceFile(`${abs}.${e}`); if (sf) break; }
+    if (!sf) for (const e of RES_EXT) { sf = project.getSourceFile(`${abs}/index.${e}`); if (sf) break; }
+    if (sf) return rel(sf.getFilePath());
+    if (vueReal[`${abs}.vue`]) return rel(`${abs}.vue`);
+    return null;
+  };
+  // #3 fix: tsconfig/jsconfig baseUrl+paths alias resolution ("@/x", "~/x") for
+  // the side-effect/dynamic/require edges too. Static imports already resolve via
+  // ts-morph's getModuleSpecifierSourceFile(); without this, `import "@/lib/x"`,
+  // `import("@/lib/x")` and `require("@/lib/x")` silently formed NO edge.
+  const ROOTABS = process.cwd().replace(/\\/g, "/");
+  const aliasBase = aliasOpts.baseUrl ? joinPosix(ROOTABS, aliasOpts.baseUrl) : ROOTABS;
+  const aliasEntries = Object.entries(aliasOpts.paths || {});
+  const resolveAlias = (spec) => {
+    for (const [pat, targets] of aliasEntries) {
+      const star = pat.indexOf("*");
+      let sub = null;
+      if (star === -1) { if (spec === pat) sub = ""; else continue; }
+      else {
+        const pre = pat.slice(0, star), suf = pat.slice(star + 1);
+        if (spec.length < pre.length + suf.length || !spec.startsWith(pre) || !spec.endsWith(suf)) continue;
+        sub = spec.slice(pre.length, spec.length - suf.length);
+      }
+      for (const tRaw of (Array.isArray(targets) ? targets : [targets])) {
+        const tStar = tRaw.indexOf("*");
+        const candidate = tStar === -1 ? tRaw : tRaw.slice(0, tStar) + sub + tRaw.slice(tStar + 1);
+        const hit = tryResolveAt(joinPosix(aliasBase, candidate));
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
   const resolveSpec = (fromAbsDir, spec) => {
-    if (!spec.startsWith(".")) return null; // only relative, in-project specifiers
+    if (!spec.startsWith(".")) return resolveAlias(spec); // alias (baseUrl/paths) or null for non-relative
     // normalize fromAbsDir + spec into an absolute-ish posix path
     const join = (a, b) => {
       const parts = (a + "/" + b).split("/"); const st = [];
@@ -438,7 +495,9 @@ function build() {
   for (const sf of sourceFiles) {
     const path = rel(sf.getFilePath());
     if (excluded(path)) continue;
+    try {
     const fromDir = sf.getDirectoryPath().replace(/\\/g, "/");
+    const reExports = new Set(); // #2: names that are pass-through re-exports, not real uses
     // exports, remembering which exported name was the file's DEFAULT export so
     // default-import edges can later resolve "default" → the real symbol name.
     let defaultExportName = null;
@@ -475,7 +534,11 @@ function build() {
     for (const exp of sf.getExportDeclarations()) {
       if (exp.isTypeOnly()) continue; // type-only re-exports excluded from edges
       const t = exp.getModuleSpecifierSourceFile();
-      if (t) addEdge(rel(t.getFilePath()), exp.getNamedExports().filter((n) => !n.isTypeOnly()).map((n) => n.getName()));
+      if (t) {
+        const names = exp.getNamedExports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
+        addEdge(rel(t.getFilePath()), names);   // keep the FILE-level edge (barrel depends on origin)
+        for (const n of names) reExports.add(n); // #2: mark as re-export so rankSymbols won't count it as a reference
+      }
     }
     // 6c: dynamic import("./x") and require("./x") with relative, in-project
     // string-literal specifiers → edge with names ["*"]. Prefilter on raw text
@@ -494,9 +557,15 @@ function build() {
     }
     const imports = Object.keys(importedSymbols);
     for (const tp of imports) (dependents[tp] ??= []).push(path);
-    files[path] = { exports, imports, importedSymbols, defaultExportName };
+    files[path] = { exports, imports, importedSymbols, defaultExportName, reExports: [...reExports] };
     const feat = featureOf(path);
     if (feat) (features[feat] ??= []).push(path);
+    } catch (e) {
+      // #1 fix: a single pathological file (malformed import specifier, ts-morph
+      // edge case) must NOT abort the whole map — skip it + warn, preserving the
+      // graceful-degradation contract agentmap advertises.
+      process.stderr.write(`# agentmap: skipped ${path} (parse error: ${e?.message ?? e})\n`);
+    }
   }
   // 7: resolve default-import edges. A default import was recorded literally as
   // "default"; rankSymbols skips "default", so default-exported symbols (the
@@ -564,10 +633,12 @@ function rankSymbols(files, focus) {
       definition.set(`${p}|${e.name}`, { file: p, name: e.name, kind: e.kind });
     }
   }
-  for (const [p, f] of Object.entries(files))
+  for (const [p, f] of Object.entries(files)) {
+    const reExp = new Set(f.reExports || []); // #2: pass-through re-exports aren't real references
     for (const tp of f.imports)
       for (const name of f.importedSymbols[tp] || [])
-        if (name !== "*" && name !== "default") getOrSet(references, name, () => []).push(p);
+        if (name !== "*" && name !== "default" && !reExp.has(name)) getOrSet(references, name, () => []).push(p);
+  }
 
   // mentioned idents from focus files' exports + their basenames
   let mentioned = null;
@@ -1157,11 +1228,19 @@ else if (has("--any")) {
         // omitted. Otherwise `continue` so smaller lower-ranked files can still
         // fill the remaining budget (don't `break` on the first overflow).
         if (first && budget > 0) {
-          let partial = capped;
-          while (partial.length > 1) {
-            partial = partial.slice(0, partial.length - 1);
+          // #6 fix: try progressively fewer symbols DOWN TO ONE. The old
+          // `while (partial.length > 1)` sliced before testing and never tried
+          // the single-symbol block, so a tiny --tokens could emit NOTHING for
+          // the top file despite the "never wholly omitted" intent. If even one
+          // symbol overflows the budget, nothing fits (correct) — but we now try.
+          for (let k = capped.length - 1; k >= 1; k--) {
+            const partial = capped.slice(0, k);
             const pt = tokEst(lineOf(partial));
-            if (used + pt <= budget) { used += pt; shownFiles.push({ file, symbols: partial.map((s) => ({ name: s.name, kind: s.kind })) }); break; }
+            if (used + pt <= budget) {
+              used += pt;
+              shownFiles.push({ file, symbols: partial.map((s) => ({ name: s.name, kind: s.kind })) });
+              break;
+            }
           }
           first = false;
         }
