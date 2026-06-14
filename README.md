@@ -192,8 +192,8 @@ npx @raymondchins/agentmap --install-skill
 ```
 
 Copies packaged **SKILL.md** files and a **Cursor rule** (`.cursor/rules/agentmap.mdc`,
-`alwaysApply: true`) into the current repo or global agent directories. Platform paths
-match [graphify](https://github.com/raymondchins/graphify) conventions. Options:
+`alwaysApply: true`) into the current repo or global agent directories. Paths follow
+each platform's official skill-directory conventions. Options:
 
 ```bash
 agentmap --install-skill --platform cursor           # Cursor rule only (project)
