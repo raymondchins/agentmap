@@ -134,16 +134,30 @@ function sourceFingerprint() {
 // the richer one: prefer `setup` block if present, else the normal block.
 function extractVueScripts(text) {
   const blocks = [];
-  const re = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi;
+  // Open-tag matcher is QUOTE-AWARE: attribute values may legitimately contain
+  // `>` (e.g. `<script setup lang="ts" generic="T extends Record<string, unknown>">`
+  // — a common Vue 3 idiom for typed generic components). We require all
+  // attributes to be either bare (`setup`) or quoted (`name="value"` or
+  // `name='value'`), which matches valid SFC syntax. Bareword and unquoted forms
+  // are intentionally not matched because they're not valid HTML and would
+  // almost certainly indicate a parsing bug we want to surface, not silently
+  // misparse.
+  const re = /<script(\s+[a-zA-Z][\w-]*(\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*\/?>/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
-    const attrs = m[1] || "";
-    const body = m[2] || "";
+    const attrs = (m[0].slice(7, -1) || "").trim(); // strip <script…> wrapper
+    // find body: text after the opening tag up to </script>
+    const openEnd = m.index + m[0].length;
+    const closeStart = text.toLowerCase().indexOf("</script>", openEnd);
+    if (closeStart === -1) break; // unterminated — stop scanning
+    const body = text.slice(openEnd, closeStart);
     // external script reference → skip (the target file is indexed directly).
     if (/\bsrc\s*=\s*["'][^"']+["']/i.test(attrs)) continue;
+    if (!body.trim()) continue; // empty body (e.g. <script/>) — not useful
     const setup = /\bsetup\b/i.test(attrs);
-    const lang = (attrs.match(/\blang\s*=\s*["']([^["']+)["']/i) || [])[1] || "js";
+    const lang = (attrs.match(/\blang\s*=\s*["']([^"']+)["']/i) || [])[1] || "js";
     blocks.push({ lang: lang.toLowerCase(), setup, text: body });
+    re.lastIndex = closeStart + "</script>".length; // resume after </script>
   }
   if (!blocks.length) return null;
   // Prefer a setup block (the modern idiom) when present; else the plain block.
@@ -380,18 +394,19 @@ function build() {
     };
     const baseAbs = join(fromAbsDir, spec);
     const tryGet = (abs) => { const sf = project.getSourceFile(abs); return sf ? sf : null; };
-    // Vue SFC: `import X from "./C.vue"` (exact) OR extensionless `import X
-    // from "./C"` resolving to a `.vue` file. ts-morph never indexes `.vue`
-    // directly, so we consult vueReal (populated by makeProject) and return
-    // the REAL `.vue` path — build() will then see UserCard.vue as the target.
+    // Vue SFC: `import X from "./C.vue"` (exact) ALWAYS wins — the user wrote
+    // `.vue` explicitly, so we honor that. This check must stay BEFORE the
+    // TS/JS loop.
     if (vueReal[baseAbs]) return rel(baseAbs);
-    // Extensionless specifier that resolves to a `.vue` file: try appending.
-    const vueAbs = `${baseAbs}.vue`;
-    if (vueReal[vueAbs]) return rel(vueAbs);
     let sf = tryGet(baseAbs);
     if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}.${e}`); if (sf) break; }
     if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}/index.${e}`); if (sf) break; }
-    return sf ? rel(sf.getFilePath()) : null;
+    // TS/JS SHADOW WINS: when a same-name .ts/.js exists, the extensionless
+    // `import "./C"` resolves to it (TS/JS-first priority is preserved). Only
+    // fall through to `.vue` as a last resort, when no TS/JS shadow exists.
+    if (sf) return rel(sf.getFilePath());
+    if (vueReal[`${baseAbs}.vue`]) return rel(`${baseAbs}.vue`);
+    return null;
   };
 
   const sourceFiles = project.getSourceFiles();
