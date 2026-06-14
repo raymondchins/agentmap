@@ -7,6 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **`--install-skill` platform expansion** — `codex`, `opencode`, `gemini`, `antigravity`, `copilot` with paths aligned to each platform's documented skill directories (OpenCode, Antigravity, etc.).
+- **`--install-docs`** — merge always-on `GEMINI.md` / `AGENTS.md` guidance (marked `<!-- agentmap:begin/end -->` blocks), Gemini CLI `BeforeTool` hook wiring in `.gemini/settings.json`, and OpenCode `.opencode/plugins/agentmap-nudge.js` (advisory log on structural grep/bash).
 
 ### Changed
 - **`--platform all` default set** — now installs claude, cursor, codex, opencode, gemini, antigravity, copilot. Legacy `agents` is opt-in (`--platform agents`). Global `all` no longer writes `~/.agents/skills/` by default; use `antigravity` (`~/.gemini/config/skills/`) or explicit `agents` for v0.7.0 `~/.agents/` behavior.

@@ -210,7 +210,23 @@ agentmap --install-skill --dry-run                   # preview paths, no writes
 
 `--platform all` installs: claude, cursor, codex, opencode, gemini, antigravity, copilot (not legacy `agents`).
 
-Pair with `--install-hooks` (Claude Code) or `--mcp` (Cursor MCP).
+Pair with `--install-hooks` (Claude Code), `--install-docs` (Gemini / Codex / OpenCode always-on guidance), or `--mcp` (Cursor MCP).
+
+### Always-on docs & hooks (`--install-docs`)
+
+Skill files are on-demand; some agents also support **always-on** project instructions and hooks:
+
+```bash
+npx @raymondchins/agentmap --install-docs
+```
+
+| `--platform` | Project | Global |
+|--------------|---------|--------|
+| `gemini` | `GEMINI.md` + `.gemini/settings.json` BeforeTool nudge | `~/.gemini/GEMINI.md` |
+| `codex` | `AGENTS.md` (merge-safe `<!-- agentmap:begin/end -->` block) | `~/.codex/AGENTS.md` |
+| `opencode` | `AGENTS.md` + `.opencode/plugins/agentmap-nudge.js` | `~/.config/opencode/AGENTS.md` |
+
+`--platform all` (default) installs gemini + codex + opencode. Codex and OpenCode share one repo-root `AGENTS.md` on project install (single merged block). Does not modify existing non-agentmap `AGENTS.md` content outside the marked block.
 
 ---
 
@@ -510,6 +526,7 @@ $ node agentmap.mjs --print | jq '.hubs[0]'
 | `--install-hooks` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap.json` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). Exit 0 on success, stderr + exit 1 on failure. |
 | `--hook-status` | Report whether the post-commit hook, PreToolUse nudge, and `.gitignore` entry are installed (no writes). |
 | `--install-skill` | Install packaged agent skill + Cursor rule (`--platform claude\|cursor\|codex\|opencode\|gemini\|antigravity\|copilot\|agents\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
+| `--install-docs` | Merge always-on guidance + hooks (`--platform gemini\|codex\|opencode\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
 | `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can call every flag as a first-class tool. |
 
 **Exit-code contract:** `0` = success / match / help / version; `1` = query returned zero results (`--any`, `--find`, `--relates`, `--feature` with no match); `2` = usage error (missing required arg, unknown flag). Any token starting with `-` that matches no known flag prints an error to stderr and exits 2.
