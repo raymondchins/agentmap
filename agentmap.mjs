@@ -846,6 +846,60 @@ function installHooks({ dryRun = false } = {}) {
   console.log("\nDone — the map auto-refreshes on commit, and greps are nudged to agentmap first.");
 }
 
+// Marker string baked into hooks/post-commit — used by --hook-status to detect our
+// hook even when chained with other tools in the same file.
+const POST_COMMIT_MARKER = "agentmap — git post-commit hook";
+const NUDGE_REL = ".claude/hooks/agentmap-nudge.mjs";
+const MAP_IGNORE_LINE = ".claude/agentmap/";
+
+function hookStatus() {
+  const gitDir = sh("git rev-parse --git-dir");
+  if (!gitDir) {
+    console.log("not a git repository — run inside the repo you want to check");
+    return;
+  }
+  const hooksDir = `${gitDir}/hooks`;
+  const postCommitPath = `${hooksDir}/post-commit`;
+
+  let postCommit = "not installed";
+  if (existsSync(postCommitPath)) {
+    const body = readFileSync(postCommitPath, "utf8");
+    postCommit = body.includes(POST_COMMIT_MARKER) ? "installed" : "not installed (hook exists but agentmap not found)";
+  }
+
+  let nudge = existsSync(NUDGE_REL) ? "installed" : "not installed";
+
+  let grepWire = "not wired";
+  let bashWire = "not wired";
+  const settingsPath = ".claude/settings.json";
+  if (existsSync(settingsPath)) {
+    try {
+      const settings = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath);
+      const entries = settings.hooks?.PreToolUse || [];
+      const has = (matcher) => entries.some(
+        (e) => e?.matcher === matcher && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
+      );
+      grepWire = has("Grep") ? "wired" : "not wired";
+      bashWire = has("Bash") ? "wired" : "not wired";
+    } catch {
+      grepWire = "not wired (invalid settings.json)";
+      bashWire = "not wired (invalid settings.json)";
+    }
+  }
+
+  let gitignore = "missing entry";
+  if (existsSync(".gitignore")) {
+    const ok = readFileSync(".gitignore", "utf8").split(/\r?\n/).some((l) => l.trim() === MAP_IGNORE_LINE);
+    gitignore = ok ? "ok" : "missing entry";
+  }
+
+  console.log(`post-commit: ${postCommit}`);
+  console.log(`nudge (${NUDGE_REL}): ${nudge}`);
+  console.log(`PreToolUse(Grep): ${grepWire}`);
+  console.log(`PreToolUse(Bash): ${bashWire}`);
+  console.log(`.gitignore (${MAP_IGNORE_LINE}): ${gitignore}`);
+}
+
 // ---------------------------------------------------------------------------
 // --setup-mcp: register the agentmap MCP server in the global configs of
 // MCP-capable IDEs that aren't Claude Code (which uses --install-hooks instead).
@@ -927,7 +981,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--setup-mcp", "--mcp",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
 ]);
@@ -964,6 +1018,7 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
+  --hook-status          report whether agentmap git/nudge wiring is installed
   --setup-mcp [--dry-run]
                        configure MCP server for OpenCode & Antigravity IDE
                        (--dry-run = preview, no writes)
@@ -1001,6 +1056,11 @@ if (has("--mcp")) {
 else if (has("--install-hooks")) {
   try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+}
+// --hook-status: report post-commit / nudge / settings wiring (no writes).
+else if (has("--hook-status")) {
+  try { hookStatus(); process.exit(0); }
+  catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(1); }
 }
 // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
 else if (has("--setup-mcp")) {
