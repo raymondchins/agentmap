@@ -13,7 +13,7 @@
 //  Near-zero deps (ts-morph only). Runs in the target repo's cwd.
 //  Algorithm credit: Aider's repo map (Apache-2.0) — github.com/Aider-AI/aider
 // ============================================================================
-import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, statSync, chmodSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, statSync, lstatSync, chmodSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -61,9 +61,21 @@ const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore
 // untracked files (skips gitignored paths like node_modules). Reads DISK, so
 // never stale. -F = fixed-string so literals like "bg-[#faf8f2]" aren't regex.
 // stderr ignored so "fatal: not a git repository" stays quiet in non-git repos.
+// Exclude sensitive files from the --untracked sweep so a local .env / key /
+// secrets file never gets scanned and surfaced (and via MCP fed to an LLM).
+// Mix of path globs (env/key/cert/SSH-key shapes) and case-insensitive name
+// matches (anything *secret* / *credential* / *.password*). These are pathspecs,
+// not regexes — git applies them as exclusions to the search tree.
+const SENSITIVE_EXCLUDES = [
+  ":!.env", ":!.env.*", ":!**/.env", ":!**/.env.*",
+  // also any *.env (e.g. prod.env, .env.local already covered above) at any depth
+  ":!*.env", ":!**/*.env",
+  ":!*.pem", ":!*.key", ":!*.p12", ":!*.pfx", ":!*.crt", ":!id_rsa*",
+  ":(exclude,icase)*secret*", ":(exclude,icase)*credential*", ":(exclude,icase)*.password*",
+];
 const contentSearch = (q) => {
   try {
-    return execFileSync("git", ["grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap.json"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim();
+    return execFileSync("git", ["grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap/", ...SENSITIVE_EXCLUDES], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim();
   } catch { return ""; }
 };
 const currentSha = () => sh("git rev-parse --short HEAD");
@@ -96,7 +108,12 @@ function sourceFingerprint() {
         if (name === "node_modules" || name === ".git" || name === ".next") continue;
         const full = dir + "/" + name;
         let st;
-        try { st = statSync(full); } catch { continue; }
+        // lstatSync (NOT statSync) so a symlink reports as a symlink instead of
+        // its target. Symlinked entries are SKIPPED entirely — never recursed
+        // into, never stat'd through — so a circular symlink can't cause infinite
+        // recursion / stack overflow.
+        try { st = lstatSync(full); } catch { continue; }
+        if (st.isSymbolicLink()) continue;
         if (st.isDirectory()) walk(full);
         else if (SRC_EXT.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
       }
@@ -517,9 +534,9 @@ function build() {
     fingerprint: sha ? undefined : sourceFingerprint(),
     hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), files,
   };
-  mkdirSync(".claude", { recursive: true });
+  mkdirSync(".claude/agentmap", { recursive: true });
   // Atomic write: tmp + rename so a concurrent background rebuild can never
-  // expose a torn/truncated agentmap.json to a reader.
+  // expose a torn/truncated map.json to a reader.
   const tmp = MAP + ".tmp";
   writeFileSync(tmp, JSON.stringify(out));
   renameSync(tmp, MAP);
@@ -623,9 +640,13 @@ function rankSymbols(files, focus) {
 // clean tree. A dirty tree REBUILDS from disk so queries reflect in-flight edits.
 function ensureFresh() {
   const sha = currentSha();
-  if (existsSync(MAP)) {
+  // Read the namespaced path; fall back to the legacy '.claude/agentmap.json'
+  // when the new path is missing (migration from a pre-namespacing install — the
+  // legacy file is still trustworthy, the next build() rewrites to the new path).
+  const mapPath = existsSync(MAP) ? MAP : (existsSync(MAP_LEGACY) ? MAP_LEGACY : MAP);
+  if (existsSync(mapPath)) {
     try {
-      const cached = JSON.parse(readFileSync(MAP, "utf8"));
+      const cached = JSON.parse(readFileSync(mapPath, "utf8"));
       // Trust cache only if: same HEAD, known schema, it was built CLEAN
       // (cached.dirty === 0 — never trust a map built mid-edit, even after a
       // revert returns the tree to clean), AND the tree is clean right now.
@@ -665,55 +686,95 @@ function fileBlock(key, f) {
   console.log(`dependents (${f.dependents.length}): ${f.dependents.join(", ") || "—"}`);
 }
 
+// Strip // line comments and /* */ block comments from a JSONC string WITHOUT
+// touching comment-like sequences inside double-quoted strings (so a value like
+// "https://x" or "a /* b */ c" is preserved verbatim). Single-pass state machine:
+// tracks whether we're inside a string (and an escape inside it) vs a line/block
+// comment. Trailing commas are NOT handled — only comments, which is what real-
+// world settings.json files carry.
+function stripJsonComments(src) {
+  let out = "";
+  let inStr = false, esc = false, inLine = false, inBlock = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i], n = src[i + 1];
+    if (inLine) { if (c === "\n") { inLine = false; out += c; } continue; }
+    if (inBlock) { if (c === "*" && n === "/") { inBlock = false; i++; } continue; }
+    if (inStr) {
+      out += c;
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; out += c; continue; }
+    if (c === "/" && n === "/") { inLine = true; i++; continue; }
+    if (c === "/" && n === "*") { inBlock = true; i++; continue; }
+    out += c;
+  }
+  return out;
+}
+
+// Parse a settings.json that may be JSONC: try strict JSON first, then retry
+// after stripping comments, and only then surface the caller's clear error.
+function parseSettings(text, settingsPath) {
+  try { return JSON.parse(text) || {}; }
+  catch {
+    try { return JSON.parse(stripJsonComments(text)) || {}; }
+    catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run --install-hooks`); }
+  }
+}
+
 // ---------------------------------------------------------------------------
-// --install-hooks: copy the package post-commit hook into .git/hooks, ensure
-// .claude/agentmap.json is gitignored, and auto-wire the Claude Code
-// PreToolUse(Grep|Bash) nudge into the project's .claude/settings.json so map
-// enforcement is ON by default (no manual copy-paste). Merge-safe + idempotent.
-// Throws on any failure so the caller can stderr+exit 1.
+// --install-hooks: copy the package post-commit hook into .git/hooks, copy the
+// PreToolUse nudge into .claude/hooks/agentmap-nudge.mjs, ensure .claude/agentmap/
+// is gitignored, and auto-wire the Claude Code PreToolUse(Grep|Bash) nudge into
+// the project's .claude/settings.json so map enforcement is ON by default (no
+// manual copy-paste). Merge-safe + idempotent. With { dryRun:true } it prints the
+// files it WOULD touch and writes nothing. Throws on any failure so the caller
+// can stderr+exit 1.
 // ---------------------------------------------------------------------------
-function installHooks() {
+function installHooks({ dryRun = false } = {}) {
   const src = new URL("./hooks/post-commit", import.meta.url);
   // The package hooks/ dir must ship alongside agentmap.mjs.
   if (!existsSync(src)) throw new Error(`packaged hook not found at ${src.pathname} (is the hooks/ dir present?)`);
+  // The PreToolUse nudge that gets COPIED into the project (see below). It must
+  // ship alongside agentmap.mjs too.
+  const nudgeSrc = new URL("./hooks/agentmap-nudge.mjs", import.meta.url);
+  if (!existsSync(nudgeSrc)) throw new Error(`packaged nudge not found at ${nudgeSrc.pathname} (is the hooks/ dir present?)`);
 
   // Locate the git dir of the CURRENT repo (cwd), then copy in the hook.
   const gitDir = sh("git rev-parse --git-dir");
   if (!gitDir) throw new Error("not a git repository (cwd has no .git) — run inside the repo you want to wire up");
   const hooksDir = `${gitDir}/hooks`;
-  mkdirSync(hooksDir, { recursive: true });
   const dest = `${hooksDir}/post-commit`;
-  writeFileSync(dest, readFileSync(src, "utf8"), { mode: 0o755 });
-  chmodSync(dest, 0o755); // explicit: writeFileSync mode is masked by umask
 
-  // Ensure .gitignore (in cwd) contains the derived-map line (append/create).
-  const IGNORE_LINE = ".claude/agentmap.json";
+  // The nudge is copied into the PROJECT (not referenced inside node_modules) so
+  // the documented one-liner `npx @raymondchins/agentmap --install-hooks` works
+  // even though npx never populates ./node_modules — the old path
+  // node_modules/@raymondchins/agentmap/hooks/agentmap-nudge.mjs simply does not
+  // exist after an npx install, so the hook silently never fired. The nudge is
+  // self-contained (Node stdlib only, no relative package imports), so copying it
+  // standalone is safe. CLAUDE_PROJECT_DIR is set by Claude Code at hook time, so
+  // the wired command resolves the copied file regardless of cwd.
+  const nudgeDestRel = ".claude/hooks/agentmap-nudge.mjs";
+  const NUDGE_CMD = `node "$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs"`;
+
+  // .gitignore line: ignore the namespaced map DIR (not the legacy single file).
+  const IGNORE_LINE = ".claude/agentmap/";
+  const settingsPath = ".claude/settings.json";
+
+  // --- Determine what WOULD change (so --dry-run and the pre-write notice both
+  // describe the real plan). ---
   let ignoredAlready = false;
   if (existsSync(".gitignore")) {
-    const cur = readFileSync(".gitignore", "utf8");
-    if (cur.split(/\r?\n/).some((l) => l.trim() === IGNORE_LINE)) ignoredAlready = true;
-    else writeFileSync(".gitignore", cur + (cur.endsWith("\n") || cur === "" ? "" : "\n") + IGNORE_LINE + "\n");
-  } else {
-    writeFileSync(".gitignore", IGNORE_LINE + "\n");
+    ignoredAlready = readFileSync(".gitignore", "utf8").split(/\r?\n/).some((l) => l.trim() === IGNORE_LINE);
   }
-
-  // Auto-wire the PreToolUse(Grep|Bash) enforcement nudge into the PROJECT
-  // settings (.claude/settings.json) so "the agent is forced to use the map"
-  // is ON by default — not a manual paste. Merge-safe + idempotent: preserves
-  // any existing settings/hooks, never duplicates our entry. Uses a project-
-  // relative command so a committed settings.json stays portable across machines.
-  // Both the Grep tool AND raw Bash searchers (grep/rg/ag/ack) are covered by
-  // a single hook file — the nudge routes internally based on tool_name.
-  const NUDGE_CMD = "node node_modules/@raymondchins/agentmap/hooks/agentmap-nudge.mjs";
-  const settingsPath = ".claude/settings.json";
   let settings = {};
   if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(readFileSync(settingsPath, "utf8")) || {}; }
-    catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run --install-hooks`); }
+    settings = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath);
   }
   settings.hooks ??= {};
   settings.hooks.PreToolUse ??= [];
-  // Check whether BOTH matchers are already present.
   const hasGrep = settings.hooks.PreToolUse.some(
     (e) => e?.matcher === "Grep" && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
   );
@@ -721,12 +782,48 @@ function installHooks() {
     (e) => e?.matcher === "Bash" && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
   );
   const alreadyWired = hasGrep && hasBash;
-  if (!hasGrep) {
-    settings.hooks.PreToolUse.push({ matcher: "Grep", hooks: [{ type: "command", command: NUDGE_CMD }] });
+
+  // The set of files this run touches — used by both the dry-run report and the
+  // one-line pre-write notice in the normal path.
+  const targets = [
+    dest,                                              // .git/hooks/post-commit
+    nudgeDestRel,                                      // .claude/hooks/agentmap-nudge.mjs
+    ...(ignoredAlready ? [] : [".gitignore"]),         // only if the ignore line is missing
+    ...(alreadyWired ? [] : [settingsPath]),           // only if not already wired
+  ];
+
+  if (dryRun) {
+    console.log("--dry-run: would create/overwrite the following files (no changes written):");
+    for (const t of targets) console.log(`  ${t}`);
+    return;
   }
-  if (!hasBash) {
-    settings.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: NUDGE_CMD }] });
+
+  // Normal path: announce the plan, then write.
+  console.log(`agentmap --install-hooks: writing ${targets.length} file(s): ${targets.join(", ")}`);
+
+  // 1) post-commit hook → .git/hooks
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(dest, readFileSync(src, "utf8"), { mode: 0o755 });
+  chmodSync(dest, 0o755); // explicit: writeFileSync mode is masked by umask
+
+  // 2) nudge → .claude/hooks/agentmap-nudge.mjs (idempotent overwrite-on-rerun)
+  mkdirSync(".claude/hooks", { recursive: true });
+  writeFileSync(nudgeDestRel, readFileSync(nudgeSrc, "utf8"));
+
+  // 3) .gitignore: ignore the namespaced map dir (append/create).
+  if (!ignoredAlready) {
+    if (existsSync(".gitignore")) {
+      const cur = readFileSync(".gitignore", "utf8");
+      writeFileSync(".gitignore", cur + (cur.endsWith("\n") || cur === "" ? "" : "\n") + IGNORE_LINE + "\n");
+    } else {
+      writeFileSync(".gitignore", IGNORE_LINE + "\n");
+    }
   }
+
+  // 4) Auto-wire the PreToolUse(Grep|Bash) nudge into project settings. Merge-
+  // safe + idempotent: preserves existing settings/hooks, never duplicates ours.
+  if (!hasGrep) settings.hooks.PreToolUse.push({ matcher: "Grep", hooks: [{ type: "command", command: NUDGE_CMD }] });
+  if (!hasBash) settings.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: NUDGE_CMD }] });
   if (!alreadyWired) {
     mkdirSync(".claude", { recursive: true });
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
@@ -734,6 +831,7 @@ function installHooks() {
 
   // Success report.
   console.log(`installed post-commit hook → ${dest}`);
+  console.log(`installed PreToolUse nudge → ${nudgeDestRel}`);
   console.log(ignoredAlready ? `.gitignore already has ${IGNORE_LINE}` : `added ${IGNORE_LINE} to .gitignore`);
   console.log(alreadyWired
     ? `${settingsPath} already wires the PreToolUse(Grep|Bash) → agentmap nudge — left as-is`
@@ -763,7 +861,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--mcp",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
 ]);
@@ -797,7 +895,9 @@ Global modifier:
   --json               emit exactly one JSON object (no prose) for the command
 
 Maintenance:
-  --install-hooks      install git post-commit + print the PreToolUse snippet
+  --install-hooks [--dry-run]
+                       install git post-commit + copy the PreToolUse nudge +
+                       wire .claude/settings.json (--dry-run = preview, no writes)
   --mcp                start a stdio MCP server (for MCP-capable agents)
   --help, -h           show this help
   --version, -v        print the version
@@ -830,7 +930,7 @@ if (has("--mcp")) {
 // --install-hooks: wire the git post-commit refresh + emit the PreToolUse
 // snippet. Self-contained (resolves the package hooks/ dir relative to here).
 else if (has("--install-hooks")) {
-  try { installHooks(); process.exit(0); }
+  try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
 }
 // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit

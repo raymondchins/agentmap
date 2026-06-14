@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeRepo, gitInit, run, cleanup } from "./helpers.mjs";
 
-const MAP = ".claude/agentmap.json";
+const MAP = ".claude/agentmap/map.json";
 
 // A small but non-trivial import graph so hubs/pagerank are meaningful and
 // ordering ties actually get exercised.

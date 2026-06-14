@@ -28,15 +28,26 @@ for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD BISECT_LOG RE
   fi
 done
 
-# Locate the builder: prefer a local agentmap.mjs, else the installed `agentmap`.
+# ---------------------------------------------------------------------------
+# Runner resolution — security rationale:
+#
+#   Only TWO repo-local paths are trusted: ./agentmap.mjs (this repo's own
+#   dogfooding entry-point, reviewed and version-controlled at the root) and
+#   nothing else.  ./scripts/agentmap.mjs was removed because it is an unusual
+#   path that a malicious PR could introduce to gain arbitrary code execution
+#   on a victim's next commit without touching any obviously sensitive file.
+#
+#   Set AGENTMAP_HOOK_NO_LOCAL=1 to skip even ./agentmap.mjs and rely solely
+#   on the installed binary / npx — useful in CI or when reviewing untrusted
+#   branches.
+#
 # We cd "$ROOT" before running, so use RELATIVE paths — avoids word-splitting on
 # spaces in the repo path (POSIX sh has no arrays; quoting $RUNNER at invocation
 # would bundle cmd+args into one token and break argument passing).
+# ---------------------------------------------------------------------------
 RUNNER=""
-if [ -f "$ROOT/agentmap.mjs" ]; then
+if [ -z "$AGENTMAP_HOOK_NO_LOCAL" ] && [ -f "$ROOT/agentmap.mjs" ]; then
   RUNNER="node ./agentmap.mjs"
-elif [ -f "$ROOT/scripts/agentmap.mjs" ]; then
-  RUNNER="node ./scripts/agentmap.mjs"
 elif command -v agentmap >/dev/null 2>&1; then
   # Bare binary name — the installed binary is named `agentmap` (no scope).
   RUNNER="agentmap"

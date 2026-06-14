@@ -96,11 +96,19 @@ process.stdin.on("end", () => {
       // hunts.
       const SEARCHER_RE = /(^|[;&]\s*)(rg|ripgrep|grep|egrep|fgrep|ag|ack)\b/;
       if (SEARCHER_RE.test(cmd)) {
-        fire =
-          DEP_RE.test(cmd) ||
-          (COMPONENT_TAG_RE.test(cmd) && !GENERIC_DENYLIST.test(cmd)) ||
-          INTENT_RE.test(cmd) ||
-          SYMBOL_RE.test(cmd);
+        // Guard: if any operand token references a non-source data file, stay
+        // silent — e.g. `rg TypeError app.log` is log-filtering, not a
+        // symbol/component hunt. Match on extension only (not inside quoted
+        // patterns) by scanning whitespace-separated tokens for a data-file ext.
+        const DATA_FILE_RE = /\.(log|txt|out|csv|tsv|jsonl|ndjson|json|md|ya?ml|xml)(\b|$)/i;
+        const hasDataFileTarget = cmd.split(/\s+/).some((tok) => DATA_FILE_RE.test(tok));
+        if (!hasDataFileTarget) {
+          fire =
+            DEP_RE.test(cmd) ||
+            (COMPONENT_TAG_RE.test(cmd) && !GENERIC_DENYLIST.test(cmd)) ||
+            INTENT_RE.test(cmd) ||
+            SYMBOL_RE.test(cmd);
+        }
       }
     }
 

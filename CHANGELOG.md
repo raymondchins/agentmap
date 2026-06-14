@@ -3,6 +3,62 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-06-14
+
+### Added
+- **Retrieval-accuracy eval (`eval/eval.mjs`, `npm run eval`, `EVAL.md`).** Scores whether
+  agentmap returns the *correct* results, not just fewer tokens — complements the
+  token-efficiency benchmark. Ground truth is derived live from real cloned repos (zod,
+  zustand, hono) via an independent regex + import-resolver (not agentmap's own graph, so the
+  comparison isn't circular), and scope is aligned both ways (test files and type-only edges
+  excluded from both sides) so neither tool is unfairly scored. Measures symbol-definition
+  top-1/top-3 hit rate and dependents precision/recall vs a naive `git grep` baseline.
+  Network-only; excluded from CI. Clones land in gitignored `tmp/eval/`.
+
+### Security
+- **Untracked-secret exclusion in content search.** `--any` live content search
+  no longer returns matches from untracked files such as a local `.env` — secrets
+  that live only on disk (never committed) are excluded from results, so a query
+  that happens to match a secret value surfaces the source-code match but never
+  the credential file.
+- **Post-commit hook hardening against local-script execution.** The git
+  `post-commit` hook now trusts only the repo-root `./agentmap.mjs` (the unusual
+  `./scripts/agentmap.mjs` path a malicious PR could add for arbitrary code
+  execution on a victim's next commit was removed) and adds an
+  `AGENTMAP_HOOK_NO_LOCAL=1` escape hatch to skip even `./agentmap.mjs` and rely
+  solely on the installed binary / npx — for CI or when reviewing untrusted
+  branches.
+
+### Fixed
+- **`--install-hooks` PreToolUse hook path now resolves under an npx install.**
+  The nudge is copied into the project at `.claude/hooks/agentmap-nudge.mjs` and
+  wired via `node "$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs"`, instead
+  of referencing `node_modules/@raymondchins/agentmap/...` which does not exist
+  after an `npx` install (the hook silently never fired).
+- **JSONC-tolerant settings parse.** `--install-hooks` now parses a project
+  `.claude/settings.json` that contains comments (strict JSON first, then a
+  comment-stripping retry) before surfacing a clear error.
+- **Symlink-loop guard** in source enumeration / cache traversal.
+- **Cache moved to `.claude/agentmap/`** (namespaced dir) with migration from the
+  legacy single-file location; `.gitignore` now ignores `.claude/agentmap/`.
+- **`--install-hooks --dry-run`** prints the files it would create/overwrite and
+  writes nothing.
+
+### Docs
+- **Token-cost methodology disclosure** — benchmark numbers now state the
+  `chars/4` token approximation and document the Scenario-F benchmark so readers
+  can reproduce the before/after counts.
+- **New `SECURITY.md`** — supported versions, private reporting channel, and the
+  threat model for the post-commit hook + content search.
+
+### CI
+- Added security gates to `.github/workflows/ci.yml`: `npm audit`
+  (`--audit-level=high`), CodeQL analysis, `npm pack --dry-run` manifest
+  validation, and a Gitleaks secret scan.
+
+### Chore
+- Synced `package-lock.json` (it was stale at `0.2.0`).
+
 ## [0.3.0] - 2026-06-14
 
 ### Added
@@ -109,6 +165,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/raymondchins/agentmap/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raymondchins/agentmap/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/raymondchins/agentmap/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/raymondchins/agentmap/compare/v0.2.1...v0.2.2

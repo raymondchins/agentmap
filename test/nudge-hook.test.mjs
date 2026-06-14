@@ -341,3 +341,39 @@ test("always exits 0: malformed JSON on stdin — silent, exit 0", () => {
     assert.fail(`hook exited non-zero (${e.status}) on malformed stdin: ${e.stderr}`);
   }
 });
+
+// ─── Data-file target guard (false-positive prevention) ───────────────────────
+
+test("Bash: stays silent on 'rg TypeError app.log' (exception name in log file)", () => {
+  // SYMBOL_RE would match TypeError (multi-hump), but target is a .log file —
+  // this is log-filtering, not a symbol hunt. Must stay silent.
+  assertSilent(
+    runHook({ tool_name: "Bash", tool_input: { command: "rg TypeError app.log" } }),
+    "rg TypeError app.log",
+  );
+});
+
+test("Bash: stays silent on 'grep -rn ValueError logs/run.txt' (exception in .txt file)", () => {
+  assertSilent(
+    runHook({ tool_name: "Bash", tool_input: { command: "grep -rn ValueError logs/run.txt" } }),
+    "grep ValueError .txt",
+  );
+});
+
+test("Bash: still fires on 'rg SomeSymbol src/foo.ts' (source-file target)", () => {
+  // .ts is a source file — guard must NOT suppress this, SYMBOL_RE fires normally.
+  assertFires(
+    runHook({ tool_name: "Bash", tool_input: { command: "rg SomeSymbol src/foo.ts" } }),
+    "rg SomeSymbol src/foo.ts",
+  );
+});
+
+test("Bash: stays silent on 'rg Foo data.json' (symbol-like name in JSON data file)", () => {
+  // .json is a data file — even though 'Foo' could look like a single-hump
+  // symbol (doesn't match SYMBOL_RE anyway), the data-file guard ensures silence.
+  // Using a multi-hump name to be explicit: FooBar in a .json file.
+  assertSilent(
+    runHook({ tool_name: "Bash", tool_input: { command: "rg FooBar data.json" } }),
+    "rg FooBar data.json",
+  );
+});

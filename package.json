@@ -1,10 +1,10 @@
 {
   "name": "@raymondchins/agentmap",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publishConfig": {
     "access": "public"
   },
-  "description": "The repo map your coding agent is forced to use — ~98% fewer tokens (up to 99.9% per task) to understand a TS/JS codebase. A queryable, ranked ts-morph code-relationship map: PageRank hubs, Aider-style symbol ranking, a token-budgeted digest, and a single --any router (file → symbol → feature → live git-grep), wired into the agent loop via post-commit auto-refresh and a PreToolUse hook.",
+  "description": "The repo map your coding agent is forced to use — estimated ~98% fewer context tokens (up to ~99.9% per task, chars/4 estimate) to understand a TS/JS codebase. A queryable, ranked ts-morph code-relationship map: PageRank hubs, Aider-style symbol ranking, a token-budgeted digest, and a single --any router (file → symbol → feature → live git-grep), wired into the agent loop via post-commit auto-refresh and a PreToolUse hook.",
   "type": "module",
   "bin": {
     "agentmap": "agentmap.mjs"
@@ -18,7 +18,8 @@
   ],
   "scripts": {
     "map": "node agentmap.mjs",
-    "test": "node --test test/*.test.mjs test/**/*.test.mjs"
+    "test": "node --test test/*.test.mjs test/**/*.test.mjs",
+    "eval": "node eval/eval.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -1,5 +1,7 @@
 node_modules/
+.claude/agentmap/
 .claude/agentmap.json
 *.log
 .DS_Store
 graphify-out/
+tmp/

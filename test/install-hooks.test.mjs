@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // --install-hooks: copies hooks/post-commit into .git/hooks (chmod 0755),
-// ensures .gitignore contains .claude/agentmap.json, auto-wires the Claude Code
+// ensures .gitignore contains .claude/agentmap/, auto-wires the Claude Code
 // PreToolUse(Grep) and PreToolUse(Bash) nudge hooks into .claude/settings.json
 // (merge-safe + idempotent), exits 0 on success.
 //
@@ -29,9 +29,9 @@ test("--install-hooks installs post-commit, updates .gitignore, prints snippet, 
   const mode = statSync(hookPath).mode & 0o777;
   assert.ok((mode & 0o111) !== 0, `post-commit hook not executable (mode ${mode.toString(8)})`);
 
-  // .gitignore now ignores the generated map.
+  // .gitignore now ignores the generated map (namespaced dir).
   const gi = readFileSync(join(dir, ".gitignore"), "utf8");
-  assert.match(gi, /\.claude\/agentmap\.json/, ".gitignore missing agentmap.json entry");
+  assert.match(gi, /\.claude\/agentmap\//, ".gitignore missing agentmap/ entry");
 
   // Reports wiring the PreToolUse nudge.
   assert.match(r.stdout, /PreToolUse|settings\.json|agentmap/i, "expected settings wiring in output");
@@ -79,14 +79,16 @@ test("--install-hooks merges into existing settings.json + is idempotent", () =>
 
 test("--install-hooks does not duplicate the .gitignore entry on re-run", () => {
   const dir = makeRepo({
-    ".gitignore": "node_modules/\n.claude/agentmap.json\n",
+    ".gitignore": "node_modules/\n.claude/agentmap/\n",
     "src/index.ts": `export function x() { return 1; }`,
   });
   gitInit(dir, { commit: true });
   const r = run(dir, "--install-hooks");
   assert.equal(r.status, 0, r.stderr);
   const gi = readFileSync(join(dir, ".gitignore"), "utf8");
-  const occurrences = (gi.match(/\.claude\/agentmap\.json/g) || []).length;
+  // exact-line match so '.claude/agentmap/' isn't double-counted by a substring
+  // of some other line.
+  const occurrences = gi.split(/\r?\n/).filter((l) => l.trim() === ".claude/agentmap/").length;
   assert.equal(occurrences, 1, `expected exactly one .gitignore entry, found ${occurrences}`);
   cleanup(dir);
 });

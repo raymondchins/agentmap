@@ -4,14 +4,14 @@
 
 # agentmap
 
-**The repo map your coding agent is _forced_ to use — ~98% fewer tokens to understand your TS/JS codebase.**
+**The repo map your coding agent is _forced_ to use — ~98% fewer context tokens to understand your TS/JS codebase.**
 
 Your AI coding agent re-learns your codebase every session — opening files and grepping to find
 what connects to what, burning tokens before it writes a line. agentmap gives it a **queryable,
 ranked code-relationship map for TypeScript/JavaScript repos** instead — a `ts-morph` import/symbol
 graph ranked by personalized PageRank. Ask it to *"add a field"* or *"fix the login bug"* and it
 finds the right files, their imports, and what already exists in
-**~98% fewer tokens on average** (up to **99.9% per task**) — kept current by a post-commit
+**~98% fewer context tokens on average** (up to **~99.9% per task**; figures are chars/4 estimates applied equally to both sides) — kept current by a post-commit
 auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 
 [![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
@@ -59,6 +59,19 @@ across [zod](https://github.com/colinhacks/zod) (367 files, **99.2%**) and
 [taxonomy](https://github.com/shadcn-ui/taxonomy) (125 files, **96.0%**), peaking at **646× fewer**
 on a single whole-repo map. Reproducible at pinned shas; full per-scenario tables in
 **[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
+
+> **Methodology note:** the 58× overall figure is dominated by the whole-repo-load scenario
+> (Scenario F — 150 K vs 1 K tokens), which skews the combined ratio sharply upward. Excluding it,
+> the per-task overall ratio on the same sample repo is approximately 32×. Both numbers are real;
+> the headline captures the most common agent worst-case (repo-dump on session start), while the
+> per-task average better represents typical individual queries. RESULTS.md has the full breakdown.
+
+**Fewer tokens, but are they the _right_ tokens?** Token efficiency is only half the story — a
+separate [`EVAL.md`](./EVAL.md) (`npm run eval`) scores **retrieval accuracy** against ground
+truth derived live from real repos (zod, zustand, hono). Headline: agentmap returns the symbol
+definition in the **top 3 ~95%** of the time (naive grep ~79%) at **~2.6× fewer tokens**, and
+identifies a module's dependents at **~100% precision** (grep ~58%). Honest tradeoffs and method
+in EVAL.md.
 
 **Speed:** a cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm cached query
 returns in **~0.1s** (the lazy-loaded path added in 0.2.2) — the agent has a ranked answer back
@@ -504,7 +517,9 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
 
 Issues and PRs welcome. High-value directions:
 
-- An end-to-end retrieval/accuracy eval (the benchmark is context-efficiency only today).
+- Retrieval-accuracy eval — **done** ([`EVAL.md`](./EVAL.md), `npm run eval`). Next: a
+  type-aware dependents mode (the eval excludes type-only edges to match the value-import
+  graph) and an `app/`-router fixture so `--feature` retrieval can be scored too.
 - A real tokenizer behind the `--map` budget.
 - Hardening feature detection for non-`app/`-router layouts.
 

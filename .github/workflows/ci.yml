@@ -34,3 +34,42 @@ jobs:
       # Smoke: the binary builds + prints a hub map against agentmap's own repo.
       - name: Smoke (--hubs on self)
         run: node agentmap.mjs --hubs
+
+      # Audit for high-severity vulnerabilities in the dependency tree.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      # Validate the published file set without actually packing.
+      - name: Validate pack manifest
+        run: npm pack --dry-run
+
+  codeql:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
