@@ -48,14 +48,20 @@ test("--setup-mcp creates configurations when none exist", () => {
   assert.equal(openCodeContent.mcp.agentmap.command, process.execPath);
   assert.ok(openCodeContent.mcp.agentmap.args[0].endsWith("mcp.mjs"), "arg should point to mcp.mjs");
 
-  // Check Antigravity IDE config
-  const geminiConfigPath = join(homeDir, ".gemini", "config", "mcp_config.json");
-  assert.ok(existsSync(geminiConfigPath), "Antigravity IDE config should be created");
-  const geminiContent = JSON.parse(readFileSync(geminiConfigPath, "utf8"));
-  assert.ok(geminiContent.mcpServers, "mcpServers object should exist");
-  assert.ok(geminiContent.mcpServers.agentmap, "agentmap server config should exist");
-  assert.equal(geminiContent.mcpServers.agentmap.command, process.execPath);
-  assert.ok(geminiContent.mcpServers.agentmap.args[0].endsWith("mcp.mjs"), "arg should point to mcp.mjs");
+  // Antigravity is written to BOTH the IDE-specific and shared paths so it works
+  // across older and newer Antigravity builds.
+  const antigravityPaths = [
+    join(homeDir, ".gemini", "antigravity", "mcp_config.json"),
+    join(homeDir, ".gemini", "config", "mcp_config.json"),
+  ];
+  for (const p of antigravityPaths) {
+    assert.ok(existsSync(p), `Antigravity config should be created at ${p}`);
+    const content = JSON.parse(readFileSync(p, "utf8"));
+    assert.ok(content.mcpServers, `mcpServers object should exist in ${p}`);
+    assert.ok(content.mcpServers.agentmap, `agentmap server config should exist in ${p}`);
+    assert.equal(content.mcpServers.agentmap.command, process.execPath);
+    assert.ok(content.mcpServers.agentmap.args[0].endsWith("mcp.mjs"), "arg should point to mcp.mjs");
+  }
 
   cleanup(dir);
   cleanup(homeDir);
@@ -129,7 +135,7 @@ test("--setup-mcp --dry-run prints plan without writing files", () => {
   cleanup(homeDir);
 });
 
-test("--setup-mcp throws and creates backup on malformed JSON config", () => {
+test("--setup-mcp throws on malformed JSON config without clobbering the original", () => {
   const dir = makeRepo({ "dummy.ts": "" });
   const homeDir = makeRepo({});
   gitInit(dir, { commit: true });
@@ -144,9 +150,10 @@ test("--setup-mcp throws and creates backup on malformed JSON config", () => {
   assert.equal(r.status, 1, "Should fail with code 1");
   assert.ok(r.stderr.includes("agentmap --setup-mcp failed"), "Should print failure message on stderr");
   
-  // Verify backup is created and live file is not clobbered with `{}`
-  assert.ok(existsSync(openCodeConfigPath + ".bak"), "Backup should be created");
+  // The original is left untouched (we never write on the failure path) and no
+  // stray .bak is dropped next to it.
   assert.equal(readFileSync(openCodeConfigPath, "utf8"), "{ malformed json }", "Original file should not be clobbered");
+  assert.ok(!existsSync(openCodeConfigPath + ".bak"), "No .bak should be created");
 
   cleanup(dir);
   cleanup(homeDir);
