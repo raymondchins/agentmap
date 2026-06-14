@@ -8,7 +8,6 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SKILLS_DIR = dirname(fileURLToPath(import.meta.url));
-const VERSION = JSON.parse(readFileSync(join(SKILLS_DIR, "..", "package.json"), "utf8")).version;
 
 /** @type {Record<string, { label: string; src: string; dest: (root: string) => string; projectOnly?: boolean }>} */
 const PLATFORMS = {
@@ -58,6 +57,9 @@ function gitAddHint(paths) {
  */
 export function installSkill({ platforms: platformsArg = "all", project = true, global: globalScope = false, dryRun = false } = {}) {
   if (project && globalScope) throw new Error("use either --project or --global, not both");
+  // read version lazily (inside the function, not at module load) so importing
+  // this module is side-effect-free / off the CLI hot path.
+  const VERSION = JSON.parse(readFileSync(join(SKILLS_DIR, "..", "package.json"), "utf8")).version;
   const scope = globalScope ? "global" : "project";
   const root = globalScope ? homedir() : process.cwd();
   const names = parsePlatforms(platformsArg);

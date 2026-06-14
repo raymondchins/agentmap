@@ -5,6 +5,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeRepo, run, cleanup } from "./helpers.mjs";
 
+// derive the expected version from package.json (NOT hardcoded) so the test
+// survives version bumps / merges onto a newer main.
+const PKG_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
 test("--install-skill installs project-scoped claude, cursor, agents files", () => {
   const dir = makeRepo({ "src/index.ts": "export function x() { return 1; }" });
   const r = run(dir, "--install-skill");
@@ -18,7 +22,7 @@ test("--install-skill installs project-scoped claude, cursor, agents files", () 
   assert.ok(existsSync(agents), "missing agents SKILL.md");
   assert.match(readFileSync(claude, "utf8"), /name: agentmap/);
   assert.match(readFileSync(cursor, "utf8"), /alwaysApply: true/);
-  assert.match(readFileSync(join(dir, ".claude", "skills", "agentmap", ".agentmap_version"), "utf8"), /0\.6\.0/);
+  assert.equal(readFileSync(join(dir, ".claude", "skills", "agentmap", ".agentmap_version"), "utf8").trim(), PKG_VERSION);
   cleanup(dir);
 });
 

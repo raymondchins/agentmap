@@ -20,7 +20,6 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import { installSkill } from "./skills/install.mjs";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -1009,6 +1008,9 @@ else if (has("--install-hooks")) {
 // --install-skill: copy packaged SKILL.md / Cursor rule (see skills/install.mjs).
 else if (has("--install-skill")) {
   try {
+    // lazy import keeps skills/install.mjs (and its package.json read) OFF the
+    // hot path — warm --any/--find queries must not load it.
+    const { installSkill } = await import("./skills/install.mjs");
     installSkill({
       platforms: arg("--platform") || "all",
       project: !has("--global"),
