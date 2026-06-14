@@ -2,7 +2,7 @@
 // eval/eval.mjs — retrieval-ACCURACY eval for agentmap.
 //
 // The bench (benchmark/bench.mjs, RESULTS.md) only measures token EFFICIENCY
-// (chars/4 fewer tokens). It does NOT prove the returned results are CORRECT —
+// (cl100k regex fewer tokens). It does NOT prove the returned results are CORRECT —
 // "fewer tokens" could secretly mean "fewer correct answers". This harness fills
 // that gap: it scores RETRIEVAL CORRECTNESS against ground truth on real public
 // TS/JS repos, and reports accuracy AND token cost side by side so the two can be
@@ -412,7 +412,7 @@ before scoring — otherwise agentmap's legitimate test-file importers would sco
 positives. **Type-only edges** (\`import type\` / \`export type\`) are excluded from ground
 truth, because agentmap's ts-morph graph drops them by design — counting them would penalize
 recall for a documented behaviour rather than a defect. Each fixture is scoped to a
-\`sourceRoot\`. Token cost = chars/4 of the **full default (human) output** each tool puts in
+\`sourceRoot\`. Token cost = cl100k regex chunker of the **full default (human) output** each tool puts in
 context (same heuristic as \`RESULTS.md\`, both sides).
 
 > Caveats — read these before quoting numbers. (1) The ground-truth resolver is regex-based,

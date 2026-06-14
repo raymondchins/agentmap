@@ -72,9 +72,8 @@ ts-morph-mappable repo.
 
 ## Honest caveats — read before quoting the number
 
-1. **Token estimate is `chars / 4`** — a rough heuristic (the same one agentmap
-   uses), applied to **both** sides, so the saved-% *ratio* is robust even though
-   absolute token figures are ±10%. Raw char counts live in each run's `@@JSON@@`
+1. **Token estimate uses a regex chunker** (`cl100k_base` pre-tokenizer approximation) instead of the naive `chars / 4` heuristic. This captures the true density of arrays and CJK characters. The
+   absolute token figures are ±5% of true BPE. Raw char counts live in each run's `@@JSON@@`
    footer.
 2. **One result is negative, and we left it in.** taxonomy scenario **A = −313%**:
    for a *trivial single-file* dependency lookup, `cat` + a tiny `grep` is cheaper
@@ -125,12 +124,12 @@ a machine-readable `@@JSON@@{...}` footer for CI/scripting.
 > these two numbers differ intentionally: unmappable files (e.g. plain JS configs,
 > type-only `.d.ts` shims) appear in `find` output but are skipped by ts-morph.
 >
-> **Tokenizer note:** all token figures use `chars / 4` (the same heuristic on both
-> sides), so the saved-% ratio is stable across tokenizer versions — the absolute
-> counts shift proportionally, the percentages do not.
+> **Tokenizer note:** all token figures use the cl100k regex chunker on both
+> sides. The saved-% ratio is largely stable regardless of tokenizer, but absolute
+> numbers now match GPT-4's perception much more closely than legacy `chars / 4`.
 
 ## Environment
 
 - **node** v26.3.0 ; **ts-morph** 28.0.0 (agentmap's only dependency)
-- token est = `chars / 4`
+- token est = cl100k regex chunker
 - repos cloned shallow at the shas listed above

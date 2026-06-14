@@ -5,7 +5,7 @@
 //
 //  Compares the BYTES an agent would have to read into context for three
 //  common "understand the codebase" tasks, using a naive shell baseline vs
-//  the equivalent agentmap query. Token estimate = chars / 4 (same rough
+//  the equivalent agentmap query. Token estimate = cl100k regex (approximate BPE)
 //  heuristic agentmap itself uses; see the caveat in RESULTS.md).
 //
 //  Zero deps (only node:child_process / node:path). Targets are auto-derived
@@ -23,7 +23,12 @@ import { fileURLToPath } from "node:url";
 const REPO = resolve(process.argv[2] || process.cwd());
 const AGENTMAP = join(dirname(dirname(fileURLToPath(import.meta.url))), "agentmap.mjs");
 
-const tok = (s) => Math.ceil((s || "").length / 4); // chars/4 — see RESULTS.md caveat
+const CL100K_REGEX = /'(?:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gui;
+const tok = (s) => {
+  if (!s) return 0;
+  const chunks = s.match(CL100K_REGEX);
+  return chunks ? Math.ceil(chunks.length * 1.12) : 0;
+};
 const pct = (base, tool) => base === 0 ? 0 : Math.round(((base - tool) / base) * 1000) / 10;
 
 // Source-file grep that mirrors a COMPETENT agent: prunes build/vendor dirs so
@@ -244,7 +249,7 @@ const lpad = (s, n) => String(s).padStart(n);
 console.log(`agentmap token-savings benchmark`);
 console.log(`repo: ${REPO}`);
 console.log(`env:  node ${nodeV}, ${fileCount} mapped files, HEAD ${sha || "n/a"}`);
-console.log(`est:  tokens = chars / 4\n`);
+console.log(`est:  tokens = cl100k_base regex chunker\n`);
 
 const W = { s: 42, b: 12, t: 12, sv: 9 };
 console.log(`${pad("Scenario", W.s)}${lpad("Baseline tok", W.b)}${lpad("agentmap tok", W.t)}${lpad("Saved %", W.sv)}`);
