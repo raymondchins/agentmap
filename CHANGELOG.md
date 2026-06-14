@@ -3,6 +3,23 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-06-15
+
+### Added
+- **`--hook-status`** (#5, @muhajirdev) — a read-only command that reports whether
+  agentmap's git-hook wiring is installed: the `post-commit` hook (and whether it's
+  agentmap's vs a foreign hook), the `PreToolUse` nudge file, the `PreToolUse(Grep)`
+  + `PreToolUse(Bash)` wiring in `.claude/settings.json`, and the `.gitignore` entry.
+  Detection is a substring marker scan, so a **chained** `post-commit` (agentmap
+  sharing one hook with another tool) is correctly reported as installed.
+- **`--install-skill`** (#4, @muhajirdev) — install packaged agent-guidance assets so
+  coding agents are steered to agentmap before falling back to grep: ships a Claude
+  Code / Codex / OpenCode `SKILL.md` and a Cursor always-on rule. Flags:
+  `--platform claude|cursor|agents|all` (default `all`), `--project` (default) or
+  `--global`, and `--dry-run`. Writes are atomic and whitelisted to fixed,
+  agentmap-namespaced paths. The installer is lazy-imported so it never loads on the
+  warm `--any`/`--find` query hot path.
+
 ## [0.6.1] - 2026-06-14
 
 ### Fixed
