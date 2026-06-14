@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // --install-skill: copy packaged SKILL.md / Cursor rule into project or global
-// agent directories (pattern inspired by graphify's graphify install).
+// agent directories (project or global scope).
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { homedir } from "node:os";

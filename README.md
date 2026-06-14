@@ -192,8 +192,8 @@ npx @raymondchins/agentmap --install-skill
 ```
 
 Copies a packaged **SKILL.md** (Claude Code / Codex / OpenCode) and a **Cursor rule**
-(`.cursor/rules/agentmap.mdc`, `alwaysApply: true`) into the current repo — same idea as
-[Graphify](https://graphify.net/)'s `graphify install`, but agentmap-native. Options:
+(`.cursor/rules/agentmap.mdc`, `alwaysApply: true`) into the current repo or global
+agent directories. Options:
 
 ```bash
 agentmap --install-skill --platform cursor      # Cursor rule only
