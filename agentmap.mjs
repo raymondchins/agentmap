@@ -20,6 +20,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { installSkill } from "./skills/install.mjs";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -927,7 +928,8 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--setup-mcp", "--mcp",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--install-skill", "--platform", "--project", "--global",
+  "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
 ]);
@@ -936,7 +938,7 @@ const KNOWN = new Set([
 // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
 // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
 // `--any --foo` still falls through to the missing-arg guard instead.)
-const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--feature", "--focus", "--tokens", "--symbols"]);
+const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
 const valueIdx = new Set();
 for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -964,6 +966,8 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
+  --install-skill [--platform claude|cursor|agents|all] [--project|--global] [--dry-run]
+                       install SKILL.md / Cursor rule for coding agents
   --setup-mcp [--dry-run]
                        configure MCP server for OpenCode & Antigravity IDE
                        (--dry-run = preview, no writes)
@@ -1001,6 +1005,21 @@ if (has("--mcp")) {
 else if (has("--install-hooks")) {
   try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+}
+// --install-skill: copy packaged SKILL.md / Cursor rule (see skills/install.mjs).
+else if (has("--install-skill")) {
+  try {
+    installSkill({
+      platforms: arg("--platform") || "all",
+      project: !has("--global"),
+      global: has("--global"),
+      dryRun: has("--dry-run"),
+    });
+    process.exit(0);
+  } catch (e) {
+    console.error(`agentmap --install-skill failed: ${e?.message || e}`);
+    process.exit(1);
+  }
 }
 // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
 else if (has("--setup-mcp")) {

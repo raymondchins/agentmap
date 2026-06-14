@@ -185,6 +185,25 @@ internally on `tool_name`. For reference, or to wire it by hand:
 That's the "forced to use it" in the tagline: the map stays current on its own, and the
 agent is steered to it the moment it reaches for a dependency-shaped grep or Bash search.
 
+### 3. Agent skills (Cursor, Claude Code, Codex)
+
+```bash
+npx @raymondchins/agentmap --install-skill
+```
+
+Copies a packaged **SKILL.md** (Claude Code / Codex / OpenCode) and a **Cursor rule**
+(`.cursor/rules/agentmap.mdc`, `alwaysApply: true`) into the current repo — same idea as
+[Graphify](https://graphify.net/)'s `graphify install`, but agentmap-native. Options:
+
+```bash
+agentmap --install-skill --platform cursor      # Cursor rule only
+agentmap --install-skill --platform claude      # .claude/skills/agentmap/SKILL.md
+agentmap --install-skill --global --platform claude  # ~/.claude/skills/...
+agentmap --install-skill --dry-run              # preview paths, no writes
+```
+
+Pair with `--install-hooks` (Claude Code) or `--mcp` (Cursor MCP).
+
 ---
 
 ## Quickstart
@@ -481,6 +500,7 @@ $ node agentmap.mjs --print | jq '.hubs[0]'
 | `--version` / `-v` | Print the version from `package.json` and exit 0. |
 | `--json` | **Global modifier.** When present, every command prints exactly one JSON object to stdout (no prose). Shapes vary per command: `--json --hubs` → `{command,fileCount,sha,hubs:[string]}`, `--json --find X` → `{command,query,matches:[{file,name,kind}]}`, `--json --relates X` → `{command,file,pagerank,exports,imports,dependents,related}`, `--json --any X` → `{command,query,kind,…payload}`, etc. Bare `--json` (no query flag) → `{command:"build",fileCount,features,topHub}`. |
 | `--install-hooks` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap.json` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). Exit 0 on success, stderr + exit 1 on failure. |
+| `--install-skill` | Install packaged agent skill + Cursor rule (`--platform claude\|cursor\|agents\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
 | `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can call every flag as a first-class tool. |
 
 **Exit-code contract:** `0` = success / match / help / version; `1` = query returned zero results (`--any`, `--find`, `--relates`, `--feature` with no match); `2` = usage error (missing required arg, unknown flag). Any token starting with `-` that matches no known flag prints an error to stderr and exits 2.
