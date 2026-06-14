@@ -1090,7 +1090,7 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
-  --install-skill [--platform claude|cursor|agents|all] [--project|--global] [--dry-run]
+  --install-skill [--platform claude|cursor|codex|opencode|gemini|antigravity|copilot|agents|all] [--project|--global] [--dry-run]
                        install SKILL.md / Cursor rule for coding agents
   --hook-status          report whether agentmap git/nudge wiring is installed
   --setup-mcp [--dry-run]

@@ -3,6 +3,14 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **`--install-skill` Tier B platforms** — `codex`, `opencode`, `gemini`, `antigravity`, `copilot` with paths aligned to OpenCode / Antigravity / Graphify conventions.
+
+### Changed
+- **`--platform all` default set** — now installs claude, cursor, codex, opencode, gemini, antigravity, copilot. Legacy `agents` is opt-in (`--platform agents`). Global `all` no longer writes `~/.agents/skills/` by default; use `antigravity` (graphify-aligned `~/.gemini/config/skills/`) or explicit `agents` for v0.7.0 `~/.agents/` behavior.
+
 ## [0.7.0] - 2026-06-15
 
 ### Added
