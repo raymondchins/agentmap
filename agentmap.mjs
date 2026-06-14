@@ -1052,7 +1052,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--install-skill", "--platform", "--project", "--global",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--install-skill", "--install-docs", "--platform", "--project", "--global",
   "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
@@ -1092,6 +1092,8 @@ Maintenance:
                        wire .claude/settings.json (--dry-run = preview, no writes)
   --install-skill [--platform claude|cursor|codex|opencode|gemini|antigravity|copilot|agents|all] [--project|--global] [--dry-run]
                        install SKILL.md / Cursor rule for coding agents
+  --install-docs [--platform gemini|codex|opencode|all] [--project|--global] [--dry-run]
+                       merge GEMINI.md / AGENTS.md + Gemini hooks / OpenCode plugin
   --hook-status          report whether agentmap git/nudge wiring is installed
   --setup-mcp [--dry-run]
                        configure MCP server for OpenCode & Antigravity IDE
@@ -1146,6 +1148,22 @@ else if (has("--install-skill")) {
     process.exit(0);
   } catch (e) {
     console.error(`agentmap --install-skill failed: ${e?.message || e}`);
+    process.exit(1);
+  }
+}
+// --install-docs: merge always-on guidance + platform hooks/plugins (see skills/install-docs.mjs).
+else if (has("--install-docs")) {
+  try {
+    const { installDocs } = await import("./skills/install-docs.mjs");
+    installDocs({
+      platforms: arg("--platform") || "all",
+      project: !has("--global"),
+      global: has("--global"),
+      dryRun: has("--dry-run"),
+    });
+    process.exit(0);
+  } catch (e) {
+    console.error(`agentmap --install-docs failed: ${e?.message || e}`);
     process.exit(1);
   }
 }
