@@ -45,7 +45,7 @@ test("--setup-mcp creates configurations when none exist", () => {
   assert.ok(openCodeContent.mcp, "mcp object should exist");
   assert.ok(openCodeContent.mcp.agentmap, "agentmap mcp config should exist");
   assert.equal(openCodeContent.mcp.agentmap.type, "stdio");
-  assert.equal(openCodeContent.mcp.agentmap.command, "node");
+  assert.equal(openCodeContent.mcp.agentmap.command, process.execPath);
   assert.ok(openCodeContent.mcp.agentmap.args[0].endsWith("mcp.mjs"), "arg should point to mcp.mjs");
 
   // Check Antigravity IDE config
@@ -54,7 +54,7 @@ test("--setup-mcp creates configurations when none exist", () => {
   const geminiContent = JSON.parse(readFileSync(geminiConfigPath, "utf8"));
   assert.ok(geminiContent.mcpServers, "mcpServers object should exist");
   assert.ok(geminiContent.mcpServers.agentmap, "agentmap server config should exist");
-  assert.equal(geminiContent.mcpServers.agentmap.command, "node");
+  assert.equal(geminiContent.mcpServers.agentmap.command, process.execPath);
   assert.ok(geminiContent.mcpServers.agentmap.args[0].endsWith("mcp.mjs"), "arg should point to mcp.mjs");
 
   cleanup(dir);
@@ -101,7 +101,52 @@ test("--setup-mcp merges configurations correctly with existing configs", () => 
   const geminiContent = JSON.parse(readFileSync(geminiConfigPath, "utf8"));
   assert.ok(geminiContent.mcpServers.otherServer, "Pre-existing servers should be preserved");
   assert.ok(geminiContent.mcpServers.agentmap, "agentmap server should be added");
-  assert.equal(geminiContent.mcpServers.agentmap.command, "node");
+  assert.equal(geminiContent.mcpServers.agentmap.command, process.execPath);
+
+  cleanup(dir);
+  cleanup(homeDir);
+});
+
+test("--setup-mcp --dry-run prints plan without writing files", () => {
+  const dir = makeRepo({ "dummy.ts": "" });
+  const homeDir = makeRepo({});
+  gitInit(dir, { commit: true });
+
+  const r = runWithHome(dir, homeDir, "--setup-mcp", "--dry-run");
+  assert.equal(r.status, 0, `--setup-mcp --dry-run failed: ${r.stderr}`);
+  
+  assert.ok(r.stdout.includes("would configure MCP server"), "Should log dry-run heading");
+  assert.ok(r.stdout.includes("OpenCode: would write to"), "Should log OpenCode plan");
+  assert.ok(r.stdout.includes("Antigravity IDE: would write to"), "Should log Antigravity IDE plan");
+
+  // Verify no files are written
+  const openCodeConfigPath = join(homeDir, ".config", "opencode", "opencode.json");
+  const geminiConfigPath = join(homeDir, ".gemini", "config", "mcp_config.json");
+  assert.ok(!existsSync(openCodeConfigPath), "OpenCode config should not be created under dry-run");
+  assert.ok(!existsSync(geminiConfigPath), "Antigravity IDE config should not be created under dry-run");
+
+  cleanup(dir);
+  cleanup(homeDir);
+});
+
+test("--setup-mcp throws and creates backup on malformed JSON config", () => {
+  const dir = makeRepo({ "dummy.ts": "" });
+  const homeDir = makeRepo({});
+  gitInit(dir, { commit: true });
+
+  // Setup malformed global OpenCode config
+  const openCodeDir = join(homeDir, ".config", "opencode");
+  mkdirSync(openCodeDir, { recursive: true });
+  const openCodeConfigPath = join(openCodeDir, "opencode.json");
+  writeFileSync(openCodeConfigPath, "{ malformed json }");
+
+  const r = runWithHome(dir, homeDir, "--setup-mcp");
+  assert.equal(r.status, 1, "Should fail with code 1");
+  assert.ok(r.stderr.includes("agentmap --setup-mcp failed"), "Should print failure message on stderr");
+  
+  // Verify backup is created and live file is not clobbered with `{}`
+  assert.ok(existsSync(openCodeConfigPath + ".bak"), "Backup should be created");
+  assert.equal(readFileSync(openCodeConfigPath, "utf8"), "{ malformed json }", "Original file should not be clobbered");
 
   cleanup(dir);
   cleanup(homeDir);

@@ -721,10 +721,19 @@ function installHooks({ dryRun = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// --setup-mcp: configure the agentmap MCP server for OpenCode & Gemini IDE.
+// --setup-mcp: configure the agentmap MCP server for OpenCode & Antigravity IDE.
 // ---------------------------------------------------------------------------
-function setupMcp() {
+function setupMcp({ dryRun = false } = {}) {
   const mcpPath = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
+
+  // Determine command and args based on whether we are running via npx
+  const isNpx = mcpPath.includes("_npx") || mcpPath.includes("npx-cache") || mcpPath.includes("npx");
+  const command = isNpx ? "npx" : process.execPath;
+  const args = isNpx ? ["-y", "@raymondchins/agentmap", "--mcp"] : [mcpPath];
+
+  if (dryRun) {
+    console.log("--dry-run: would configure MCP server (no changes written):");
+  }
 
   // --- 1. OpenCode (Global)
   try {
@@ -734,23 +743,30 @@ function setupMcp() {
     if (existsSync(openCodeConfigPath)) {
       try {
         openCodeConfig = JSON.parse(readFileSync(openCodeConfigPath, "utf8")) || {};
-      } catch {
-        console.warn(`# warning: ${openCodeConfigPath} is malformed. Backing up and starting fresh.`);
+      } catch (err) {
+        console.error(`# error: ${openCodeConfigPath} is malformed. Config not written.`);
         try { writeFileSync(openCodeConfigPath + ".bak", readFileSync(openCodeConfigPath, "utf8")); } catch {}
+        throw err;
       }
     }
     openCodeConfig.mcp ??= {};
     openCodeConfig.mcp.agentmap = {
       type: "stdio",
-      command: "node",
-      args: [mcpPath],
+      command,
+      args,
       enabled: true
     };
-    mkdirSync(openCodeDir, { recursive: true });
-    writeFileSync(openCodeConfigPath, JSON.stringify(openCodeConfig, null, 2) + "\n");
-    console.log(`configured OpenCode global MCP server → ${openCodeConfigPath}`);
+    if (dryRun) {
+      console.log(`  OpenCode: would write to ${openCodeConfigPath}`);
+      console.log(`            config: ${JSON.stringify(openCodeConfig.mcp.agentmap)}`);
+    } else {
+      mkdirSync(openCodeDir, { recursive: true });
+      writeFileSync(openCodeConfigPath, JSON.stringify(openCodeConfig, null, 2) + "\n");
+      console.log(`configured OpenCode global MCP server → ${openCodeConfigPath}`);
+    }
   } catch (e) {
     console.error(`# error configuring OpenCode: ${e.message}`);
+    throw e;
   }
 
   // --- 2. Antigravity IDE (Global)
@@ -761,21 +777,28 @@ function setupMcp() {
     if (existsSync(geminiConfigPath)) {
       try {
         geminiConfig = JSON.parse(readFileSync(geminiConfigPath, "utf8")) || {};
-      } catch {
-        console.warn(`# warning: ${geminiConfigPath} is malformed. Backing up and starting fresh.`);
+      } catch (err) {
+        console.error(`# error: ${geminiConfigPath} is malformed. Config not written.`);
         try { writeFileSync(geminiConfigPath + ".bak", readFileSync(geminiConfigPath, "utf8")); } catch {}
+        throw err;
       }
     }
     geminiConfig.mcpServers ??= {};
     geminiConfig.mcpServers.agentmap = {
-      command: "node",
-      args: [mcpPath]
+      command,
+      args
     };
-    mkdirSync(geminiConfigDir, { recursive: true });
-    writeFileSync(geminiConfigPath, JSON.stringify(geminiConfig, null, 2) + "\n");
-    console.log(`configured Antigravity IDE global MCP server → ${geminiConfigPath}`);
+    if (dryRun) {
+      console.log(`  Antigravity IDE: would write to ${geminiConfigPath}`);
+      console.log(`                   config: ${JSON.stringify(geminiConfig.mcpServers.agentmap)}`);
+    } else {
+      mkdirSync(geminiConfigDir, { recursive: true });
+      writeFileSync(geminiConfigPath, JSON.stringify(geminiConfig, null, 2) + "\n");
+      console.log(`configured Antigravity IDE global MCP server → ${geminiConfigPath}`);
+    }
   } catch (e) {
     console.error(`# error configuring Antigravity IDE: ${e.message}`);
+    throw e;
   }
 }
 
@@ -839,7 +862,9 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
-  --setup-mcp          configure MCP server for OpenCode & Antigravity IDE
+  --setup-mcp [--dry-run]
+                       configure MCP server for OpenCode & Antigravity IDE
+                       (--dry-run = preview, no writes)
   --mcp                start a stdio MCP server (for MCP-capable agents)
   --help, -h           show this help
   --version, -v        print the version
@@ -877,7 +902,7 @@ else if (has("--install-hooks")) {
 }
 // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
 else if (has("--setup-mcp")) {
-  try { setupMcp(); process.exit(0); }
+  try { setupMcp({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
 }
 // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
