@@ -17,6 +17,9 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdir
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -724,7 +727,7 @@ function parseSettings(text, settingsPath) {
   try { return JSON.parse(text) || {}; }
   catch {
     try { return JSON.parse(stripJsonComments(text)) || {}; }
-    catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run --install-hooks`); }
+    catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run`); }
   }
 }
 
@@ -844,6 +847,65 @@ function installHooks({ dryRun = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// --setup-mcp: register the agentmap MCP server in the global configs of
+// MCP-capable IDEs that aren't Claude Code (which uses --install-hooks instead).
+// Merge-safe + idempotent; with { dryRun:true } it prints the plan and writes
+// nothing. Throws on the first malformed config so the caller can stderr+exit 1.
+// ---------------------------------------------------------------------------
+function setupMcp({ dryRun = false } = {}) {
+  const mcpPath = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
+
+  // npx materializes the package under a `_npx` cache dir that gets garbage-
+  // collected, so a config pointing at that path would rot. When invoked via npx,
+  // pin to the published spec instead; otherwise reference the resolved file.
+  const isNpx = mcpPath.includes("_npx");
+  const command = isNpx ? "npx" : process.execPath;
+  const args = isNpx ? ["-y", "@raymondchins/agentmap", "--mcp"] : [mcpPath];
+
+  // Each target: a global config file + how to graft the agentmap entry into it.
+  // Antigravity is written to BOTH paths on purpose — older builds read only the
+  // IDE-specific ~/.gemini/antigravity path, newer unified builds read the shared
+  // ~/.gemini/config path, so writing both is version-proof.
+  const targets = [
+    {
+      label: "OpenCode",
+      path: join(homedir(), ".config", "opencode", "opencode.json"),
+      graft: (cfg) => { (cfg.mcp ??= {}).agentmap = { type: "stdio", command, args, enabled: true }; },
+    },
+    {
+      label: "Antigravity IDE",
+      path: join(homedir(), ".gemini", "antigravity", "mcp_config.json"),
+      graft: (cfg) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
+    },
+    {
+      label: "Antigravity (shared)",
+      path: join(homedir(), ".gemini", "config", "mcp_config.json"),
+      graft: (cfg) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
+    },
+  ];
+
+  if (dryRun) console.log("--dry-run: would configure MCP server (no changes written):");
+
+  for (const { label, path, graft } of targets) {
+    // Reuse parseSettings so JSONC (comments) is tolerated and a malformed file
+    // throws a clear error WITHOUT clobbering the original (we never write on the
+    // failure path, so no .bak dance is needed).
+    let cfg = {};
+    if (existsSync(path)) cfg = parseSettings(readFileSync(path, "utf8"), path);
+    graft(cfg);
+
+    if (dryRun) {
+      console.log(`  ${label}: would write to ${path}`);
+    } else {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");
+      console.log(`configured ${label} MCP server → ${path}`);
+    }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 const args = process.argv.slice(2);
@@ -865,7 +927,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--mcp",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
 ]);
@@ -902,6 +964,9 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
+  --setup-mcp [--dry-run]
+                       configure MCP server for OpenCode & Antigravity IDE
+                       (--dry-run = preview, no writes)
   --mcp                start a stdio MCP server (for MCP-capable agents)
   --help, -h           show this help
   --version, -v        print the version
@@ -936,6 +1001,11 @@ if (has("--mcp")) {
 else if (has("--install-hooks")) {
   try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+}
+// --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
+else if (has("--setup-mcp")) {
+  try { setupMcp({ dryRun: has("--dry-run") }); process.exit(0); }
+  catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
 }
 // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
 // 2). Runs BEFORE the bare-build fallthrough so a typo never silently rebuilds.
