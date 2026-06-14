@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Gemini CLI BeforeTool nudge — non-blocking context when a search looks like
 // dependency / blast-radius / reuse work. Stdlib only; copied into the project
-// by `agentmap --install-docs --platform gemini`.
+// by `agentmap --install-skill --platform gemini`.
 
 let raw = "";
 process.stdin.setEncoding("utf8");

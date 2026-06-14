@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // OpenCode plugin — logs a reminder when bash/grep looks like a structural search.
-// Always-on guidance lives in AGENTS.md (installed by --install-docs).
+// Always-on guidance lives in AGENTS.md (installed by --install-skill).
 // Non-blocking: uses client.app.log when available.
 
 const DEP_RE =
