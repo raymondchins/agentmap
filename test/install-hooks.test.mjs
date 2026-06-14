@@ -27,7 +27,9 @@ test("--install-hooks installs post-commit, updates .gitignore, prints snippet, 
   const hookPath = join(dir, ".git", "hooks", "post-commit");
   assert.ok(existsSync(hookPath), "post-commit hook not installed");
   const mode = statSync(hookPath).mode & 0o777;
-  assert.ok((mode & 0o111) !== 0, `post-commit hook not executable (mode ${mode.toString(8)})`);
+  if (process.platform !== "win32") {
+    assert.ok((mode & 0o111) !== 0, `post-commit hook not executable (mode ${mode.toString(8)})`);
+  }
 
   // .gitignore now ignores the generated map (namespaced dir).
   const gi = readFileSync(join(dir, ".gitignore"), "utf8");

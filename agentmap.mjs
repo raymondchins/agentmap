@@ -17,6 +17,9 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdir
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -718,6 +721,66 @@ function installHooks({ dryRun = false } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// --setup-mcp: configure the agentmap MCP server for OpenCode & Gemini IDE.
+// ---------------------------------------------------------------------------
+function setupMcp() {
+  const mcpPath = fileURLToPath(new URL("./mcp.mjs", import.meta.url));
+
+  // --- 1. OpenCode (Global)
+  try {
+    const openCodeDir = join(homedir(), ".config", "opencode");
+    const openCodeConfigPath = join(openCodeDir, "opencode.json");
+    let openCodeConfig = {};
+    if (existsSync(openCodeConfigPath)) {
+      try {
+        openCodeConfig = JSON.parse(readFileSync(openCodeConfigPath, "utf8")) || {};
+      } catch {
+        console.warn(`# warning: ${openCodeConfigPath} is malformed. Backing up and starting fresh.`);
+        try { writeFileSync(openCodeConfigPath + ".bak", readFileSync(openCodeConfigPath, "utf8")); } catch {}
+      }
+    }
+    openCodeConfig.mcp ??= {};
+    openCodeConfig.mcp.agentmap = {
+      type: "stdio",
+      command: "node",
+      args: [mcpPath],
+      enabled: true
+    };
+    mkdirSync(openCodeDir, { recursive: true });
+    writeFileSync(openCodeConfigPath, JSON.stringify(openCodeConfig, null, 2) + "\n");
+    console.log(`configured OpenCode global MCP server → ${openCodeConfigPath}`);
+  } catch (e) {
+    console.error(`# error configuring OpenCode: ${e.message}`);
+  }
+
+  // --- 2. Antigravity IDE (Global)
+  try {
+    const geminiConfigDir = join(homedir(), ".gemini", "config");
+    const geminiConfigPath = join(geminiConfigDir, "mcp_config.json");
+    let geminiConfig = {};
+    if (existsSync(geminiConfigPath)) {
+      try {
+        geminiConfig = JSON.parse(readFileSync(geminiConfigPath, "utf8")) || {};
+      } catch {
+        console.warn(`# warning: ${geminiConfigPath} is malformed. Backing up and starting fresh.`);
+        try { writeFileSync(geminiConfigPath + ".bak", readFileSync(geminiConfigPath, "utf8")); } catch {}
+      }
+    }
+    geminiConfig.mcpServers ??= {};
+    geminiConfig.mcpServers.agentmap = {
+      command: "node",
+      args: [mcpPath]
+    };
+    mkdirSync(geminiConfigDir, { recursive: true });
+    writeFileSync(geminiConfigPath, JSON.stringify(geminiConfig, null, 2) + "\n");
+    console.log(`configured Antigravity IDE global MCP server → ${geminiConfigPath}`);
+  } catch (e) {
+    console.error(`# error configuring Antigravity IDE: ${e.message}`);
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 const args = process.argv.slice(2);
@@ -739,7 +802,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--mcp",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
 ]);
@@ -776,6 +839,7 @@ Maintenance:
   --install-hooks [--dry-run]
                        install git post-commit + copy the PreToolUse nudge +
                        wire .claude/settings.json (--dry-run = preview, no writes)
+  --setup-mcp          configure MCP server for OpenCode & Antigravity IDE
   --mcp                start a stdio MCP server (for MCP-capable agents)
   --help, -h           show this help
   --version, -v        print the version
@@ -810,6 +874,11 @@ if (has("--mcp")) {
 else if (has("--install-hooks")) {
   try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
   catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+}
+// --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
+else if (has("--setup-mcp")) {
+  try { setupMcp(); process.exit(0); }
+  catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
 }
 // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
 // 2). Runs BEFORE the bare-build fallthrough so a typo never silently rebuilds.
