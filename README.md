@@ -500,6 +500,7 @@ $ node agentmap.mjs --print | jq '.hubs[0]'
 | `--version` / `-v` | Print the version from `package.json` and exit 0. |
 | `--json` | **Global modifier.** When present, every command prints exactly one JSON object to stdout (no prose). Shapes vary per command: `--json --hubs` → `{command,fileCount,sha,hubs:[string]}`, `--json --find X` → `{command,query,matches:[{file,name,kind}]}`, `--json --relates X` → `{command,file,pagerank,exports,imports,dependents,related}`, `--json --any X` → `{command,query,kind,…payload}`, etc. Bare `--json` (no query flag) → `{command:"build",fileCount,features,topHub}`. |
 | `--install-hooks` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap.json` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). Exit 0 on success, stderr + exit 1 on failure. |
+| `--hook-status` | Report whether the post-commit hook, PreToolUse nudge, and `.gitignore` entry are installed (no writes). |
 | `--install-skill` | Install packaged agent skill + Cursor rule (`--platform claude\|cursor\|agents\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
 | `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can call every flag as a first-class tool. |
 

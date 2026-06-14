@@ -3,6 +3,32 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.1] - 2026-06-14
+
+### Fixed
+- **Graceful degradation:** the per-file parse loop now wraps each file in
+  try/catch — a single pathological source (e.g. a malformed import specifier
+  that makes ts-morph throw) is skipped with a stderr warning instead of
+  aborting the entire map build.
+- **Path aliases for dynamic edges:** tsconfig/jsconfig `baseUrl`/`paths`
+  aliases (`@/x`, `~/x`) now resolve for side-effect imports, dynamic
+  `import()`, and `require()` too — previously only static imports formed edges.
+- **Symbol ranking:** re-export barrels (`export { X } from './y'`) are no longer
+  counted as references to `X`, so heavily re-exported symbols are not over-ranked
+  in barrel-heavy repos (file-level dependency edges are unchanged).
+- **Dirty-tree detection:** `git status` rename parsing is gated on the porcelain
+  status code, so a plain file whose name contains `" -> "` is no longer
+  mis-parsed (which could serve a stale cache as fresh).
+- **`--map` tiny budgets:** partial-recovery now tests down to a single symbol,
+  so a very small `--tokens` value still emits the top file instead of nothing.
+- **Non-git fingerprint walk:** per-directory try/catch (a permission-denied
+  subdir no longer empties the fingerprint and disables caching) plus a recursion
+  depth cap; mirrored in the non-git Vue walk.
+
+### Docs
+- Clarified that the `--any` content fallback is case-insensitive by design
+  (matches `--find`); matches are printed verbatim so true casing is visible.
+
 ## [0.4.0] - 2026-06-14
 
 ### Added
