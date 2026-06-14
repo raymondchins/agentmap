@@ -14,6 +14,7 @@
     "agentmap.mjs",
     "mcp.mjs",
     "hooks",
+    "skills",
     "NOTICE"
   ],
   "scripts": {
