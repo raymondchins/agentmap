@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { makeRepo, gitInit, run, cleanup } from "./helpers.mjs";
 
@@ -47,5 +47,26 @@ test("--hook-status detects foreign post-commit without agentmap marker", () => 
   const r = run(dir, "--hook-status");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /post-commit: not installed \(hook exists but agentmap not found\)/);
+  cleanup(dir);
+});
+
+test("--hook-status still reports installed when post-commit chains agentmap with another tool", () => {
+  // Ray (and others) chain multiple tools in ONE post-commit (e.g. graphify +
+  // agentmap). Detection is a substring scan for agentmap's marker, so a shared
+  // hook that ALSO runs another tool must still report agentmap as installed —
+  // NOT a false "overwritten by another tool".
+  const dir = makeRepo({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { allowJs: true }, include: ["**/*.ts"] }),
+    "src/index.ts": "export function x() { return 1; }",
+  });
+  gitInit(dir, { commit: true });
+  assert.equal(run(dir, "--install-hooks").status, 0);
+  // append a foreign tool's block AFTER agentmap's (marker line stays present)
+  const hookPath = join(dir, ".git", "hooks", "post-commit");
+  const existing = readFileSync(hookPath, "utf8");
+  writeFileSync(hookPath, existing + "\n# graphify — git post-commit hook\npython3 -m graphify.update || true\n", { mode: 0o755 });
+  const r = run(dir, "--hook-status");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /post-commit: installed/, "chained post-commit (agentmap + another tool) must still report installed");
   cleanup(dir);
 });
