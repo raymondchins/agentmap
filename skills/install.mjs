@@ -1,23 +1,37 @@
 // SPDX-License-Identifier: MIT
-// --install-skill: copy packaged SKILL.md / Cursor rule into project or global
-// agent directories (project or global scope).
-// Platform paths follow each agent's documented skill directories.
+// --install-skill: skill files + always-on docs/hooks per platform (project or global).
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  atomicWrite,
+  readGuidanceSection,
+  mergeGuidanceBlock,
+  installGeminiHooks,
+  installOpencodePlugin,
+} from "./install-helpers.mjs";
 
 const SKILLS_DIR = dirname(fileURLToPath(import.meta.url));
 const SKILL_MD = join(SKILLS_DIR, "SKILL.md");
 const CURSOR_RULE = join(SKILLS_DIR, "cursor-rule.mdc");
 
-/** @param {string} root @param {boolean} globalScope */
-function skillPath(root, globalScope, ...segments) {
+/** @param {string} root @param {boolean} _globalScope */
+function skillPath(root, _globalScope, ...segments) {
   return join(root, ...segments);
 }
 
-/** @type {Record<string, { label: string; src: string; dest: (root: string, globalScope: boolean) => string; projectOnly?: boolean; legacy?: boolean }>} */
+/** @type {Record<string, {
+ *   label: string;
+ *   src: string;
+ *   dest: (root: string, globalScope: boolean) => string;
+ *   projectOnly?: boolean;
+ *   legacy?: boolean;
+ *   docs?: (root: string, globalScope: boolean) => string;
+ *   hooks?: boolean;
+ *   plugin?: boolean;
+ * }>} */
 const PLATFORMS = {
   claude: {
     label: "Claude Code",
@@ -34,15 +48,19 @@ const PLATFORMS = {
     label: "OpenAI Codex",
     src: SKILL_MD,
     dest: (root) => skillPath(root, false, ".codex", "skills", "agentmap", "SKILL.md"),
+    docs: (root, globalScope) =>
+      globalScope ? join(root, ".codex", "AGENTS.md") : join(root, "AGENTS.md"),
   },
   opencode: {
     label: "OpenCode",
     src: SKILL_MD,
-    // Project: .opencode/skills/ (repo). Global: ~/.config/opencode/skills/ (not .config in repo).
     dest: (root, globalScope) =>
       globalScope
         ? join(root, ".config", "opencode", "skills", "agentmap", "SKILL.md")
         : join(root, ".opencode", "skills", "agentmap", "SKILL.md"),
+    docs: (root, globalScope) =>
+      globalScope ? join(root, ".config", "opencode", "AGENTS.md") : join(root, "AGENTS.md"),
+    plugin: true,
   },
   gemini: {
     label: "Gemini CLI",
@@ -52,6 +70,9 @@ const PLATFORMS = {
       if (osPlatform() === "win32") return skillPath(root, true, ".agents", "skills", "agentmap", "SKILL.md");
       return skillPath(root, true, ".gemini", "skills", "agentmap", "SKILL.md");
     },
+    docs: (root, globalScope) =>
+      globalScope ? join(root, ".gemini", "GEMINI.md") : join(root, "GEMINI.md"),
+    hooks: true,
   },
   antigravity: {
     label: "Antigravity",
@@ -74,15 +95,7 @@ const PLATFORMS = {
   },
 };
 
-/** Default --platform all: core + new platforms; excludes legacy `agents`. */
 const DEFAULT_PLATFORMS = ["claude", "cursor", "codex", "opencode", "gemini", "antigravity", "copilot"];
-
-function atomicWrite(dest, body) {
-  mkdirSync(dirname(dest), { recursive: true });
-  const tmp = `${dest}.tmp`;
-  writeFileSync(tmp, body, "utf8");
-  renameSync(tmp, dest);
-}
 
 function parsePlatforms(raw) {
   const keys = Object.keys(PLATFORMS).join(", ");
@@ -108,6 +121,45 @@ function gitAddHint(paths) {
   if (unique.length) console.log(`\nOptional: git add ${unique.map((p) => `"${p}"`).join(" ")}`);
 }
 
+function installDocsForPlatform(cfg, { root, globalScope, dryRun, guidance, mergedDocs, targets }) {
+  if (!cfg.docs) return;
+  const dest = cfg.docs(root, globalScope);
+  if (mergedDocs.has(dest)) return;
+  mergedDocs.add(dest);
+  const title = dest.endsWith("GEMINI.md") ? "agentmap" : undefined;
+  if (dryRun) {
+    console.log(`  ${cfg.label} docs: ${dest}`);
+    return;
+  }
+  const existing = existsSync(dest) ? readFileSync(dest, "utf8") : "";
+  atomicWrite(dest, mergeGuidanceBlock(existing, guidance, title));
+  console.log(`  ${cfg.label} docs → ${dest}`);
+  targets.push(dest);
+}
+
+function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, targets }) {
+  if (cfg.hooks && !globalScope) {
+    const hookTargets = installGeminiHooks(root, dryRun);
+    for (const t of hookTargets) {
+      if (dryRun) console.log(`  ${cfg.label} hooks: ${t}`);
+      else {
+        console.log(`  ${cfg.label} hooks → ${t}`);
+        targets.push(t);
+      }
+    }
+  }
+  if (cfg.plugin && !globalScope) {
+    const pluginTargets = installOpencodePlugin(root, dryRun);
+    for (const t of pluginTargets) {
+      if (dryRun) console.log(`  ${cfg.label} plugin: ${t}`);
+      else {
+        console.log(`  ${cfg.label} plugin → ${t}`);
+        targets.push(t);
+      }
+    }
+  }
+}
+
 /**
  * @param {{ platforms?: string; project?: boolean; global?: boolean; dryRun?: boolean }} opts
  */
@@ -119,6 +171,8 @@ export function installSkill({ platforms: platformsArg = "all", project = true, 
   const names = parsePlatforms(platformsArg);
   const targets = [];
   const seenDest = new Set();
+  const mergedDocs = new Set();
+  const guidance = readGuidanceSection();
 
   if (dryRun) console.log(`--dry-run: would install agentmap skill (${scope} scope):`);
 
@@ -130,23 +184,23 @@ export function installSkill({ platforms: platformsArg = "all", project = true, 
     }
     if (!existsSync(cfg.src)) throw new Error(`packaged skill missing: ${cfg.src}`);
     const dest = cfg.dest(root, globalScope);
-    if (seenDest.has(dest)) {
-      console.log(`  skip ${cfg.label}: same path as another platform (${dest})`);
-      continue;
+    const skipSkill = seenDest.has(dest);
+    if (skipSkill) {
+      console.log(`  skip ${cfg.label} skill: same path as another platform (${dest})`);
+    } else {
+      seenDest.add(dest);
+      if (dryRun) {
+        console.log(`  ${cfg.label} skill: ${dest}`);
+      } else {
+        atomicWrite(dest, readFileSync(cfg.src, "utf8"));
+        writeFileSync(join(dirname(dest), ".agentmap_version"), VERSION + "\n", "utf8");
+        console.log(`  ${cfg.label} skill → ${dest}`);
+        targets.push(dest);
+      }
     }
-    seenDest.add(dest);
-    const body = readFileSync(cfg.src, "utf8");
-    const versionFile = join(dirname(dest), ".agentmap_version");
 
-    if (dryRun) {
-      console.log(`  ${cfg.label}: ${dest}`);
-      continue;
-    }
-
-    atomicWrite(dest, body);
-    writeFileSync(versionFile, VERSION + "\n", "utf8");
-    console.log(`  ${cfg.label} → ${dest}`);
-    targets.push(dest);
+    installDocsForPlatform(cfg, { root, globalScope, dryRun, guidance, mergedDocs, targets });
+    installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, targets });
   }
 
   if (!dryRun && targets.length) {
