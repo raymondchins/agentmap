@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // --install-skill: copy packaged SKILL.md / Cursor rule into project or global
 // agent directories (project or global scope).
-// Platform paths aligned with graphify _platform_skill_destination() (v0.8.39).
+// Platform paths follow each agent's documented skill directories.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
@@ -74,7 +74,7 @@ const PLATFORMS = {
   },
 };
 
-/** Default --platform all: Tier B + core; excludes legacy `agents` (use antigravity for graphify-aligned global). */
+/** Default --platform all: core + new platforms; excludes legacy `agents`. */
 const DEFAULT_PLATFORMS = ["claude", "cursor", "codex", "opencode", "gemini", "antigravity", "copilot"];
 
 function atomicWrite(dest, body) {
