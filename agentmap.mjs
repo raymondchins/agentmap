@@ -27,7 +27,10 @@ let _tsm = null;
 const tsMorph = () => (_tsm ??= _require("ts-morph"));
 
 const MAP = ".claude/agentmap.json";
-const SCHEMA_VERSION = 2;
+// Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
+// source-discovery / freshness checks treat them as first-class source files.
+// Old caches (schema 2) are ignored so the first run after upgrade rebuilds.
+const SCHEMA_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Tuning constants — KEEP THESE VALUES IDENTICAL (output + marketing must not
@@ -72,7 +75,7 @@ const dirtyCount = () =>
     let p = l.slice(3);                                  // strip "XY " status prefix
     if (p.includes(" -> ")) p = p.split(" -> ").pop();   // rename: keep the new path
     p = p.replace(/^"|"$/g, "");                         // unquote space/special paths
-    return /\.(ts|tsx|mjs|cjs|jsx|js)$/.test(p);
+    return /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|vue)$/.test(p);
   }).length;
 const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
 
@@ -83,7 +86,8 @@ const getOrSet = (m, k, make) => { let v = m.get(k); if (v === undefined) { v = 
 // "path:mtimeMs:size" for source files so the cache can be trusted between runs
 // without a full reparse. Skips node_modules/.git/.next. Any error ⇒ "" (caller
 // falls through to build, i.e. current behavior). Never used on the git path.
-const SRC_EXT = /\.(ts|tsx|mts|cts|jsx|js|mjs|cjs)$/;
+// Includes `.vue` so editing a Vue SFC invalidates the non-git cache too.
+const SRC_EXT = /\.(ts|tsx|mts|cts|jsx|js|mjs|cjs|vue)$/;
 function sourceFingerprint() {
   try {
     const entries = [];
@@ -101,6 +105,56 @@ function sourceFingerprint() {
     entries.sort();
     return createHash("sha1").update(entries.join("\n")).digest("hex");
   } catch { return ""; }
+}
+
+// =============================================================================
+// Vue Single File Component support — best-effort, zero-dependency.
+//
+// agentmap is TS/JS-first. Vue `.vue` SFCs are NOT TypeScript; the Vue compiler
+// (`@vue/compiler-sfc`) is intentionally NOT a dependency (CONTRIBUTING near-
+// zero-deps rule). Instead we extract ONLY the `<script>` / `<script setup>`
+// block text with a conservative regex and feed it to ts-morph as a VIRTUAL
+// source file (e.g. `App.vue.ts`). A virtual→real path map (see build())
+// rewrites every user-facing path back to the real `.vue` path so no
+// `.vue.ts` / `.vue.js` ever leaks into JSON or prose.
+//
+// Non-goals: no template AST, no `<style>` parsing, no Nuxt auto-import
+// resolution, no Svelte/Astro. Only `<script>` blocks that look like JS/TS.
+// =============================================================================
+
+// Find the first top-level `<script ...>` block (optionally `<script setup ...>`)
+// whose opening tag does NOT carry `src="..."` (external script reference —
+// the actual JS lives in another file agentmap already indexes on its own).
+// Handles single + double quoted lang/src attributes and `lang="ts"`/`ts`.
+// Returns { lang, setup, text } for the matched block, or null if none.
+//
+// Greedy-free: stops at the FIRST `</script>` on its own. Vue forbids nested
+// `<script>` tags, so a non-greedy match up to `</script>` is safe. We do NOT
+// support `<script>` + `<script setup>` in the same SFC for indexing — we pick
+// the richer one: prefer `setup` block if present, else the normal block.
+function extractVueScripts(text) {
+  const blocks = [];
+  const re = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const attrs = m[1] || "";
+    const body = m[2] || "";
+    // external script reference → skip (the target file is indexed directly).
+    if (/\bsrc\s*=\s*["'][^"']+["']/i.test(attrs)) continue;
+    const setup = /\bsetup\b/i.test(attrs);
+    const lang = (attrs.match(/\blang\s*=\s*["']([^["']+)["']/i) || [])[1] || "js";
+    blocks.push({ lang: lang.toLowerCase(), setup, text: body });
+  }
+  if (!blocks.length) return null;
+  // Prefer a setup block (the modern idiom) when present; else the plain block.
+  return blocks.find((b) => b.setup) || blocks[0];
+}
+
+// Virtual file path mapping for a `.vue` source. The virtual path is what
+// ts-morph sees (so `.ts`/`.js` parsing kicks in); the real path is what every
+// user-facing output shows. `lang="ts"` → `.vue.ts`, otherwise `.vue.js`.
+function vueVirtualPath(realPath, lang) {
+  return lang === "ts" ? `${realPath}.ts` : `${realPath}.js`;
 }
 
 // Feature = first real route segment under app/ (or src/app/), skipping route
@@ -228,13 +282,25 @@ function makeProject() {
   const loaded = new Set(project.getSourceFiles().map((s) => s.getFilePath()));
   const cwdp = process.cwd().replace(/\\/g, "/");
   const listed = sh("git ls-files --cached --others --exclude-standard").split("\n").filter(Boolean);
+  // `.vue` discovery: same channel as TS/JS (git ls-files when available, else
+  // a broad glob fallback). We do NOT hand `.vue` straight to ts-morph (it is
+  // not TS/JS). Instead, for each `.vue` file we read its `<script>` block via
+  // extractVueScripts() and register it as a VIRTUAL source file
+  // (`App.vue.ts` / `App.vue.js`). A virtual→real path map is returned alongside
+  // the project so build() can rewrite every user-facing path back to `.vue`.
+  const vueFiles = [];
   if (listed.length) {
     const missing = [];
     for (const f of listed) {
-      if (!/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(f)) continue;
-      const segs = f.split("/");
-      if (segs.includes("node_modules") || segs.includes(".next")) continue;
-      if (!loaded.has(`${cwdp}/${f}`)) missing.push(f);
+      if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(f)) {
+        const segs = f.split("/");
+        if (segs.includes("node_modules") || segs.includes(".next")) continue;
+        if (!loaded.has(`${cwdp}/${f}`)) missing.push(f);
+      } else if (f.endsWith(".vue")) {
+        const segs = f.split("/");
+        if (segs.includes("node_modules") || segs.includes(".next")) continue;
+        vueFiles.push(f);
+      }
     }
     if (missing.length) project.addSourceFilesAtPaths(missing);
   } else {
@@ -244,8 +310,35 @@ function makeProject() {
       "components/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}", "lib/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
       "pages/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}", "*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
     ]);
+    // Non-git `.vue` fallback: walk the tree like sourceFingerprint() does.
+    try {
+      const walk = (dir) => {
+        for (const name of readdirSync(dir)) {
+          if (name === "node_modules" || name === ".git" || name === ".next") continue;
+          const full = dir + "/" + name;
+          let st; try { st = statSync(full); } catch { continue; }
+          if (st.isDirectory()) walk(full);
+          else if (name.endsWith(".vue")) vueFiles.push(full.replace(/^\.\//, ""));
+        }
+      };
+      walk(".");
+    } catch { /* ignore — proceed without Vue */ }
   }
-  return project;
+  // Build the virtual→real map and register each `<script>` block as a virtual
+  // ts-morph source. Files without a usable `<script>` block are silently
+  // skipped (template/style-only SFCs contribute nothing to the import graph).
+  const vueMap = Object.create(null); // virtualPath → realPath
+  const vueReal = Object.create(null); // realPath → true (for resolver)
+  for (const f of vueFiles) {
+    let text; try { text = readFileSync(f, "utf8"); } catch { continue; }
+    const block = extractVueScripts(text);
+    if (!block || !block.text.trim()) continue;
+    const vpath = vueVirtualPath(f, block.lang);
+    project.createSourceFile(`${cwdp}/${vpath}`, block.text, { overwrite: true });
+    vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
+    vueReal[`${cwdp}/${f}`] = true;
+  }
+  return { project, vueMap, vueReal };
 }
 
 // ---------------------------------------------------------------------------
@@ -255,11 +348,18 @@ function makeProject() {
 // ---------------------------------------------------------------------------
 function build() {
   const t0 = Date.now();
-  const project = makeProject();
+  const { project, vueMap, vueReal } = makeProject();
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
   const cwd = process.cwd().replace(/\\/g, "/");
-  const rel = (p) => p.replace(cwd + "/", "");
+  // rel() rewrites ts-morph file paths to repo-relative keys. For Vue virtual
+  // sources (`App.vue.ts`), vueMap rewrites back to the real `.vue` path so
+  // users never see virtual paths in the map, hubs, --relates, or --find.
+  const rel = (p) => {
+    const abs = p.replace(/\\/g, "/");
+    const real = vueMap[abs];
+    return (real || abs).replace(cwd + "/", "");
+  };
   const files = {}, dependents = {}, features = {};
   // PATH-SEGMENT exclusion (not substring) so e.g. components/.next-demo or
   // src/node_modules_helper.ts are NOT wrongly excluded.
@@ -280,6 +380,14 @@ function build() {
     };
     const baseAbs = join(fromAbsDir, spec);
     const tryGet = (abs) => { const sf = project.getSourceFile(abs); return sf ? sf : null; };
+    // Vue SFC: `import X from "./C.vue"` (exact) OR extensionless `import X
+    // from "./C"` resolving to a `.vue` file. ts-morph never indexes `.vue`
+    // directly, so we consult vueReal (populated by makeProject) and return
+    // the REAL `.vue` path — build() will then see UserCard.vue as the target.
+    if (vueReal[baseAbs]) return rel(baseAbs);
+    // Extensionless specifier that resolves to a `.vue` file: try appending.
+    const vueAbs = `${baseAbs}.vue`;
+    if (vueReal[vueAbs]) return rel(vueAbs);
     let sf = tryGet(baseAbs);
     if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}.${e}`); if (sf) break; }
     if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}/index.${e}`); if (sf) break; }
