@@ -998,52 +998,399 @@ const POST_COMMIT_MARKER = "agentmap — git post-commit hook";
 const NUDGE_REL = ".claude/hooks/agentmap-nudge.mjs";
 const MAP_IGNORE_LINE = ".claude/agentmap/";
 
-function hookStatus() {
+// Collect hook wiring as structured data. `degradedOutsideGit` switches the
+// outside-git behavior: --hook-status (legacy) bails out and prints one line,
+// --doctor wants the remaining repo-local checks (nudge, PreToolUse, .gitignore)
+// to keep running with the git-only ones marked `skipped`.
+function collectHookStatus({ degradedOutsideGit = false } = {}) {
   const gitDir = sh("git rev-parse --git-dir");
-  if (!gitDir) {
+  const insideGit = Boolean(gitDir);
+  const checks = [];
+
+  checks.push({
+    name: "git-repo",
+    label: "Git repo",
+    status: insideGit ? "ok" : "skipped",
+    detail: insideGit ? "detected" : "not inside a git repository",
+  });
+
+  if (!insideGit && !degradedOutsideGit) return { insideGit: false, checks };
+
+  if (insideGit) {
+    const postCommitPath = `${gitDir}/hooks/post-commit`;
+    let detail = "not installed";
+    let status = "missing";
+    if (existsSync(postCommitPath)) {
+      const body = readFileSync(postCommitPath, "utf8");
+      if (body.includes(POST_COMMIT_MARKER)) {
+        detail = "installed";
+        status = "installed";
+      } else {
+        detail = "not installed (hook exists but agentmap not found)";
+      }
+    }
+    checks.push({
+      name: "post-commit",
+      label: "post-commit",
+      status,
+      detail,
+      path: postCommitPath,
+      suggestion: status === "installed" ? null : "agentmap --install-hooks",
+    });
+  } else {
+    checks.push({
+      name: "post-commit",
+      label: "post-commit",
+      status: "skipped",
+      detail: "not inside a git repository",
+    });
+  }
+
+  const nudgeInstalled = existsSync(NUDGE_REL);
+  checks.push({
+    name: "nudge",
+    label: `nudge (${NUDGE_REL})`,
+    status: nudgeInstalled ? "installed" : "missing",
+    detail: nudgeInstalled ? "installed" : "not installed",
+    path: NUDGE_REL,
+    suggestion: nudgeInstalled ? null : "agentmap --install-hooks",
+  });
+
+  const settingsPath = ".claude/settings.json";
+  let settings = null;
+  let settingsInvalid = false;
+  if (existsSync(settingsPath)) {
+    try {
+      settings = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath);
+    } catch {
+      settingsInvalid = true;
+    }
+  }
+  const entries = settings?.hooks?.PreToolUse || [];
+  const matcherWired = (matcher) => entries.some(
+    (e) => e?.matcher === matcher && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
+  );
+  for (const matcher of ["Grep", "Bash"]) {
+    let status, detail;
+    if (settingsInvalid) {
+      status = "invalid";
+      detail = "not wired (invalid settings.json)";
+    } else if (!existsSync(settingsPath)) {
+      status = "missing";
+      detail = "not wired";
+    } else if (matcherWired(matcher)) {
+      status = "wired";
+      detail = "wired";
+    } else {
+      status = "missing";
+      detail = "not wired";
+    }
+    checks.push({
+      name: `pretooluse-${matcher.toLowerCase()}`,
+      label: `PreToolUse(${matcher})`,
+      status,
+      detail,
+      path: settingsPath,
+      suggestion: status === "wired" ? null : "agentmap --install-hooks",
+    });
+  }
+
+  if (insideGit || existsSync(".gitignore")) {
+    const gitignoreOk = existsSync(".gitignore") &&
+      readFileSync(".gitignore", "utf8").split(/\r?\n/).some((l) => l.trim() === MAP_IGNORE_LINE);
+    checks.push({
+      name: "gitignore",
+      label: `.gitignore (${MAP_IGNORE_LINE})`,
+      status: gitignoreOk ? "ok" : "missing",
+      detail: gitignoreOk ? "ok" : "missing entry",
+      path: ".gitignore",
+      suggestion: gitignoreOk ? null : "agentmap --install-hooks",
+    });
+  } else {
+    checks.push({
+      name: "gitignore",
+      label: `.gitignore (${MAP_IGNORE_LINE})`,
+      status: "skipped",
+      detail: "no .gitignore outside a git repository",
+    });
+  }
+
+  return { insideGit, checks };
+}
+
+function hookStatus() {
+  const { insideGit, checks } = collectHookStatus({ degradedOutsideGit: false });
+  if (!insideGit) {
     console.log("not a git repository — run inside the repo you want to check");
     return;
   }
-  const hooksDir = `${gitDir}/hooks`;
-  const postCommitPath = `${hooksDir}/post-commit`;
-
-  let postCommit = "not installed";
-  if (existsSync(postCommitPath)) {
-    const body = readFileSync(postCommitPath, "utf8");
-    postCommit = body.includes(POST_COMMIT_MARKER) ? "installed" : "not installed (hook exists but agentmap not found)";
+  for (const c of checks) {
+    if (c.name === "git-repo") continue;
+    console.log(`${c.label}: ${c.detail}`);
   }
+}
 
-  let nudge = existsSync(NUDGE_REL) ? "installed" : "not installed";
+// ---------------------------------------------------------------------------
+// --doctor: read-only harness health report. doctor reports; it never repairs.
+// Reuses collectHookStatus() (with degradedOutsideGit), the skill install-target
+// metadata from skills/install.mjs, the 3 MCP targets from setupMcp(), and the
+// module-local dirtyCount() — no new sources of truth, no writes anywhere.
+// ---------------------------------------------------------------------------
 
-  let grepWire = "not wired";
-  let bashWire = "not wired";
-  const settingsPath = ".claude/settings.json";
-  if (existsSync(settingsPath)) {
-    try {
-      const settings = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath);
-      const entries = settings.hooks?.PreToolUse || [];
-      const has = (matcher) => entries.some(
-        (e) => e?.matcher === matcher && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
-      );
-      grepWire = has("Grep") ? "wired" : "not wired";
-      bashWire = has("Bash") ? "wired" : "not wired";
-    } catch {
-      grepWire = "not wired (invalid settings.json)";
-      bashWire = "not wired (invalid settings.json)";
+// Same 3 targets setupMcp() writes — keep labels/paths aligned so doctor's
+// "missing entry" actually maps to "agentmap --setup-mcp will add it here".
+const MCP_TARGETS = [
+  {
+    name: "opencode",
+    label: "OpenCode",
+    path: () => join(homedir(), ".config", "opencode", "opencode.json"),
+    displayPath: "~/.config/opencode/opencode.json",
+    has: (cfg) => Boolean(cfg?.mcp?.agentmap),
+    objectPath: "mcp.agentmap",
+  },
+  {
+    name: "antigravity",
+    label: "Antigravity IDE",
+    path: () => join(homedir(), ".gemini", "antigravity", "mcp_config.json"),
+    displayPath: "~/.gemini/antigravity/mcp_config.json",
+    has: (cfg) => Boolean(cfg?.mcpServers?.agentmap),
+    objectPath: "mcpServers.agentmap",
+  },
+  {
+    name: "antigravity-shared",
+    label: "Antigravity (shared)",
+    path: () => join(homedir(), ".gemini", "config", "mcp_config.json"),
+    displayPath: "~/.gemini/config/mcp_config.json",
+    has: (cfg) => Boolean(cfg?.mcpServers?.agentmap),
+    objectPath: "mcpServers.agentmap",
+  },
+];
+
+async function collectSkillStatus({ expectedVersion, root }) {
+  const { getSkillInstallTargets } = await import("./skills/install.mjs");
+  const targets = getSkillInstallTargets({ platforms: "all", project: true, global: false, root });
+  return targets.map((t) => {
+    const installed = existsSync(t.dest);
+    if (!installed) {
+      return {
+        name: t.name,
+        label: `${t.label}${t.legacy ? " (legacy)" : ""}`,
+        status: "missing",
+        path: t.dest,
+        expectedVersion,
+        suggestion: "agentmap --install-skill",
+      };
     }
-  }
+    let actualVersion = null;
+    if (existsSync(t.versionPath)) {
+      try { actualVersion = readFileSync(t.versionPath, "utf8").trim(); } catch { actualVersion = null; }
+    }
+    if (!actualVersion) {
+      return {
+        name: t.name,
+        label: `${t.label}${t.legacy ? " (legacy)" : ""}`,
+        status: "installed",
+        detail: "version unknown",
+        path: t.dest,
+        expectedVersion,
+        suggestion: "agentmap --install-skill",
+      };
+    }
+    if (actualVersion !== expectedVersion) {
+      return {
+        name: t.name,
+        label: `${t.label}${t.legacy ? " (legacy)" : ""}`,
+        status: "stale",
+        detail: `installed ${actualVersion}, current ${expectedVersion}`,
+        path: t.dest,
+        actualVersion,
+        expectedVersion,
+        suggestion: "agentmap --install-skill",
+      };
+    }
+    return {
+      name: t.name,
+      label: `${t.label}${t.legacy ? " (legacy)" : ""}`,
+      status: "ok",
+      path: t.dest,
+      actualVersion,
+      expectedVersion,
+    };
+  });
+}
 
-  let gitignore = "missing entry";
-  if (existsSync(".gitignore")) {
-    const ok = readFileSync(".gitignore", "utf8").split(/\r?\n/).some((l) => l.trim() === MAP_IGNORE_LINE);
-    gitignore = ok ? "ok" : "missing entry";
-  }
+function collectMcpStatus() {
+  return MCP_TARGETS.map((t) => {
+    const path = t.path();
+    if (!existsSync(path)) {
+      return {
+        name: t.name,
+        label: t.label,
+        status: "missing",
+        detail: "config missing",
+        path: t.displayPath,
+        objectPath: t.objectPath,
+        suggestion: "agentmap --setup-mcp",
+      };
+    }
+    let cfg;
+    try { cfg = parseSettings(readFileSync(path, "utf8"), path); }
+    catch {
+      return {
+        name: t.name,
+        label: t.label,
+        status: "invalid",
+        detail: "invalid JSON",
+        path: t.displayPath,
+        objectPath: t.objectPath,
+        suggestion: `fix ${t.displayPath} then re-run agentmap --setup-mcp`,
+      };
+    }
+    const wired = t.has(cfg);
+    return {
+      name: t.name,
+      label: t.label,
+      status: wired ? "wired" : "missing",
+      detail: wired ? "wired" : "agentmap entry missing",
+      path: t.displayPath,
+      objectPath: t.objectPath,
+      suggestion: wired ? null : "agentmap --setup-mcp",
+    };
+  });
+}
 
-  console.log(`post-commit: ${postCommit}`);
-  console.log(`nudge (${NUDGE_REL}): ${nudge}`);
-  console.log(`PreToolUse(Grep): ${grepWire}`);
-  console.log(`PreToolUse(Bash): ${bashWire}`);
-  console.log(`.gitignore (${MAP_IGNORE_LINE}): ${gitignore}`);
+function collectMapStatus() {
+  const currentExists = existsSync(MAP);
+  const legacyExists = existsSync(MAP_LEGACY);
+  if (!currentExists && !legacyExists) {
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "missing",
+      detail: "no map cache found",
+      path: MAP,
+      suggestion: "agentmap",
+    }];
+  }
+  const selectedPath = currentExists ? MAP : MAP_LEGACY;
+  let cache;
+  try { cache = JSON.parse(readFileSync(selectedPath, "utf8")); }
+  catch {
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "unknown",
+      detail: "cache exists but could not be parsed",
+      path: selectedPath,
+      suggestion: "agentmap",
+    }];
+  }
+  const sha = currentSha();
+  const dirty = dirtyCount();
+  const reasons = [];
+  if (sha && cache.generatedSha && cache.generatedSha !== sha) {
+    reasons.push(`generatedSha ${cache.generatedSha} differs from HEAD ${sha}`);
+  }
+  if (typeof cache.schema === "number" && cache.schema !== SCHEMA_VERSION) {
+    reasons.push(`schema ${cache.schema} differs from current ${SCHEMA_VERSION}`);
+  }
+  if (dirty > 0) {
+    reasons.push(`working tree has ${dirty} TS/JS/Vue source change(s)`);
+  }
+  if (reasons.length) {
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "stale",
+      detail: reasons.join("; "),
+      path: selectedPath,
+      suggestion: "agentmap",
+    }];
+  }
+  return [{
+    name: "map-cache",
+    label: "Map cache",
+    status: "ok",
+    detail: currentExists ? "current cache path present" : "legacy cache path present",
+    path: selectedPath,
+  }];
+}
+
+function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+    return { name: pkg.name || "agentmap", version: pkg.version || "0.0.0" };
+  } catch {
+    return { name: "agentmap", version: "0.0.0" };
+  }
+}
+
+async function collectDoctorReport() {
+  const pkg = readPackageVersion();
+  const cwd = process.cwd();
+  const { insideGit, checks: hooks } = collectHookStatus({ degradedOutsideGit: true });
+  const skills = await collectSkillStatus({ expectedVersion: pkg.version, root: cwd });
+  const mcp = collectMcpStatus();
+  const map = collectMapStatus();
+
+  const all = [...hooks, ...skills, ...mcp, ...map];
+  const suggestions = [...new Set(all.map((c) => c.suggestion).filter(Boolean))];
+  const needsAttention = all.some((c) =>
+    ["missing", "stale", "invalid"].includes(c.status)
+  );
+  const overall = !insideGit ? "degraded" : (needsAttention ? "needs attention" : "ok");
+
+  return {
+    command: "doctor",
+    cwd,
+    package: pkg,
+    overall,
+    checks: { hooks, skills, mcp, map },
+    suggestions,
+  };
+}
+
+function formatDoctorReport(report) {
+  const lines = [];
+  lines.push("agentmap doctor");
+  lines.push(`cwd: ${report.cwd}`);
+  lines.push(`package: ${report.package.name} ${report.package.version}`);
+  lines.push(`overall: ${report.overall}`);
+  lines.push("");
+
+  // Repo-relative display for skill/rule paths (which arrive absolute from
+  // getSkillInstallTargets). Hooks/MCP/map paths are already short. Keep the
+  // absolute path in the JSON output for tests/tooling.
+  const displayPath = (p) => {
+    if (!p) return "";
+    const cwd = report.cwd;
+    if (p === cwd) return ".";
+    if (p.startsWith(cwd + "/")) return p.slice(cwd.length + 1);
+    return p;
+  };
+
+  const section = (title, checks) => {
+    lines.push(title);
+    for (const c of checks) {
+      const detail = c.detail ? ` — ${c.detail}` : "";
+      const path = c.path ? ` (${displayPath(c.path)})` : "";
+      lines.push(`  ${c.label}: ${c.status}${path}${detail}`);
+    }
+    lines.push("");
+  };
+
+  section("Hooks", report.checks.hooks);
+  section("Skills / Rules", report.checks.skills);
+  section("MCP", report.checks.mcp);
+  section("Map cache", report.checks.map);
+
+  lines.push("Suggested next steps");
+  if (!report.suggestions.length) {
+    lines.push("  No action needed.");
+  } else {
+    for (const s of report.suggestions) lines.push(`  - ${s}`);
+  }
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,7 +1474,7 @@ const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); el
 // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
 const KNOWN = new Set([
   "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--install-skill", "--platform", "--project", "--global",
+  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
   "--dry-run", "--setup-mcp", "--mcp",
   "--any", "--find", "--relates", "--map", "--focus", "--tokens",
   "--symbols", "--feature", "--features", "--hubs",
@@ -1168,6 +1515,8 @@ Maintenance:
   --install-skill [--platform claude|cursor|codex|opencode|gemini|antigravity|copilot|agents|all] [--project|--global] [--dry-run]
                        install skills + always-on docs/hooks per platform
   --hook-status          report whether agentmap git/nudge wiring is installed
+  --doctor             read-only health report: hooks, skills/rules, MCP wiring, map cache
+                         (exits 0, suggests fix commands, never writes files)
   --setup-mcp [--dry-run]
                        configure MCP server for OpenCode & Antigravity IDE
                        (--dry-run = preview, no writes)
@@ -1228,6 +1577,19 @@ else if (has("--install-skill")) {
 else if (has("--hook-status")) {
   try { hookStatus(); process.exit(0); }
   catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(1); }
+}
+// --doctor: read-only harness health report (hooks + skills + MCP + map cache).
+// Always exits 0; never writes. --json emits the structured report.
+else if (has("--doctor")) {
+  try {
+    const report = await collectDoctorReport();
+    if (wantJson) console.log(JSON.stringify(report, null, 2));
+    else console.log(formatDoctorReport(report));
+    process.exit(0);
+  } catch (e) {
+    console.error(`agentmap --doctor failed: ${e?.message || e}`);
+    process.exit(1);
+  }
 }
 // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
 else if (has("--setup-mcp")) {

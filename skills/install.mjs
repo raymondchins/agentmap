@@ -119,6 +119,40 @@ function parsePlatforms(raw) {
   return tokens;
 }
 
+/**
+ * Read-only metadata for every install target. Single source of truth for
+ * install paths so --doctor doesn't drift from --install-skill. Resolves
+ * `root` the same way installSkill() does (homedir when global, else cwd or
+ * provided root) and dedupes by dest path so the `agents` legacy alias and
+ * `antigravity` project target don't both appear for the same file.
+ *
+ * @param {{ platforms?: string; project?: boolean; global?: boolean; root?: string }} [opts]
+ * @returns {Array<{ name: string; label: string; dest: string; versionPath: string; projectOnly: boolean; legacy: boolean; globalScope: boolean }>}
+ */
+export function getSkillInstallTargets({ platforms: platformsArg = "all", project = true, global: globalScope = false, root } = {}) {
+  const resolvedRoot = root ?? (globalScope ? homedir() : process.cwd());
+  const names = parsePlatforms(platformsArg);
+  const out = [];
+  const seenDest = new Set();
+  for (const name of names) {
+    const cfg = PLATFORMS[name];
+    if (cfg.projectOnly && globalScope) continue;
+    const dest = cfg.dest(resolvedRoot, globalScope);
+    if (seenDest.has(dest)) continue;
+    seenDest.add(dest);
+    out.push({
+      name,
+      label: cfg.label,
+      dest,
+      versionPath: join(dirname(dest), ".agentmap_version"),
+      projectOnly: Boolean(cfg.projectOnly),
+      legacy: Boolean(cfg.legacy),
+      globalScope,
+    });
+  }
+  return out;
+}
+
 function gitAddHint(paths) {
   const unique = [...new Set(paths.map((p) => p.replace(/\/[^/]+$/, "") || p))];
   if (unique.length) console.log(`\nOptional: git add ${unique.map((p) => `"${p}"`).join(" ")}`);

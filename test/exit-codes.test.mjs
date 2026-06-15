@@ -75,7 +75,7 @@ test("--help exits 0 and lists the flag surface on stdout", () => {
   const r = run(dir, "--help");
   assert.equal(r.status, 0, `--help should exit 0, got ${r.status}`);
   // Usage block should enumerate the primary flags.
-  for (const flag of ["--any", "--find", "--relates", "--map", "--hubs", "--mcp", "--install-hooks", "--hook-status"]) {
+  for (const flag of ["--any", "--find", "--relates", "--map", "--hubs", "--mcp", "--install-hooks", "--hook-status", "--doctor"]) {
     assert.ok(r.stdout.includes(flag), `--help missing mention of ${flag}`);
   }
   cleanup(dir);
