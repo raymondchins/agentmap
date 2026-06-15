@@ -3,13 +3,17 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.8.0] - 2026-06-15
 
 ### Added
-- **`--install-skill` platform expansion** — `codex`, `opencode`, `gemini`, `antigravity`, `copilot` with paths aligned to each platform's documented skill directories. Also merges always-on `GEMINI.md` / `AGENTS.md` blocks, Gemini CLI `BeforeTool` hooks, and OpenCode plugin (same `--install-skill` command — no separate flag).
+- **`--install-skill` platform expansion** (#6, #12, @muhajirdev) — `codex`, `opencode`, `gemini`, `antigravity`, `copilot` with paths aligned to each platform's documented skill directories. Also merges always-on `GEMINI.md` / `AGENTS.md` blocks, Gemini CLI `BeforeTool` hooks, and OpenCode plugin (same `--install-skill` command — no separate flag).
 
 ### Changed
 - **`--platform all` default set** — now installs claude, cursor, codex, opencode, gemini, antigravity, copilot. Legacy `agents` is opt-in (`--platform agents`). Global `all` no longer writes `~/.agents/skills/` by default; use `antigravity` (`~/.gemini/config/skills/`) or explicit `agents` for v0.7.0 `~/.agents/` behavior.
+
+### Fixed
+- **Monorepo tsconfig path aliases** (#9, @muhajirdev) — `--relates` no longer undercounts dependents when a repo imports through tsconfig `paths` aliases (`@/*`, `#/*`, `~/*`) defined at a non-root package config. Alias-config discovery now also follows `extends`, so a package tsconfig that only `extends` a shared base (Turborepo `tsconfig.base.json` holding all `paths`) still contributes its inherited `baseUrl`/`paths`. Recursive, depth-capped, child overrides parent.
+- **Windows Gemini docs path** — global `GEMINI.md` now routes to `~/.agents/GEMINI.md` on Windows (mirroring the skill destination) instead of the POSIX-only `~/.gemini/GEMINI.md`, so the always-on guidance lands where Gemini CLI reads it.
 
 ## [0.7.0] - 2026-06-15
 
