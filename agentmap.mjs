@@ -282,12 +282,36 @@ function identMul(ident, defineCount, mentioned) {
 }
 
 // Read baseUrl+paths from a tsconfig/jsconfig file. Returns null when absent.
-function readTsconfigAliasOpts(cfgPath) {
+// Follows `extends` recursively (depth-capped) so a package tsconfig that only
+// `extends` a shared base (Turborepo tsconfig.base.json holding all `paths`)
+// still contributes its inherited baseUrl/paths. Child overrides parent.
+function readTsconfigAliasOpts(cfgPath, _depth = 0) {
   try {
-    const co = (JSON.parse(readFileSync(cfgPath, "utf8")) || {}).compilerOptions || {};
-    const out = {};
-    if (co.baseUrl) out.baseUrl = co.baseUrl;
-    if (co.paths) out.paths = co.paths;
+    const raw = JSON.parse(readFileSync(cfgPath, "utf8")) || {};
+    const co = raw.compilerOptions || {};
+    // Resolve inherited opts from `extends` first (parent), then layer self on top.
+    let inherited = null;
+    if (raw.extends && _depth < 10) {
+      const exts = Array.isArray(raw.extends) ? raw.extends : [raw.extends];
+      const here = dirname(cfgPath);
+      for (const ext of exts) {
+        if (typeof ext !== "string" || !ext) continue;
+        // Only resolve path-like extends (./, ../, absolute). Bare package
+        // extends (e.g. "@tsconfig/strict") live in node_modules and don't
+        // carry repo-local `paths`, so skip them safely.
+        if (!/^(\.\.?\/|\/)/.test(ext)) continue;
+        let base = join(here, ext);
+        if (!existsSync(base) && existsSync(base + ".json")) base += ".json";
+        else if (!/\.json$/.test(base) && existsSync(join(base, "tsconfig.json"))) base = join(base, "tsconfig.json");
+        if (!existsSync(base)) continue;
+        const parent = readTsconfigAliasOpts(base, _depth + 1);
+        if (parent) inherited = { ...(inherited || {}), ...parent };
+      }
+    }
+    const self = {};
+    if (co.baseUrl) self.baseUrl = co.baseUrl;
+    if (co.paths) self.paths = co.paths;
+    const out = { ...(inherited || {}), ...self };
     if (!Object.keys(out).length) return null;
     return out;
   } catch { return null; }
