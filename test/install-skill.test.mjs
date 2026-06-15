@@ -30,6 +30,29 @@ test("--install-skill installs project-scoped claude, cursor, antigravity files 
   cleanup(dir);
 });
 
+test("--install-skill merges GEMINI.md, AGENTS.md, hooks, and plugin (default all)", () => {
+  const dir = makeRepo({ "README.md": "# demo\n", "AGENTS.md": "# team rules\n\nKeep tests green.\n" });
+  const r = run(dir, "--install-skill");
+  assert.equal(r.status, 0, r.stderr);
+
+  assert.ok(existsSync(join(dir, "GEMINI.md")), "missing GEMINI.md");
+  assert.match(readFileSync(join(dir, "AGENTS.md"), "utf8"), /Keep tests green/);
+  assert.match(readFileSync(join(dir, "AGENTS.md"), "utf8"), /<!-- agentmap:begin -->/);
+  assert.ok(existsSync(join(dir, ".gemini", "hooks", "agentmap-nudge.mjs")));
+  assert.ok(existsSync(join(dir, ".gemini", "settings.json")));
+  assert.ok(existsSync(join(dir, ".opencode", "plugins", "agentmap-nudge.js")));
+  cleanup(dir);
+});
+
+test("--install-skill is idempotent on AGENTS.md block", () => {
+  const dir = makeRepo({});
+  assert.equal(run(dir, "--install-skill", "--platform", "codex").status, 0);
+  const first = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  assert.equal(run(dir, "--install-skill", "--platform", "codex").status, 0);
+  assert.equal(first, readFileSync(join(dir, "AGENTS.md"), "utf8"));
+  cleanup(dir);
+});
+
 test("--install-skill --platform agents still installs legacy .agents path", () => {
   const dir = makeRepo({});
   const r = run(dir, "--install-skill", "--platform", "agents");
@@ -43,7 +66,18 @@ test("--install-skill --platform opencode uses .opencode/skills project path", (
   const r = run(dir, "--install-skill", "--platform", "opencode");
   assert.equal(r.status, 0, r.stderr);
   assert.ok(existsSync(join(dir, ".opencode", "skills", "agentmap", "SKILL.md")));
+  assert.ok(existsSync(join(dir, ".opencode", "plugins", "agentmap-nudge.js")));
+  assert.ok(existsSync(join(dir, "AGENTS.md")));
   assert.ok(!existsSync(join(dir, ".config", "opencode", "skills", "agentmap", "SKILL.md")));
+  cleanup(dir);
+});
+
+test("--install-skill --platform gemini installs GEMINI.md and hooks", () => {
+  const dir = makeRepo({});
+  const r = run(dir, "--install-skill", "--platform", "gemini");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(join(dir, "GEMINI.md")));
+  assert.ok(existsSync(join(dir, ".gemini", "hooks", "agentmap-nudge.mjs")));
   cleanup(dir);
 });
 
@@ -55,11 +89,12 @@ test("--install-skill --global --platform antigravity --dry-run targets ~/.gemin
   cleanup(dir);
 });
 
-test("--install-skill --global --platform opencode --dry-run targets ~/.config/opencode/skills", () => {
+test("--install-skill --global --platform opencode --dry-run targets ~/.config/opencode/skills and AGENTS.md", () => {
   const dir = makeRepo({});
   const r = run(dir, "--install-skill", "--global", "--platform", "opencode", "--dry-run");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\.config[/\\]opencode[/\\]skills[/\\]agentmap[/\\]SKILL\.md/);
+  assert.match(r.stdout, /\.config[/\\]opencode[/\\]AGENTS\.md/);
   assert.doesNotMatch(r.stdout, /\.opencode[/\\]skills[/\\]agentmap/);
   cleanup(dir);
 });
@@ -73,11 +108,20 @@ test("--install-skill --platform cursor --dry-run writes nothing", () => {
   cleanup(dir);
 });
 
+test("--install-skill --platform gemini --dry-run writes nothing", () => {
+  const dir = makeRepo({});
+  const r = run(dir, "--install-skill", "--platform", "gemini", "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /--dry-run/);
+  assert.ok(!existsSync(join(dir, "GEMINI.md")));
+  cleanup(dir);
+});
+
 test("--install-skill --platform all,agents expands and dedupes", () => {
   const dir = makeRepo({});
   const r = run(dir, "--install-skill", "--platform", "all,agents", "--dry-run");
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /skip.*legacy.*same path/s);
+  assert.match(r.stdout, /skip.*skill.*same path/s);
   cleanup(dir);
 });
 
