@@ -70,8 +70,11 @@ const PLATFORMS = {
       if (osPlatform() === "win32") return skillPath(root, true, ".agents", "skills", "agentmap", "SKILL.md");
       return skillPath(root, true, ".gemini", "skills", "agentmap", "SKILL.md");
     },
-    docs: (root, globalScope) =>
-      globalScope ? join(root, ".gemini", "GEMINI.md") : join(root, "GEMINI.md"),
+    docs: (root, globalScope) => {
+      if (!globalScope) return join(root, "GEMINI.md");
+      if (osPlatform() === "win32") return join(root, ".agents", "GEMINI.md");
+      return join(root, ".gemini", "GEMINI.md");
+    },
     hooks: true,
   },
   antigravity: {
