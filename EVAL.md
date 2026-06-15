@@ -43,6 +43,8 @@ context (same heuristic as `RESULTS.md`, both sides).
 > Caveats — read these before quoting numbers. (1) The ground-truth resolver is regex-based,
 > not a TypeScript type-checker; it is the *reference*, and a handful of exotic edges
 > (`tsconfig` `paths` aliases — none in these fixtures) may differ from a true compiler.
+> agentmap discovers package-level `tsconfig`/`jsconfig` files via `git ls-files` and
+> resolves aliases from the **nearest** config to each importing file (monorepo-safe).
 > (2) Definitions tested are uniquely-declared only — the easy, unambiguous cases. (3)
 > `agentmap --find` lists barrel **re-export** sites alongside the real declaration, which
 > is why top-1 trails top-3 — the definition is usually in the top 3, not always first. (4)
