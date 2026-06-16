@@ -3,6 +3,31 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+- **Atomic cache write + content integrity (issue #20, CWE-377).** The `map.json`
+  build is now written via an exclusive-create (`O_EXCL`) temp file with a
+  128-bit CSPRNG nonce, `fsync`, then `rename` — replacing the predictable
+  `map.json.tmp` literal. Pre-created files or symlinks at the temp path are
+  rejected (`EEXIST` via `wx`), and concurrent builds can no longer target the
+  same temp file (PID + ms timestamp + 128-bit nonce).
+- **Strict symlink policy for the cache directory.** `.claude/agentmap/` is
+  refused if it is a symlink or non-directory — clear error, no `realpath`
+  fallback, no env-var override. Mirrors the existing `sourceFingerprint()`
+  posture (`lstatSync` + skip symlinks) and the 0.4.0 symlink-loop guard.
+- **Cache content integrity gate.** Schema bumped 3 → 4: caches now carry a
+  `contentHash` (SHA-256 over the JSON body with the hash field stripped),
+  verified on every read. Mismatch (corruption, partial write, or tampering)
+  triggers a silent rebuild. Old schema-3 caches rebuild once. Note: this is
+  corruption detection, **not** a MAC — an attacker with write access to the
+  cache can recompute it; trust is bounded by the write ACL.
+- **No silent cross-mount copy fallback.** `rename(2)` returns `EXDEV` when
+  source and destination live on different filesystems; agentmap now surfaces
+  this as a clear `agentmap: atomic cache write failed across filesystems …
+  (EXDEV)` error rather than silently downgrading to a non-atomic copy+delete
+  that would reintroduce the window the atomic rename exists to close.
+
 ## [0.8.0] - 2026-06-15
 
 ### Added

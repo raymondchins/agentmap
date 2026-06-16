@@ -13,13 +13,17 @@
 //  Near-zero deps (ts-morph only). Runs in the target repo's cwd.
 //  Algorithm credit: Aider's repo map (Apache-2.0) — github.com/Aider-AI/aider
 // ============================================================================
-import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, statSync, lstatSync, chmodSync } from "node:fs";
+import {
+  writeFileSync, readFileSync, existsSync, mkdirSync, renameSync,
+  readdirSync, statSync, lstatSync, chmodSync,
+  openSync, closeSync, fsyncSync, unlinkSync,
+} from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -31,10 +35,12 @@ const tsMorph = () => (_tsm ??= _require("ts-morph"));
 
 const MAP = ".claude/agentmap/map.json";
 const MAP_LEGACY = ".claude/agentmap.json"; // pre-namespacing path; read for migration
-// Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
-// source-discovery / freshness checks treat them as first-class source files.
-// Old caches (schema 2) are ignored so the first run after upgrade rebuilds.
-const SCHEMA_VERSION = 3;
+// Bumped 3 → 4: map.json now carries a SHA-256 contentHash and ensureFresh()
+// verifies it before trusting the cache. Hardens TOCTOU/tampering on the cache
+// write path (issue #20, CWE-377). Old schema-3 caches are rebuilt once.
+//   2 → 3 was Vue SFC support. 3 → 4 is cache integrity (contentHash + atomic
+//   exclusive-create write via writeJsonAtomic).
+const SCHEMA_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // Tuning constants — KEEP THESE VALUES IDENTICAL (output + marketing must not
@@ -463,6 +469,148 @@ function makeProject() {
 }
 
 // ---------------------------------------------------------------------------
+// Cache integrity + atomic write helpers.
+//
+// The cache is an agent-facing trust boundary (query output, MCP tool results,
+// --doctor diagnostics all reflect map.json content), so writes must be atomic
+// and reads must verify integrity before trusting content. These helpers
+// implement the spec at spec/001. harden map json atomic write against
+// symlink race.md — see it for the full design notes and threat model.
+//
+//   writeJsonAtomic()  — unique exclusive-create temp file + fsync + rename.
+//   withMapContentHash() / hasValidMapContentHash() — SHA-256 of the payload,
+//                                                       NOT a MAC/signature.
+//   assertMapDirIsRealDirectory() — strict symlink rejection for the cache dir.
+//
+// contentHash is plaintext SHA-256. It detects accidental corruption and
+// unsophisticated tampering. A privileged attacker who can rewrite map.json
+// can also recompute the hash — this is NOT authentication.
+// ---------------------------------------------------------------------------
+
+// SHA-256 of the JSON-serialised payload. JSON.stringify is deterministic for
+// plain objects given stable insertion order, so the hash round-trips through
+// JSON.parse as long as the payload's field order is preserved (it is — V8 and
+// every spec-compliant engine preserve insertion order for string keys).
+function hashMapPayload(payload) {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+// Append a contentHash to a payload object. Field order: original payload
+// fields first, contentHash last. Destructuring it back out before hashing is
+// the exact inverse.
+function withMapContentHash(payload) {
+  return { ...payload, contentHash: hashMapPayload(payload) };
+}
+
+// Verify a cached map's contentHash. Cheap shape check first (64 hex chars)
+// so the very first run after a schema bump — reading a schema-3 cache with
+// no contentHash — fails fast without doing the hash work.
+function hasValidMapContentHash(map) {
+  if (!map || typeof map !== "object") return false;
+  if (typeof map.contentHash !== "string" || map.contentHash.length !== 64) return false;
+  const { contentHash, ...payload } = map;
+  return contentHash === hashMapPayload(payload);
+}
+
+// Strict symlink policy for the cache directory. Mirrors the existing posture
+// in sourceFingerprint() (lstatSync + skip symlinks) and the 0.4.0 CHANGELOG
+// "Symlink-loop guard in source enumeration / cache traversal". A symlinked
+// .claude/agentmap/ is refused — no realpath fallback, no env override (would
+// be a permanent foot-gun).
+function assertMapDirIsRealDirectory(dir) {
+  let st;
+  try { st = lstatSync(dir); }
+  catch { return; } // does not exist yet; mkdirSync below will create it
+  if (st.isSymbolicLink()) {
+    throw new Error(`agentmap: refusing to write cache through symlinked directory ${dir}`);
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`agentmap: cache path exists but is not a directory: ${dir}`);
+  }
+}
+
+// Unique temp path: PID + millisecond timestamp + 128-bit CSPRNG. PID rules
+// out same-process collisions; timestamp rules out same-process same-ms
+// collisions; random rules out cross-process prediction. Two concurrent
+// builds never target the same temp file.
+function uniqueTmpPath(finalPath) {
+  const dir = dirname(finalPath);
+  const base = basename(finalPath);
+  const nonce = randomBytes(8).toString("hex");
+  return join(dir, `.${base}.${process.pid}.${Date.now()}.${nonce}.tmp`);
+}
+
+function fsyncFileAndClose(fd) {
+  try { fsyncSync(fd); }
+  finally { closeSync(fd); }
+}
+
+// Directory fsync can fail on Windows, tmpfs, and network filesystems. Best-
+// effort — failure here does NOT invalidate the write (file is already
+// renamed); it just means we can't guarantee durability against a hard crash.
+function fsyncDirBestEffort(dir) {
+  let fd;
+  try {
+    fd = openSync(dir, "r");
+    fsyncSync(fd);
+  } catch {
+    // best-effort — see comment above
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+  }
+}
+
+// Atomic JSON write: unique exclusive-create temp file, fsync, rename, best-
+// effort dir fsync. Pre- and post-mkdir symlink checks. EXDEV throws a clear
+// error (no copy+delete fallback — that would reintroduce the non-atomic
+// window the atomic rename exists to close).
+//
+// `_renameHook` is a test-only seam: production code calls the real
+// `renameSync`. Static ESM bindings to node:fs are frozen at link time,
+// so tests cannot monkey-patch `fs.renameSync` and have writeJsonAtomic
+// see the patch. The hook lets the test suite inject EXDEV/generic
+// failures to exercise the error-and-cleanup branch.
+let _renameHook = null;
+function writeJsonAtomic(finalPath, value) {
+  const dir = dirname(finalPath);
+
+  assertMapDirIsRealDirectory(dir);
+  mkdirSync(dir, { recursive: true });
+  assertMapDirIsRealDirectory(dir);
+
+  const data = JSON.stringify(value);
+  const tmp = uniqueTmpPath(finalPath);
+  let fd;
+
+  try {
+    // "wx" = O_WRONLY | O_CREAT | O_EXCL. Fails if the path already exists —
+    // defeats pre-created files AND pre-created symlinks (EEXIST either way).
+    fd = openSync(tmp, "wx", 0o600);
+    writeFileSync(fd, data, "utf8");
+    fsyncFileAndClose(fd);
+    fd = undefined;
+
+    if (_renameHook) _renameHook(tmp, finalPath);
+    else renameSync(tmp, finalPath);
+    fsyncDirBestEffort(dir);
+  } catch (err) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
+    try { unlinkSync(tmp); } catch {}
+
+    if (err && err.code === "EXDEV") {
+      throw new Error(
+        `agentmap: atomic cache write failed across filesystems for ${finalPath}; refusing non-atomic copy fallback (EXDEV)`,
+      );
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // build() — parse the repo, extract file imports/exports (+ which named
 // symbols cross each edge), compute file PageRank, run the Aider-style
 // identifier graph to rank individual symbols, and persist agentmap.json.
@@ -679,18 +827,22 @@ function build() {
   for (const p of nodes) delete files[p].defaultExportName;
 
   const sha = currentSha();
-  const out = {
-    schema: SCHEMA_VERSION, generatedSha: sha, dirty: dirtyCount(), fileCount: nodes.length,
+  const payload = {
+    schema: SCHEMA_VERSION,
+    generatedSha: sha,
+    dirty: dirtyCount(),
+    fileCount: nodes.length,
     // fingerprint lets non-git repos (sha === "") trust the cache across runs.
     fingerprint: sha ? undefined : sourceFingerprint(),
-    hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), files,
+    hubs,
+    features,
+    rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT),
+    files,
   };
-  mkdirSync(".claude/agentmap", { recursive: true });
-  // Atomic write: tmp + rename so a concurrent background rebuild can never
-  // expose a torn/truncated map.json to a reader.
-  const tmp = MAP + ".tmp";
-  writeFileSync(tmp, JSON.stringify(out));
-  renameSync(tmp, MAP);
+  // Atomic, exclusive-create, fsynced write + contentHash verified on read.
+  // See writeJsonAtomic() and hasValidMapContentHash() for the full design.
+  const out = withMapContentHash(payload);
+  writeJsonAtomic(MAP, out);
   process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms\n`);
   return out;
 }
@@ -789,8 +941,10 @@ function rankSymbols(files, focus) {
   return [...ranked, ...tail];
 }
 
-// Serve the cached map only when provably current: same HEAD, known schema,
-// clean tree. A dirty tree REBUILDS from disk so queries reflect in-flight edits.
+// Serve the cached map only when provably current: same HEAD, known schema +
+// valid contentHash, clean tree. A dirty tree REBUILDS from disk so queries
+// reflect in-flight edits. A cache whose contentHash is missing/invalid (e.g.
+// an old schema-3 cache, or a tampered/corrupted cache) silently rebuilds.
 function ensureFresh() {
   const sha = currentSha();
   // Read the namespaced path; fall back to the legacy '.claude/agentmap.json'
@@ -800,15 +954,20 @@ function ensureFresh() {
   if (existsSync(mapPath)) {
     try {
       const cached = JSON.parse(readFileSync(mapPath, "utf8"));
-      // Trust cache only if: same HEAD, known schema, it was built CLEAN
+      // Integrity gate: schema must match AND contentHash must be valid for the
+      // cache payload. A schema-3 cache (no contentHash) fails here and falls
+      // through to build(), which is the desired one-time migration.
+      const integrityOk =
+        cached.schema === SCHEMA_VERSION && hasValidMapContentHash(cached);
+      // Trust cache only if: integrityOk, same HEAD, it was built CLEAN
       // (cached.dirty === 0 — never trust a map built mid-edit, even after a
       // revert returns the tree to clean), AND the tree is clean right now.
-      if (sha && cached.generatedSha === sha && cached.schema === SCHEMA_VERSION && cached.dirty === 0 && dirtyCount() === 0) return cached;
+      if (integrityOk && sha && cached.generatedSha === sha && cached.dirty === 0 && dirtyCount() === 0) return cached;
       // NON-git repo (sha === ""): no HEAD to compare. Trust the cache when a
       // lightweight source fingerprint (path:mtime:size hash) is unchanged so
       // we don't full-reparse on every call. Best-effort — any mismatch/error
       // falls through to build(). Does NOT touch the git-repo path above.
-      if (!sha && cached.schema === SCHEMA_VERSION && cached.fingerprint) {
+      if (integrityOk && !sha && cached.fingerprint) {
         const fp = sourceFingerprint();
         if (fp && cached.fingerprint === fp) return cached;
       }
@@ -1455,6 +1614,12 @@ function setupMcp({ dryRun = false } = {}) {
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+// CLI dispatch only runs when agentmap.mjs is invoked directly (not when
+// imported as a module — e.g. by tests via AGENTMAP_TEST_EXPORT). The check
+// compares process.argv[1] (the script Node was asked to run) against this
+// module's own URL; a mismatch means we were imported.
+const __isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
+if (__isMainModule) {
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
 // Return the value after flag `f`, but treat a missing value OR one that looks
@@ -1827,5 +1992,29 @@ else if (has("--any")) {
   const topHub = built.hubs[0] || null;
   out({ command: "build", fileCount: built.fileCount, features: Object.fromEntries(Object.entries(built.features).map(([k, v]) => [k, v.length])), topHub }, () => {
     console.log(`agentmap: ${built.fileCount} files | ${Object.keys(built.features).length} features | top hub: ${topHub || "—"}`);
+  });
+}
+} // end if (__isMainModule)
+
+// -----------------------------------------------------------------------------
+// Test-only export. Guarded by an env var so production bundles (no env var)
+// never see this surface. The exported helpers are internal; exposing them
+// under a flag lets the test suite exercise writeJsonAtomic, uniqueTmpPath,
+// and the hash helpers directly without spawning a subprocess for every case.
+// -----------------------------------------------------------------------------
+if (process.env.AGENTMAP_TEST_EXPORT) {
+  globalThis.__agentmapInternals = Object.freeze({
+    writeJsonAtomic,
+    uniqueTmpPath,
+    assertMapDirIsRealDirectory,
+    hashMapPayload,
+    withMapContentHash,
+    hasValidMapContentHash,
+    MAP,
+    MAP_LEGACY,
+    SCHEMA_VERSION,
+    // Test seam for writeJsonAtomic's rename step. See notes above.
+    setRenameHook: (fn) => { _renameHook = fn; },
+    clearRenameHook: () => { _renameHook = null; },
   });
 }

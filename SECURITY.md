@@ -61,6 +61,18 @@ agentmap does **not** transmit file contents anywhere — all processing is loca
 | Repository source files | Read-only; sensitive file patterns excluded from content search (see above) |
 | agentmap cache (`agentmap.json`) | Stores file paths, import edges, and symbol names from your codebase — no secrets — but is gitignored by default |
 
+### Cache integrity and atomic writes (schema 4)
+
+`agentmap --map` persists its build to `.claude/agentmap/map.json` via an atomic write: an `O_EXCL` temp file (`.<base>.<pid>.<ts>.<nonce>.tmp`, 128-bit CSPRNG nonce), `fsync`, then `rename`. The cache payload also carries a `contentHash` (SHA-256 over the JSON body with the hash field stripped) that is verified on every read — mismatches trigger a silent rebuild.
+
+Three properties this gives you:
+
+1. **No TOCTOU on the temp path (CWE-377).** Pre-created files or symlinks at the temp path are rejected by `O_EXCL` (`open wx` → `EEXIST`). Two concurrent builds cannot target the same temp file (PID + ms timestamp + 128-bit nonce).
+2. **Strict symlink policy for the cache dir.** `.claude/agentmap/` is refused if it is a symlink or non-directory — no `realpath` fallback, no env-var override. Mirrors the existing `sourceFingerprint()` posture.
+3. **No silent fallback across mounts.** `rename(2)` returns `EXDEV` when source and destination live on different filesystems; agentmap surfaces this as a clear `agentmap: atomic cache write failed across filesystems … (EXDEV)` error rather than silently downgrading to a non-atomic copy+delete (which would reintroduce the window the atomic rename exists to close).
+
+`contentHash` is a plaintext SHA-256 — it detects corruption and unsophisticated tampering, but is **not** a MAC. An attacker who can write to the cache can recompute it. Trust is bounded by the write ACL on `.claude/agentmap/`, same as any developer-local cache.
+
 ### Out of scope
 
 - Vulnerabilities in `ts-morph` / the bundled TypeScript compiler (report upstream to [microsoft/TypeScript](https://github.com/microsoft/TypeScript/security))

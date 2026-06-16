@@ -241,7 +241,11 @@ node agentmap.mjs --any <query>
 The first run builds and caches the map to `.claude/agentmap.json` (add it to
 `.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
 unchanged, and silently rebuild from disk when there are uncommitted `.ts/.tsx/.js/...`
-edits — so queries always reflect your in-flight work.
+edits — so queries always reflect your in-flight work. The cache is written atomically
+(exclusive-create temp + `fsync` + `rename`, schema 4 with a SHA-256 `contentHash`
+verified on every read), so an interrupted build or a tampered cache silently rebuilds
+rather than serving a corrupt map; see [SECURITY.md](./SECURITY.md#cache-integrity-and-atomic-writes-schema-4)
+for the threat model.
 
 Run with no flag to build + print a one-line summary:
 
