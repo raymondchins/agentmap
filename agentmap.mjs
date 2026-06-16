@@ -843,8 +843,7 @@ function fileBlock(key, f) {
 // touching comment-like sequences inside double-quoted strings (so a value like
 // "https://x" or "a /* b */ c" is preserved verbatim). Single-pass state machine:
 // tracks whether we're inside a string (and an escape inside it) vs a line/block
-// comment. Trailing commas are NOT handled — only comments, which is what real-
-// world settings.json files carry.
+// comment.
 function stripJsonComments(src) {
   let out = "";
   let inStr = false, esc = false, inLine = false, inBlock = false;
@@ -867,12 +866,55 @@ function stripJsonComments(src) {
   return out;
 }
 
+// Drop a `,` that immediately precedes the closing `}` or `]` of an object or
+// array (with optional whitespace between) — what VS Code's JSONC formatter and
+// JetBrains' "JSON with comments" both emit by default. Runs AFTER stripJson-
+// Comments so it never sees commas inside comments; it still tracks string
+// context so a `,` inside a string literal is preserved verbatim.
+//
+// A `,` is only treated as trailing when it FOLLOWS an element — i.e. when the
+// last significant (non-whitespace) character emitted was NOT an opener (`{`/
+// `[`) or another `,`. So `{,}`, `[,]`, and `[1,,]` (which are invalid even
+// under JSONC) are left for JSON.parse to reject with the caller's clear error
+// instead of being silently collapsed to empty containers.
+function stripTrailingCommas(src) {
+  let out = "";
+  let inStr = false, esc = false;
+  let lastSig = "";
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      out += c;
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') { inStr = false; lastSig = '"'; }
+      continue;
+    }
+    if (c === '"') { inStr = true; out += c; continue; }
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") { out += c; continue; }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < src.length && (src[j] === " " || src[j] === "\t" || src[j] === "\n" || src[j] === "\r")) j++;
+      const looksTrailing = src[j] === "}" || src[j] === "]";
+      const badPrev = lastSig === "" || lastSig === "{" || lastSig === "[" || lastSig === ",";
+      if (looksTrailing && !badPrev) continue;
+      out += c;
+      lastSig = ",";
+      continue;
+    }
+    out += c;
+    lastSig = c;
+  }
+  return out;
+}
+
 // Parse a settings.json that may be JSONC: try strict JSON first, then retry
-// after stripping comments, and only then surface the caller's clear error.
+// after stripping comments AND trailing commas, and only then surface the
+// caller's clear error.
 function parseSettings(text, settingsPath) {
   try { return JSON.parse(text) || {}; }
   catch {
-    try { return JSON.parse(stripJsonComments(text)) || {}; }
+    try { return JSON.parse(stripTrailingCommas(stripJsonComments(text))) || {}; }
     catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run`); }
   }
 }

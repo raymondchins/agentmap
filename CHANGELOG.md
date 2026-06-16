@@ -3,6 +3,11 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **JSONC trailing-comma tolerance** (#19) — `--install-hooks`, `--hook-status`, and `--doctor` now accept `.claude/settings.json` files that contain trailing commas (the default output of VS Code’s JSONC formatter and JetBrains’ “JSON with comments” mode). Previously the `stripJsonComments` comment-stripping pass ran but the resulting string was still handed to strict `JSON.parse`, so any trailing comma surfaced the misleading error “`.claude/settings.json` is not valid JSON — fix or remove it, then re-run” and blocked the command entirely. The fix adds a `stripTrailingCommas` helper (state-machine, string-context-aware, runs after comment stripping) chained in `parseSettings`. Leading commas and double-commas, which are invalid in JSONC, are still rejected with the same clear error so parse failures remain informative.
+
 ## [0.8.0] - 2026-06-15
 
 ### Added
