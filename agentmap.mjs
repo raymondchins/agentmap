@@ -172,16 +172,36 @@ function sourceFingerprint() {
 // support `<script>` + `<script setup>` in the same SFC for indexing — we pick
 // the richer one: prefer `setup` block if present, else the normal block.
 function extractVueScripts(text) {
+  // Defense-in-depth: a real Vue SFC is rarely >50 kB. 1 MB is a 20× safety
+  // margin that still tolerates code-generated SFCs. Beyond that we assume the
+  // input is adversarial or corrupted and skip extraction rather than risk
+  // slow regex behavior on a huge input. The typeof check defends against
+  // accidental non-string callers (the function's type contract was implicit).
+  if (typeof text !== "string" || text.length > 1_000_000) return null;
   const blocks = [];
-  // Open-tag matcher is QUOTE-AWARE: attribute values may legitimately contain
-  // `>` (e.g. `<script setup lang="ts" generic="T extends Record<string, unknown>">`
-  // — a common Vue 3 idiom for typed generic components). We require all
-  // attributes to be either bare (`setup`) or quoted (`name="value"` or
-  // `name='value'`), which matches valid SFC syntax. Bareword and unquoted forms
-  // are intentionally not matched because they're not valid HTML and would
-  // almost certainly indicate a parsing bug we want to surface, not silently
-  // misparse.
-  const re = /<script(\s+[a-zA-Z][\w-]*(\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*\/?>/gi;
+  // Open-tag matcher is QUOTE-AWARE and NON-BACKTRACKING.
+  //
+  // Quote-awareness: attribute values may legitimately contain `>` (e.g.
+  // `<script setup lang="ts" generic="T extends Record<string, unknown>">`
+  // — a common Vue 3 idiom for typed generic components). Branches 2 and 3
+  // match the full quoted value via `[^"]*` / `[^']*`, so a `>` inside the
+  // quotes is consumed by the quoted-value match, not by the `>` terminator.
+  //
+  // Non-backtracking: the outer `(?:...)*` wraps three DETERMINISTIC branches
+  // with no optional inner group. Each iteration of `*` consumes exactly one
+  // complete attribute, so the engine never re-explores partitions of "with
+  // value" vs "without value" — the catastrophic-backtracking shape that
+  // caused the ReDoS (#15, CWE-1333) on inputs like `<script aaaa…`.
+  //
+  // Branches:
+  //   1. `\s+[a-zA-Z][\w-]*`                              bareword attr (e.g. `setup`)
+  //   2. `\s+[a-zA-Z][\w-]*\s*=\s*"[^"]*"`                double-quoted value
+  //   3. `\s+[a-zA-Z][\w-]*\s*=\s*'[^']*'`                single-quoted value
+  //
+  // Bareword and unquoted forms (`<script foo=bar>`) are intentionally not
+  // matched because they're not valid SFC syntax and would almost surely
+  // indicate a parsing bug we want to surface, not silently misparse.
+  const re = /<script(?:\s+[a-zA-Z][\w-]*|\s+[a-zA-Z][\w-]*\s*=\s*"[^"]*"|\s+[a-zA-Z][\w-]*\s*=\s*'[^']*')*\s*\/?>/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
     const attrs = (m[0].slice(7, -1) || "").trim(); // strip <script…> wrapper
@@ -2010,6 +2030,7 @@ if (process.env.AGENTMAP_TEST_EXPORT) {
     hashMapPayload,
     withMapContentHash,
     hasValidMapContentHash,
+    extractVueScripts,
     MAP,
     MAP_LEGACY,
     SCHEMA_VERSION,

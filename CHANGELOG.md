@@ -27,6 +27,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   this as a clear `agentmap: atomic cache write failed across filesystems …
   (EXDEV)` error rather than silently downgrading to a non-atomic copy+delete
   that would reintroduce the window the atomic rename exists to close.
+- **ReDoS hardening for Vue SFC extraction (issue #15, CWE-1333).**
+  `extractVueScripts()` used a regex with a nested quantifier over an optional
+  group (`(?:\s+=\s+(?:"[^"]*"|'[^']*'))?` inside `(…)*`) — a textbook
+  catastrophic-backtracking shape. A crafted `.vue` file with a malformed
+  `<script>` tag (e.g. `<script aaaa…`, or an unclosed quoted attribute) could
+  hang agentmap at 100% CPU during `--map`/`--print`/MCP. The regex is replaced
+  by a quote-aware three-branch non-backtracking form (no optional inner
+  groups); the prior typed-generic SFC contract (`generic="T extends Record<…>"`)
+  and `>`-inside-quoted-attr cases are preserved. A 1 MB length guard rejects
+  pathological inputs before any regex work runs (defense-in-depth).
 
 ## [0.8.0] - 2026-06-15
 
