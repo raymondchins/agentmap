@@ -56,6 +56,7 @@ const FOCUS_BUDGET = 1024;       // --map token budget when --focus is given
 const HUBS_LIMIT = 15;           // # of hubs persisted/printed
 const RANKED_SYMBOLS_LIMIT = 80; // # of ranked symbols persisted
 const CONTENT_LINES_LIMIT = 40;  // # of git-grep lines shown in the --any content fallback
+const SYMBOL_MATCH_LIMIT = 50;   // max --find/--any symbol matches shown (ranked by PageRank), else token blowup
 const RELATED_LIMIT = 10;        // # of related files shown by --relates
 const SYMS_PER_FILE = 8;         // per-file symbol cap in the --map digest
 const DEFAULT_SYMBOLS = 30;      // default count for --symbols with no n
@@ -161,6 +162,16 @@ const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
 
 // get-or-init a Map value (readable replacement for the dense `m.get(k) ?? m.set(...)` idiom).
 const getOrSet = (m, k, make) => { let v = m.get(k); if (v === undefined) { v = make(); m.set(k, v); } return v; };
+
+// Rank symbol matches ({file,name,kind}) by their containing file's PageRank
+// (desc), tie-broken by path then name for a stable order. A broad --find/--any
+// on a large repo can match thousands of exports; showing them all defeats the
+// token-savings point, so callers slice the ranked list to SYMBOL_MATCH_LIMIT and
+// surface a "showing N of M" footer.
+const rankMatches = (files, matches) =>
+  matches.slice().sort((a, b) =>
+    (files[b.file]?.pagerank ?? 0) - (files[a.file]?.pagerank ?? 0)
+    || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 // Best-effort source fingerprint for NON-git repos (sha == ""). Hash of sorted
 // "path:mtimeMs:size" for source files so the cache can be trusted between runs
@@ -1955,26 +1966,31 @@ async function main() {
       const data = ensureFresh();
       const keys = Object.keys(data.files);
       const { key: fileKey, candidates } = resolveFile(keys, data.files, raw);
-      // structured symbol/feature hits (reused by both prose + JSON shapes)
-      const symObjs = [];
+      // structured symbol/feature hits (reused by both prose + JSON shapes),
+      // ranked by PageRank and capped so a broad query can't dump thousands.
+      const symAll = [];
       for (const [path, f] of Object.entries(data.files))
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) symObjs.push({ file: path, name: e.name, kind: e.kind });
+          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+      const symTotal = symAll.length;
+      const symObjs = rankMatches(data.files, symAll).slice(0, SYMBOL_MATCH_LIMIT);
+      const symTrunc = symTotal > symObjs.length;
+      const symFoot = symTrunc ? ` (showing top ${symObjs.length} of ${symTotal} by pagerank — narrow your query)` : "";
       const symHits = symObjs.map((s) => `  ${s.file} → ${s.name} (${s.kind})`);
       const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
       if (fileKey) {
         // A file resolved — but ALSO surface symbol/feature hits (fix #3) so a
         // loose path match (e.g. "auth") can't shadow a symbol the user wanted.
         const f = data.files[fileKey];
-        out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
+        out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
           console.log(`[structure:file] ${fileKey}  (pr ${f.pagerank ?? "—"})`);
           fileBlock(fileKey, f);
-          if (symHits.length) { console.log(`[structure] ${symHits.length} symbol match for "${raw}":`); console.log(symHits.join("\n")); }
+          if (symHits.length) { console.log(`[structure] ${symTotal} symbol match for "${raw}"${symFoot}:`); console.log(symHits.join("\n")); }
           if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
         });
       } else if (symHits.length || featNames.length) {
-        out({ command: "any", query: raw, kind: "structure", symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
-          console.log(`[structure] ${symHits.length} symbol, ${featNames.length} feature match for "${raw}"`);
+        out({ command: "any", query: raw, kind: "structure", symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
+          console.log(`[structure] ${symTotal} symbol, ${featNames.length} feature match for "${raw}"${symFoot}`);
           if (symHits.length) console.log(symHits.join("\n"));
           if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
         });
@@ -2004,13 +2020,16 @@ async function main() {
     else {
       const q = raw.toLowerCase();
       const data = ensureFresh();
-      const matches = [];
+      const all = [];
       for (const [path, f] of Object.entries(data.files))
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) matches.push({ file: path, name: e.name, kind: e.kind });
-      if (!matches.length) process.exitCode = 1;
-      out({ command: "find", query: raw, matches }, () => {
-        console.log(`find "${raw}": ${matches.length} match`);
+          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+      if (!all.length) process.exitCode = 1;
+      const ranked = rankMatches(data.files, all);
+      const matches = ranked.slice(0, SYMBOL_MATCH_LIMIT);
+      const truncated = ranked.length > matches.length;
+      out({ command: "find", query: raw, total: ranked.length, shown: matches.length, truncated, matches }, () => {
+        console.log(`find "${raw}": ${ranked.length} match${truncated ? ` (showing top ${matches.length} by pagerank — narrow your query)` : ""}`);
         if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})`).join("\n"));
       });
     }
