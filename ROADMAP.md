@@ -228,15 +228,19 @@ discovered is trustworthy and fast.
   package a Gemini extension (`hooks.json` + GEMINI.md + MCP) for the gallery.
 
 ### Release engineering (from the completeness critic — uncovered dimension)
-- [ ] **Git tags + tag-triggered publish workflow** with `npm publish --provenance`
-  (repo has zero tags, zero GitHub Releases, no publish workflow).
+- [x] **Tag-triggered publish workflow** with `npm publish --provenance`
+  (`.github/workflows/publish.yml`) — `v*` tag push → test gate → provenance publish
+  → GitHub Release, with a tag/`package.json` version-drift guard. Tags already
+  existed (the "zero tags" note was stale); still need the `NPM_TOKEN` repo secret
+  + first GitHub Release. *(v0.10.0 published manually 2026-07-03 to close the RCE gap;
+  future releases go through this workflow.)*
 - [ ] **Release automation** (release-please / changesets) — structurally fixes
   the recurring missing-CHANGELOG-entry problem (and the lockfile-version drift
   just seen in `aa62353`).
-- [ ] **README trust markers** — state "fully local, no network, no telemetry"
-  (verified: zero `fetch`/`http` in `agentmap.mjs`) — a free differentiator vs
-  cloud/embedding indexers. Add a name-collision note (`npx agentmap` runs an
-  unrelated package; always use the scoped `@raymondchins/agentmap`).
+- [x] **README trust markers** — states "fully local, no network calls, no telemetry"
+  (verified: zero `fetch`/`http` in `agentmap.mjs`/`mcp.mjs`) and the name-collision
+  note (`npx agentmap` unscoped is an unrelated package; always use the scoped
+  `@raymondchins/agentmap`). Landed in the intro blockquote.
 - [ ] **Fix the Gemini nudge (functional bug, do here or Batch B)** —
   `hooks/agentmap-gemini-nudge.mjs:59`: BeforeTool doesn't support
   `additionalContext`, so the nudge is silently dropped. Move to AfterTool

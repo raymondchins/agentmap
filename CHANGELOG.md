@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Tag-triggered publish workflow** (`.github/workflows/publish.yml`) — pushing a `v*`
+  tag runs the full test gate, then publishes to npm with **provenance** (OIDC-signed
+  supply-chain attestation, only possible from CI) and cuts a GitHub Release. Guards
+  against tag/`package.json` version drift. One-time setup: add an npm Automation token
+  as the `NPM_TOKEN` repo secret. (Batch 4 — release engineering.)
+
+### Changed
+- **README trust markers** — states the privacy posture ("fully local — no network calls,
+  no telemetry", verified: zero `fetch`/`http` in source) and a name-collision caveat
+  (`npx agentmap` unscoped is an unrelated package; always use `@raymondchins/agentmap`).
+
 ## [0.10.0] - 2026-07-03
 
 ### Added
