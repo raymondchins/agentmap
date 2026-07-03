@@ -63,6 +63,38 @@ test('sensitive files are excluded from the --any content sweep (no secret leak)
   cleanup(dir);
 });
 
+test('expanded denylist: key/keystore/SSH/credential-dotfile secrets are excluded', () => {
+  const SECRET = "EXPANDED_SECRET_VALUE_ZZQ";
+  const dir = makeRepo({
+    ...FIXTURE,
+    ".npmrc": `//registry.npmjs.org/:_authToken=${SECRET}\n`,
+    ".pgpass": `localhost:5432:db:user:${SECRET}\n`,
+    ".git-credentials": `https://user:${SECRET}@github.com\n`,
+    "id_ed25519": `${SECRET}\n`,
+    "service.p8": `${SECRET}\n`,
+    "app.keystore": `${SECRET}\n`,
+  });
+  gitInit(dir, { commit: true });
+  const r = run(dir, "--any", SECRET);
+  assert.doesNotMatch(r.stdout, /\.npmrc|\.pgpass|\.git-credentials|id_ed25519|service\.p8|app\.keystore/, "an expanded-denylist secret file leaked into content-search results");
+  assert.equal(r.status, 1, `expected no-result exit 1 after excluding expanded secrets, got ${r.status}: ${r.stderr}`);
+  cleanup(dir);
+});
+
+test('denylist does NOT over-exclude: a tokenizer.ts source file stays searchable', () => {
+  // The expanded denylist deliberately omits a bare `token` substring match — an
+  // ordinary source file like tokenizer.ts must remain content-searchable.
+  const dir = makeRepo({
+    ...FIXTURE,
+    "src/tokenizer.ts": `export const MARKER = "FINDABLE_TOKENIZER_LITERAL";`,
+  });
+  gitInit(dir, { commit: true });
+  const r = run(dir, "--any", "FINDABLE_TOKENIZER_LITERAL");
+  assert.equal(r.status, 0, `tokenizer.ts literal should be found, got ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /tokenizer\.ts/, "tokenizer.ts was wrongly excluded from content search");
+  cleanup(dir);
+});
+
 test('a literal that DOES exist still matches inertly (positive control)', () => {
   // Prove the content path actually works for a benign literal containing a
   // metacharacter-ish token, so the inert-on-injection result above isn't just
