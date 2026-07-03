@@ -11,6 +11,12 @@
 // Every fixture is a plain object of { path: contents }, ready to pass to
 // `makeRepo()` or `writeFiles()` from test/helpers.mjs.
 
+// Static ESM import of the shared harness. Must NOT be a sync `require()` of
+// helpers.mjs — `require()` of an ES module is only supported on Node 22.12+,
+// so the old createRequire() form threw ERR_REQUIRE_ESM on the Node 18 CI leg
+// (engines still declares node >=18). A static import works on every version.
+import { run } from "../helpers.mjs";
+
 // ---------------------------------------------------------------------------
 // Plain TS helper library — the import TARGET most SFCs reach for.
 // ---------------------------------------------------------------------------
@@ -276,7 +282,6 @@ export const VUE_PROJECT = {
 
 // Run `agentmap` in `dir` with given args; assert exit 0; parse stdout as JSON.
 export function vueJson(dir, ...args) {
-  const { run } = helpers();
   const r = run(dir, "--json", ...args);
   if (r.status !== 0) {
     const err = new Error(`agentmap --json ${args.join(" ")} exited ${r.status}\nstderr:\n${r.stderr}\nstdout:\n${r.stdout}`);
@@ -286,11 +291,6 @@ export function vueJson(dir, ...args) {
   try { return JSON.parse(r.stdout); }
   catch { throw new Error(`stdout was not a single JSON object:\n${r.stdout}`); }
 }
-
-// Sync require of test/helpers.mjs so fixtures stay pure data. Resolved against
-// this module's URL so it works regardless of the test runner's cwd.
-import { createRequire } from "node:module";
-const helpers = () => createRequire(import.meta.url)("../helpers.mjs");
 
 // Any leaked virtual path (Foo.vue.ts / Foo.vue.js) is a contract violation.
 const VIRTUAL_RE = /\.vue\.(ts|js|mjs|cjs|tsx|jsx)$/i;
