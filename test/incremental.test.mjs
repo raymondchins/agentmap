@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 // ============================================================================
-//  Batch 3 Tier 2 — true incremental dirty build. When every dirty entry is a
-//  MODIFICATION of a file already in the clean-HEAD facts snapshot, agentmap
-//  reparses only the changed files (against empty resolution stubs of the rest)
-//  and re-runs the cheap global assembly — producing a map BYTE-IDENTICAL to a
-//  full dirty rebuild. Adds/deletes/renames change the file set (key ordering +
-//  importer edges) and are declined → full dirty build (still Tier-1 cached).
+//  Batch 3 Tier 2 — true incremental dirty build (EXPERIMENTAL, opt-in via
+//  AGENTMAP_INCREMENTAL=1). When every dirty entry is a MODIFICATION of a file
+//  already in the clean-HEAD facts snapshot, agentmap reparses only the changed
+//  files (against empty resolution stubs of the rest) and re-runs the cheap global
+//  assembly — producing a map BYTE-IDENTICAL to a full dirty rebuild. Adds/deletes/
+//  renames + re-export/monorepo/CJS hazards are declined → full dirty build (the
+//  default Tier-1 path, still cached).
 //
 //  Every correctness test proves incremental == full by capturing map.dirty.json
-//  from the incremental path and again with AGENTMAP_NO_INCREMENTAL=1 (forced
-//  full) and asserting byte-equality.
+//  from the opt-in incremental path (AGENTMAP_INCREMENTAL=1) and again from the
+//  default full dirty build, and asserting byte-equality.
 // ============================================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -29,21 +30,27 @@ function runAM(dir, args, env = {}) {
   return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status ?? 1 };
 }
 const readDirty = (dir) => readFileSync(join(dir, MAP_DIRTY), "utf8");
-const wasIncremental = (r) => /\(incremental\)/.test(r.stderr);
+// Tier 2 is opt-in (AGENTMAP_INCREMENTAL=1). An incremental EXTRACT prints a
+// "(incremental)" line, but a run can still DECLINE afterward and fall back to a
+// full build (which prints a second plain "parsing N source files…" line). True
+// incremental = the incremental line AND exactly ONE parsing line total.
+const INC_ENV = { AGENTMAP_INCREMENTAL: "1" };
+const wasIncremental = (r) =>
+  /\(incremental\)/.test(r.stderr) && (r.stderr.match(/parsing \d+ source files/g) || []).length === 1;
 
-// Prime the clean cache, apply `edits`, then assert the incremental map equals a
-// forced full dirty build byte-for-byte. Returns the incremental run's stderr.
+// Prime the clean cache, apply `edits`, then assert the opt-in incremental build
+// equals the default full dirty build byte-for-byte. Returns the incremental run.
 function assertIncrementalEqualsFull(dir, edits, { expectIncremental }) {
   runAM(dir, ["--hubs"]);                                 // clean prime → map.json + facts.json
   assert.ok(existsSync(join(dir, FACTS)), "clean build must persist facts.json");
   writeFiles(dir, edits);
 
-  const rInc = runAM(dir, ["--map", "--json"]);           // default path (incremental if eligible)
+  const rInc = runAM(dir, ["--map", "--json"], INC_ENV);  // Tier 2 opt-in
   assert.equal(rInc.status, 0, rInc.stderr);
   const inc = readDirty(dir);
   rmSync(join(dir, MAP_DIRTY), { force: true });
 
-  const rFull = runAM(dir, ["--map", "--json"], { AGENTMAP_NO_INCREMENTAL: "1" });
+  const rFull = runAM(dir, ["--map", "--json"]);          // default = Tier 1 full dirty build
   assert.equal(rFull.status, 0, rFull.stderr);
   const full = readDirty(dir);
 
@@ -121,9 +128,9 @@ test("deleting a file falls back to a full build and stays byte-identical", () =
     gitInit(dir, { commit: true });
     runAM(dir, ["--hubs"]);                               // clean prime
     rmSync(join(dir, "util/helper.ts"), { force: true }); // delete
-    const rInc = runAM(dir, ["--map", "--json"]);
+    const rInc = runAM(dir, ["--map", "--json"], INC_ENV);
     const inc = readDirty(dir); rmSync(join(dir, MAP_DIRTY), { force: true });
-    const rFull = runAM(dir, ["--map", "--json"], { AGENTMAP_NO_INCREMENTAL: "1" });
+    const rFull = runAM(dir, ["--map", "--json"]);
     const full = readDirty(dir);
     assert.equal(inc, full, "delete must fall back to full and match");
     assert.ok(!wasIncremental(rInc), "delete must not use the incremental path");
@@ -137,9 +144,9 @@ test("a renamed file falls back to a full build and stays byte-identical", () =>
     gitInit(dir, { commit: true });
     runAM(dir, ["--hubs"]);
     git(dir, "mv", "util/helper.ts", "util/helper2.ts");
-    const rInc = runAM(dir, ["--map", "--json"]);
+    const rInc = runAM(dir, ["--map", "--json"], INC_ENV);
     const inc = readDirty(dir); rmSync(join(dir, MAP_DIRTY), { force: true });
-    const rFull = runAM(dir, ["--map", "--json"], { AGENTMAP_NO_INCREMENTAL: "1" });
+    const rFull = runAM(dir, ["--map", "--json"]);
     const full = readDirty(dir);
     assert.equal(inc, full, "rename must fall back to full and match");
     assert.ok(!wasIncremental(rInc), "rename must not use the incremental path");
@@ -211,23 +218,25 @@ const DEFAULT_REEXPORT = {
   "tsconfig.json": '{"compilerOptions":{"jsx":"react-jsx","baseUrl":"."}}\n',
 };
 
-test("modifying a file to `export default <imported>` stays byte-identical vs a full build", () => {
+test("modifying a file to `export default <imported>` falls back to full and stays byte-identical", () => {
   const dir = makeRepo(DEFAULT_REEXPORT);
   try {
     gitInit(dir, { commit: true });
+    // The default export names an imported binding whose declaration is in another
+    // (stub) file → kind "?" → the gate declines to a full build.
     assertIncrementalEqualsFull(dir,
       { "src/Widget.tsx": "import Panel from './Panel';\nexport function helperOne() { return 1; }\nexport default Panel;\n" },
-      { expectIncremental: true });
+      { expectIncremental: false });
   } finally { cleanup(dir); }
 });
 
-test("modifying a file to `export { imported as default }` stays byte-identical vs a full build", () => {
+test("modifying a file to `export { imported as default }` falls back to full and stays byte-identical", () => {
   const dir = makeRepo(DEFAULT_REEXPORT);
   try {
     gitInit(dir, { commit: true });
     assertIncrementalEqualsFull(dir,
       { "src/Widget.tsx": "import Panel from './Panel';\nexport function helperOne() { return 1; }\nexport { Panel as default };\n" },
-      { expectIncremental: true });
+      { expectIncremental: false });
   } finally { cleanup(dir); }
 });
 
@@ -302,11 +311,11 @@ test("missing facts snapshot falls back to a full build (no crash)", () => {
     runAM(dir, ["--hubs"]);
     rmSync(join(dir, FACTS), { force: true });            // wipe the snapshot
     writeFiles(dir, { "c.ts": "import { b } from './b';\nexport const c2 = b; // edit\n" });
-    const rInc = runAM(dir, ["--map", "--json"]);
+    const rInc = runAM(dir, ["--map", "--json"], INC_ENV); // opt-in, but no snapshot to use
     assert.equal(rInc.status, 0, rInc.stderr);
     assert.ok(!wasIncremental(rInc), "no facts snapshot ⇒ must fall back to full");
     const inc = readDirty(dir); rmSync(join(dir, MAP_DIRTY), { force: true });
-    const full = (() => { runAM(dir, ["--map", "--json"], { AGENTMAP_NO_INCREMENTAL: "1" }); return readDirty(dir); })();
+    const full = (() => { runAM(dir, ["--map", "--json"]); return readDirty(dir); })();
     assert.equal(inc, full, "fallback map must equal a full build");
   } finally { cleanup(dir); }
 });
