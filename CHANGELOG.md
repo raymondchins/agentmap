@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Performance
+- **Capped `--find`/`--any` symbol matches (Batch 3).** A broad symbol query used to
+  emit every matching export (thousands / ~93k tokens on a large repo, defeating the
+  token-savings point). Matches are now ranked by the containing file's PageRank and
+  capped to 50, with a "showing top N of M by pagerank — narrow your query" footer in
+  prose and `total`/`shown`/`truncated` (`--find`) and `symbolsTotal`/`symbolsTruncated`
+  (`--any`) in JSON. Ranking keeps the most important matches when truncated; small
+  result sets are unaffected.
+
 ## [0.11.0] - 2026-07-03
 
 ### Performance
