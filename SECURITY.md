@@ -4,10 +4,10 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x   | Yes       |
-| < 0.3   | No        |
+| 0.9.x   | Yes       |
+| < 0.9   | No        |
 
-Only the latest `0.3.x` release receives security fixes. Upgrade before reporting.
+Only the latest `0.9.x` release receives security fixes. Upgrade before reporting.
 
 ---
 
@@ -33,33 +33,33 @@ Running `--install-hooks` modifies three things on the local machine:
 
 | File modified | What it does |
 |---|---|
-| `.git/hooks/post-commit` | Appends a line that runs `agentmap --refresh` after every commit to keep the map current |
-| `.gitignore` | Appends entries to exclude agentmap's cache files (`agentmap.json`, `agentmap-cache/`) from version control |
+| `.git/hooks/post-commit` | Installs a hook that rebuilds the map after every commit to keep it current |
+| `.gitignore` | Appends an entry to exclude agentmap's cache directory (`.claude/agentmap/`) from version control |
 | `.claude/settings.json` | Appends a `PreToolUse(Grep)` hook that nudges Claude Code to query agentmap before running a raw grep |
 
 Preview what will change before committing: `npx @raymondchins/agentmap --install-hooks --dry-run`
 
-The post-commit hook is a single-line shell command that only invokes agentmap's own binary — it does not source or execute any repo-local scripts. Repos can opt out of the hook running locally by setting the environment variable `AGENTMAP_HOOK_NO_LOCAL=1`.
+By default the post-commit hook invokes only the **installed** agentmap package — the repo's `node_modules/.bin/agentmap`, a PATH binary verified to resolve to `@raymondchins/agentmap`, or `npx @raymondchins/agentmap`. It does **not** execute a repo-local `./agentmap.mjs` unless you explicitly opt in with `AGENTMAP_HOOK_ALLOW_LOCAL=1` (intended only for developing agentmap itself), so an attacker-planted `agentmap.mjs` in a checked-out branch cannot run on your next commit.
 
 ### File access during content search (`--any`)
 
-When no graph match is found, agentmap falls back to a live `git grep` over tracked files and may also scan untracked files in the working tree. The following files are excluded from content search by pattern:
+When no graph match is found, agentmap falls back to a live `git grep` over tracked files and may also scan untracked files in the working tree. The following files are excluded from content search by pattern (case-insensitive name matches):
 
-- `.env`, `.env.*`
-- `*.pem`, `*.key`, `*.p12`, `*.pfx`
-- Files matching `*secret*`, `*credential*`, `*password*`, `*token*`
+- `.env`, `.env.*`, `*.env` (at any depth)
+- `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `id_rsa*`
+- Files whose name contains `secret`, `credential`, or `password`
 
-agentmap does **not** transmit file contents anywhere — all processing is local.
+This denylist is a best-effort guard for conventionally-named secret files, not a guarantee — a secret stored in an unmatched filename can still be surfaced. agentmap does **not** transmit file contents anywhere; all processing is local.
 
 ### Trust boundaries
 
 | Boundary | Notes |
 |---|---|
 | agentmap binary | Trusted — installed from npm, same as any devDependency |
-| Post-commit hook | Executes as the committing user; only runs agentmap itself, not arbitrary repo scripts |
+| Post-commit hook | Executes as the committing user; runs the installed agentmap package only, never a repo-local script unless `AGENTMAP_HOOK_ALLOW_LOCAL=1` is set |
 | `PreToolUse` hook in `.claude/settings.json` | Executes inside Claude Code's hook runner as the Claude Code process user |
 | Repository source files | Read-only; sensitive file patterns excluded from content search (see above) |
-| agentmap cache (`agentmap.json`) | Stores file paths, import edges, and symbol names from your codebase — no secrets — but is gitignored by default |
+| agentmap cache (`.claude/agentmap/map.json`) | Stores file paths, import edges, and symbol names from your codebase — no secrets — but is gitignored by default |
 
 ### Out of scope
 

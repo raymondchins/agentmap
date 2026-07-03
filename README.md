@@ -96,11 +96,11 @@ agent toward *before* it falls back to serial grep.
 | | **agentmap** | Aider repo map | RepoMapper | Repomix | code2prompt |
 | --- | --- | --- | --- | --- | --- |
 | **Ranking algorithm** | Personalized PageRank (file + symbol graphs) | PageRank (graph ranking) | Importance heuristics | None (file order) | None (file order) |
-| **Languages** | TS/JS (via ts-morph) | Many (tree-sitter) | Many (tree-sitter) | Language-agnostic (text) | Language-agnostic (text) |
+| **Languages** | TS/JS + Vue SFC (via ts-morph) | Many (tree-sitter) | Many (tree-sitter) | Language-agnostic (text) | Language-agnostic (text) |
 | **Token-budget output** | Yes — `--map [--tokens N]` ranked digest | Yes (built into Aider's context) | Partial | Yes (size caps) | Yes (templates/caps) |
 | **Agent-loop integration** | **Yes — post-commit auto-refresh + PreToolUse hook** | In-process (Aider only) | No | No | No |
 | **Dependencies** | `ts-morph` only | Python + tree-sitter stack | Python + tree-sitter | Node | Rust binary |
-| **Install** | `npx @raymondchins/agentmap` | `pip install aider` | `pip install` | `npx`/global | `cargo`/binary |
+| **Install** | `npx @raymondchins/agentmap` | `pip install aider-chat` | `pip install` | `npx`/global | `cargo`/binary |
 
 What that table is **not** claiming: agentmap is TS/JS-only (the others are multi-language),
 and it's a **file-level import graph**, not a full call-site/reference resolver (see
@@ -120,7 +120,7 @@ serial-greps**. You wire it once — then it stays current on its own, and stays
 
 ### 1. Auto-refresh on commit
 
-[`hooks/post-commit`](./hooks/post-commit) rebuilds `.claude/agentmap.json` after each
+[`hooks/post-commit`](./hooks/post-commit) rebuilds `.claude/agentmap/map.json` after each
 commit, detached + silenced so it never slows the commit. It skips during
 rebase/merge/cherry-pick and no-ops if Node is missing.
 
@@ -131,7 +131,7 @@ npx @raymondchins/agentmap --install-hooks
 ```
 
 This copies `hooks/post-commit` into `.git/hooks/`, sets it executable, ensures
-`.claude/agentmap.json` is in `.gitignore`, and **auto-wires the `PreToolUse` nudge
+`.claude/agentmap/` is in `.gitignore`, and **auto-wires the `PreToolUse` nudge
 hook into `.claude/settings.json`** (merge-safe + idempotent) so map enforcement is
 on by default — no manual paste. Manual alternative for just the post-commit hook:
 
@@ -141,8 +141,11 @@ cp hooks/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
-The hook auto-locates the builder: a local `agentmap.mjs`, then `scripts/agentmap.mjs`, then
-the installed `agentmap` binary, then `npx --no-install @raymondchins/agentmap`.
+The hook resolves the builder to the **installed** package — `node_modules/.bin/agentmap`,
+a PATH `agentmap` binary verified to be `@raymondchins/agentmap`, then
+`npx @raymondchins/agentmap`. It never runs a repo-local `./agentmap.mjs` unless you opt in
+with `AGENTMAP_HOOK_ALLOW_LOCAL=1` (for developing agentmap itself), so an
+attacker-planted `agentmap.mjs` can't execute on your next commit.
 
 ### 2. Force the agent to use it — `PreToolUse` hook
 
@@ -238,8 +241,8 @@ npx @raymondchins/agentmap --any <query>
 node agentmap.mjs --any <query>
 ```
 
-The first run builds and caches the map to `.claude/agentmap.json` (add it to
-`.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
+The first run builds and caches the map to `.claude/agentmap/map.json` (add
+`.claude/agentmap/` to `.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
 unchanged, and silently rebuild from disk when there are uncommitted `.ts/.tsx/.js/...`
 edits — so queries always reflect your in-flight work.
 
@@ -517,11 +520,12 @@ $ node agentmap.mjs --print | jq '.hubs[0]'
 | `--help` / `-h` | Print a usage block listing every flag and exit 0. |
 | `--version` / `-v` | Print the version from `package.json` and exit 0. |
 | `--json` | **Global modifier.** When present, every command prints exactly one JSON object to stdout (no prose). Shapes vary per command: `--json --hubs` → `{command,fileCount,sha,hubs:[string]}`, `--json --find X` → `{command,query,matches:[{file,name,kind}]}`, `--json --relates X` → `{command,file,pagerank,exports,imports,dependents,related}`, `--json --any X` → `{command,query,kind,…payload}`, etc. Bare `--json` (no query flag) → `{command:"build",fileCount,features,topHub}`. |
-| `--install-hooks` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap.json` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). Exit 0 on success, stderr + exit 1 on failure. |
+| `--install-hooks` `[--dry-run]` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap/` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). `--dry-run` previews without writing. Exit 0 on success, stderr + exit 1 on failure. |
 | `--hook-status` | Report whether the post-commit hook, PreToolUse nudge, and `.gitignore` entry are installed (no writes). |
 | `--doctor` | Read-only harness health report: git/Claude hook wiring, installed skills + Cursor rule freshness vs `package.json` version, MCP config entries for OpenCode/Antigravity, and map-cache presence/freshness hints. Always exits 0; suggests fix commands (`agentmap --install-hooks`, `--install-skill`, `--setup-mcp`, `agentmap`) but never runs them. Combine with `--json` for a structured report. |
 | `--install-skill` | Install skills + always-on docs/hooks per platform (`--platform claude\|cursor\|codex\|opencode\|gemini\|antigravity\|copilot\|agents\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
-| `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can call every flag as a first-class tool. |
+| `--setup-mcp` `[--dry-run]` | Configure agentmap as an MCP server for OpenCode and the Antigravity IDE (merge-safe). `--dry-run` previews without writing. |
+| `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can query the map. Exposes 8 query tools — `any`, `find`, `relates`, `map`, `hubs`, `features`, `feature`, `symbols`. |
 
 **Exit-code contract:** `0` = success / match / help / version; `1` = query returned zero results (`--any`, `--find`, `--relates`, `--feature` with no match); `2` = usage error (missing required arg, unknown flag). Any token starting with `-` that matches no known flag prints an error to stderr and exits 2.
 
@@ -531,9 +535,10 @@ $ node agentmap.mjs --print | jq '.hubs[0]'
 
 Honesty first — this is deliberately a small, sharp tool, not a universal code-graph.
 
-- **TS/JS only, by design.** Built on `ts-morph`. No Python, Go, Rust, etc. If your repo
-  isn't TypeScript/JavaScript, use a tree-sitter-based tool instead. Support for other
-  languages is a possible future direction.
+- **TS/JS (+ Vue SFC), by design.** Built on `ts-morph`. Indexes `.ts/.tsx/.mts/.cts/`
+  `.js/.jsx/.mjs/.cjs` and the `<script>` blocks of `.vue` single-file components
+  (best-effort). No Python, Go, Rust, etc. — if your repo isn't TypeScript/JavaScript, use a
+  tree-sitter-based tool instead. Support for other languages is a possible future direction.
 - **File-level import graph, not a full reference graph.** Edges come from static
   `import` / re-export declarations and the named symbols crossing them. It does **not**
   do call-site or full reference resolution — `--relates` tells you which files import a
