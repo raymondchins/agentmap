@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 // Resolve the repo-root agentmap.mjs relative to THIS file (test/helpers.mjs),
 // so the suite is location-independent (CI, local, npx all resolve the same).
@@ -74,6 +74,19 @@ export function run(dir, ...args) {
     };
   }
 }
+
+// Like run() but ALWAYS captures stderr (even on a zero exit) via spawnSync — so
+// tests can assert on the "# agentmap: parsing N source files…" build log that
+// distinguishes a full rebuild from a cache hit. run() drops stderr on success.
+export function runErr(dir, ...args) {
+  const r = spawnSync(process.execPath, [AGENTMAP, ...args], {
+    cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+  });
+  return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: typeof r.status === "number" ? r.status : 1 };
+}
+
+// Did this run do a full ts-morph reparse (true) or serve a cache (false)?
+export const didReparse = (r) => /parsing \d+ source files/.test(r.stderr);
 
 // Best-effort cleanup of a single repo.
 export function cleanup(dir) {
