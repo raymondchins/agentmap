@@ -21,6 +21,14 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 
 > One file, one runtime dependency (`ts-morph`, which bundles the TypeScript compiler — ~10 MB installed). No vector DB, no embedding API, no server.
 > `npx @raymondchins/agentmap --any <query>` and you have a ranked answer.
+>
+> **Fully local — no network calls, no telemetry, no data leaves your machine.** agentmap
+> reads your code, writes a cache under `.claude/agentmap/`, and never phones home (there is
+> not a single `fetch`/`http` call in the source). Your code is never sent anywhere.
+>
+> ⚠️ **Name collision — always use the scoped name.** `npx agentmap` (unscoped) runs an
+> **unrelated** package by a different author. This project is **`@raymondchins/agentmap`** —
+> use the scoped name in every install and command.
 
 ---
 

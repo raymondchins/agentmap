@@ -1,0 +1,66 @@
+name: Publish
+
+# Tag-triggered release. Push a version tag (e.g. `git tag v0.11.0 && git push
+# origin v0.11.0`) and this workflow runs the full test gate, then publishes to
+# npm WITH provenance (OIDC-signed supply-chain attestation — only possible from
+# CI, never from a local machine), and cuts a GitHub Release.
+#
+# One-time setup: add an npm *Automation* access token as the repo secret
+# NPM_TOKEN (Settings → Secrets and variables → Actions). Automation tokens
+# bypass 2FA, which interactive `npm publish` on a local machine cannot.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # mint the OIDC token npm provenance requires
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail fast if the tag and package.json disagree — prevents publishing a
+      # version that doesn't match the tag that triggered this run.
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package.json=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+
+      # Same gate as CI — never publish a red build.
+      - name: Run tests
+        run: npm test
+
+      - name: Smoke (--hubs on self)
+        run: node agentmap.mjs --hubs
+
+      - name: Validate pack manifest
+        run: npm pack --dry-run
+
+      - name: Publish to npm (with provenance)
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
