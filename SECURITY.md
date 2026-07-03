@@ -46,10 +46,12 @@ By default the post-commit hook invokes only the **installed** agentmap package 
 When no graph match is found, agentmap falls back to a live `git grep` over tracked files and may also scan untracked files in the working tree. The following files are excluded from content search by pattern (case-insensitive name matches):
 
 - `.env`, `.env.*`, `*.env` (at any depth)
-- `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `id_rsa*`
+- `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.crt`, `*.p8`, `*.jks`, `*.keystore`
+- SSH private keys: `id_rsa*`, `id_ed25519*`, `id_ecdsa*`
+- Credential dotfiles (root or any depth): `.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`, `.pypirc`
 - Files whose name contains `secret`, `credential`, or `password`
 
-This denylist is a best-effort guard for conventionally-named secret files, not a guarantee — a secret stored in an unmatched filename can still be surfaced. agentmap does **not** transmit file contents anywhere; all processing is local.
+This denylist is a best-effort guard for conventionally-named secret files, not a guarantee — a secret stored in an unmatched filename can still be surfaced. (It deliberately does **not** match a bare `token` substring, which would over-exclude ordinary source like `tokenizer.ts`.) agentmap does **not** transmit file contents anywhere; all processing is local.
 
 ### Trust boundaries
 
