@@ -2,8 +2,9 @@
 # ============================================================================
 #  agentmap — git post-commit hook
 #
-#  Rebuilds .claude/agentmap.json after each commit so the map an agent reads is
-#  never stale. Runs in the background and detached so it never slows the commit.
+#  Rebuilds .claude/agentmap/map.json after each commit so the map an agent
+#  reads is never stale. Runs in the background and detached so it never slows
+#  the commit.
 #
 #  Guards:
 #   - Skips during rebase / merge / cherry-pick / bisect (avoids rebuilding on
@@ -31,36 +32,50 @@ done
 # ---------------------------------------------------------------------------
 # Runner resolution — security rationale:
 #
-#   Only TWO repo-local paths are trusted: ./agentmap.mjs (this repo's own
-#   dogfooding entry-point, reviewed and version-controlled at the root) and
-#   nothing else.  ./scripts/agentmap.mjs was removed because it is an unusual
-#   path that a malicious PR could introduce to gain arbitrary code execution
-#   on a victim's next commit without touching any obviously sensitive file.
+#   NO repo-local script is trusted by default. A working-tree ./agentmap.mjs
+#   is attacker-plantable: any branch or PR can add that file, and this hook
+#   fires on the victim's next commit — arbitrary code execution without
+#   touching any obviously sensitive file (./scripts/agentmap.mjs was removed
+#   for the same reason in 0.4.0).
 #
-#   Set AGENTMAP_HOOK_NO_LOCAL=1 to skip even ./agentmap.mjs and rely solely
-#   on the installed binary / npx — useful in CI or when reviewing untrusted
-#   branches.
+#   Set AGENTMAP_HOOK_ALLOW_LOCAL=1 to opt IN to running ./agentmap.mjs —
+#   intended only for developing agentmap itself. Everyone else gets the
+#   installed package: the repo's node_modules bin, a PATH binary verified to
+#   resolve to @raymondchins/agentmap, or npx with the scoped name.
 #
 # We cd "$ROOT" before running, so use RELATIVE paths — avoids word-splitting on
 # spaces in the repo path (POSIX sh has no arrays; quoting $RUNNER at invocation
 # would bundle cmd+args into one token and break argument passing).
 # ---------------------------------------------------------------------------
 RUNNER=""
-if [ -z "$AGENTMAP_HOOK_NO_LOCAL" ] && [ -f "$ROOT/agentmap.mjs" ]; then
+# 1) Repo-local script — explicit opt-in only (dogfooding agentmap itself).
+if [ "$AGENTMAP_HOOK_ALLOW_LOCAL" = "1" ] && [ -f "$ROOT/agentmap.mjs" ]; then
   RUNNER="node ./agentmap.mjs"
-elif command -v agentmap >/dev/null 2>&1; then
-  # Bare binary name — the installed binary is named `agentmap` (no scope).
-  RUNNER="agentmap"
-elif command -v npx >/dev/null 2>&1; then
-  # Fetch form MUST use the scoped package name to avoid the unrelated agentmap@0.11.0.
-  RUNNER="npx --no-install @raymondchins/agentmap"
-else
-  exit 0
 fi
+# 2) Project-local install of the scoped package.
+if [ -z "$RUNNER" ] && [ -x "$ROOT/node_modules/.bin/agentmap" ]; then
+  RUNNER="./node_modules/.bin/agentmap"
+fi
+# 3) PATH binary — only when it resolves to the scoped package (npm bin
+#    symlinks point into .../@raymondchins/agentmap/; an unrelated `agentmap`
+#    binary or a PATH-planted impostor does not).
+if [ -z "$RUNNER" ] && command -v agentmap >/dev/null 2>&1; then
+  BIN="$(command -v agentmap)"
+  TARGET="$(readlink "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+  case "$TARGET" in
+    *@raymondchins/agentmap*) RUNNER="agentmap" ;;
+  esac
+fi
+# 4) npx — MUST use the scoped package name to avoid the unrelated agentmap@0.11.0.
+if [ -z "$RUNNER" ] && command -v npx >/dev/null 2>&1; then
+  RUNNER="npx --no-install @raymondchins/agentmap"
+fi
+[ -n "$RUNNER" ] || exit 0
 
-# Need Node for the .mjs paths; nvm users may not have it in hook PATH — no-op cleanly.
+# Need Node for the .mjs / node_modules paths; nvm users may not have it in
+# hook PATH — no-op cleanly.
 case "$RUNNER" in
-  node*) command -v node >/dev/null 2>&1 || exit 0 ;;
+  node*|./node_modules/*) command -v node >/dev/null 2>&1 || exit 0 ;;
 esac
 
 # Rebuild detached + silenced so the commit returns instantly.
