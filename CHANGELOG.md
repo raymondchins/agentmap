@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Performance
+- **Dirty-tree caching (Batch 3).** A dirty git working tree no longer re-parses the
+  whole repo on every query.
+  - **Tier 1 — dirty-map cache.** The dirty build is cached to
+    `.claude/agentmap/map.dirty.json`, keyed by `sha1(HEAD + dirty-file
+    path:mtime:size)`. Back-to-back queries on an unchanged dirty tree reuse ONE
+    rebuild (content-os 365 files: ~1.8s → ~0.12s, ~15×). The clean `map.json` is
+    never clobbered by a dirty build, so the dirty→clean transition serves the clean
+    cache with no extra rebuild (also closes the old cache-poison bug).
+  - **Tier 2 — true incremental.** When every change is a MODIFICATION of a file
+    already in the map, agentmap re-parses ONLY the changed files (against empty
+    ts-morph stubs of the rest) and re-runs the cheap global assembly — a
+    byte-identical map at a fraction of the cost (dirty-1 ~1.8s → ~0.62s, ~2.9×).
+    Adds/deletes/renames and any re-export-barrel change fall back to a full dirty
+    build (still Tier-1 cached), because they can shift file ordering or flip edges
+    in files we don't re-parse. Verified byte-identical to a full rebuild across 7
+    real repos and a 12-shape adversarial resolution suite.
+  - Clean builds persist a raw per-file facts snapshot to `.claude/agentmap/facts.json`
+    for the incremental rebuild. `map.json` output is unchanged (byte-identical).
+
 ### Added
 - **Tag-triggered publish workflow** (`.github/workflows/publish.yml`) — pushing a `v*`
   tag runs the full test gate, then publishes to npm with **provenance** (OIDC-signed

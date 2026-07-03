@@ -169,3 +169,48 @@ cost is still felt.
 **Acceptance (Tier 1):** a second query on an unchanged dirty tree does not
 re-parse (assert via `MAP_DIRTY` mtime / no "parsing N source files" log);
 `npm test` green; byte-identical map content vs today's dirty `build()`.
+
+---
+
+## 7. As-built (2026-07-03) — what actually shipped, and why it's narrower
+
+Both tiers landed. Tier 2's implementation is **more conservative** than §2's goal
+tier — two correctness traps the original design under-weighted forced a
+modify-only gate:
+
+- **Resolution parity via empty stubs (not a hand-rolled shim).** Instead of a
+  key-set resolver that had to replicate ts-morph's ladder exactly, incremental
+  loads the changed files for real and adds **empty `createSourceFile` stubs** for
+  every other cached key. Changed files' edges then resolve through the *real*
+  resolver, so relative/alias/index/dynamic edges match a full build with no shim.
+- **Trap A — file-set changes break byte-identity.** Add/delete/rename change the
+  `files` key ordering (a new file lands at a different position than ts-morph's
+  full-build order → shifts rank tie-breaks) and flip edges in **unchanged
+  importers** we don't re-parse (a full build drops an importer's edge to a deleted
+  file / forms one to an added file). So incremental is gated to **modifications of
+  files already in the snapshot**; add/delete/rename → full dirty build (Tier-1
+  cached). Empirically confirmed on content-os.
+- **Trap B — re-export barrels.** `getExportedDeclarations()` transitively resolves
+  `export … from './x'`, pulling x's exports into the barrel's `exports` list.
+  Against empty stubs those vanish, so re-parsing a barrel yields incomplete
+  exports (**forward**); and modifying a file re-exported by an *unchanged* barrel
+  leaves the barrel's cached exports stale (**reverse**). Both directions are
+  declined: forward via a syntactic `export … from` scan of the changed files
+  (resolution-independent — ts-morph won't reliably resolve the stub); reverse via a
+  per-file `reExportsFrom` marker recorded at the clean build (targets are real
+  there) and stored in `facts.json`. `reExportsFrom` is stripped in `assemble()` so
+  `map.json` stays byte-identical.
+- **Storage:** raw facts persist to a sibling `.claude/agentmap/facts.json` (keyed by
+  HEAD sha), NOT inside `map.json`, so `map.json` is untouched.
+- **Escape hatches:** `AGENTMAP_NO_INCREMENTAL=1` forces the full dirty build (used by
+  the regression suite to prove incremental == full); `buildDirty()` wraps
+  incremental in try/catch and falls back to a full build on any error.
+- **Verification:** `test/dirty-cache.test.mjs` (Tier 1) + `test/incremental.test.mjs`
+  (Tier 2, incl. barrel forward/reverse) ; a deterministic fuzz matrix (7 real repos ×
+  7 edit shapes) ; a 12-shape adversarial resolution suite (alias, index, dynamic,
+  require, namespace, default-name, type-only, vue, circular, monorepo, shadowing,
+  jsx). All byte-identical or safely-fallen-back.
+
+Deferred (still open): add/delete/rename incremental (would need re-parsing affected
+importers + reproducing full-build key order); the §1 build-budget / memory-ceiling
+items; the post-commit incremental rebuild.

@@ -168,21 +168,23 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
 
 ### Tasks
 
-- [ ] **Dirty-map caching / incremental invalidation** — `ensureFresh()`
-  (`agentmap.mjs:841`, guard `:853`, fall-through `:864`) rebuilds from scratch
-  whenever the tree is dirty. **Tier 1 (ship first):** cache a dirty-built map to a
-  new `.claude/agentmap/map.dirty.json` keyed by `sha1(HEAD + dirty-file
-  path:mtime:size triples)` so back-to-back queries reuse one rebuild
-  (byte-identical — reuses `build()` verbatim). **Tier 2 (goal):** keep the
-  clean-HEAD facts, re-parse only the files `git status` reports changed via a
-  subset-scoped `extractFacts` + key-set resolution shim, re-run the (global, cheap)
-  derived steps. See the design doc for exact edit points + regression tests.
-  *(performance/high)*
-- [ ] **Cache-poison on dirty→clean transition** — `build()` bakes
-  `dirty: dirtyCount()` into `map.json` (`agentmap.mjs:730`), so a map built while
-  dirty can never self-validate again (`:853` requires `cached.dirty === 0`) → the
-  first query after the tree goes clean always pays one extra full rebuild. Fold the
-  fix into Tier 1. *(performance/medium)*
+- [x] **Dirty-map caching / incremental invalidation** — DONE (both tiers).
+  **Tier 1:** dirty build cached to `.claude/agentmap/map.dirty.json`, keyed by
+  `sha1(HEAD + dirty-file path:mtime:size)` → back-to-back dirty queries reuse one
+  rebuild (~15×, byte-identical). **Tier 2:** modify-only true incremental —
+  re-parse just the changed files against empty ts-morph stubs of the rest, re-run
+  the cheap global assembly; byte-identical to a full rebuild (~2.9× on dirty-1).
+  Add/delete/rename + any re-export-barrel change fall back to a full dirty build
+  (Tier-1 cached). As-built scoping is narrower than the original goal-tier design
+  (see the "As-built" note in `docs/batch3-dirty-tree-perf.md`): incremental is gated
+  to modifications because add/delete/rename shift file ordering + flip edges in
+  files we don't re-parse, and `export … from` barrels resolve their `exports` list
+  through targets that are empty stubs. Verified across 7 real repos + a 12-shape
+  adversarial resolution suite. *(performance/high)*
+- [x] **Cache-poison on dirty→clean transition** — DONE (fell out of Tier 1). A
+  dirty build now writes `map.dirty.json` instead of clobbering `map.json`, so the
+  clean `map.json` (dirty:0) stays valid and the dirty→clean transition serves it
+  with no extra rebuild. *(performance/medium)*
 - [ ] **Build wall-clock budget + visible skips** — `agentmap.mjs:638`: deep
   import chains cause superlinear blowup (16+ min at 5k files) with files silently
   dropped via stack overflow. Add a time budget (degrade to a partial map marked
