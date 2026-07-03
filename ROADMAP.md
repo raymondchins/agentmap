@@ -205,10 +205,12 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
   (`project.removeSourceFile` / `forgetNodesCreatedInBlock`) since `build()` only
   needs per-file exports/imports; warn near heap limits; document a file-count
   envelope. *(performance/medium)*
-- [ ] **Cap unbounded symbol matches** — `agentmap.mjs:1667`: a broad
-  `--find`/`--any` emits ~93k tokens on a 5k-file repo, defeating the whole point.
-  Cap results (e.g. 50, like `CONTENT_LINES_LIMIT`) ranked by PageRank, with a
-  "showing N of M — narrow your query" footer in prose + JSON. *(performance/medium)*
+- [x] **Cap unbounded symbol matches** — DONE. `--find`/`--any` symbol matches are
+  ranked by the containing file's PageRank and capped to `SYMBOL_MATCH_LIMIT` (50),
+  with a "showing top N of M by pagerank — narrow your query" footer in prose and
+  `total`/`shown`/`truncated` (`--find`) / `symbolsTotal`/`symbolsTruncated`
+  (`--any`) in JSON. Ranking keeps the important matches when truncated.
+  *(performance/medium)*
 - [ ] **Prune rankSymbols cross-product** — `agentmap.mjs:736`: refs×defs edge
   list per identifier is quadratic on duplicated export names. Skip identifiers
   whose definer count exceeds a threshold (near-zero signal after the 0.1
