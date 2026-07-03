@@ -114,8 +114,17 @@ function runAgentmap(extraArgv) {
       [AGENTMAP, "--json", ...extraArgv],
       { cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
-        const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-        resolve({ code, stdout: (stdout || "").trim(), stderr: (stderr || "").trim(), spawnError: err && err.code === undefined ? err.message : "" });
+        // Classify the outcome. A numeric err.code is the child's exit status.
+        // A NON-numeric err.code (ENOENT/EACCES/ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+        // are strings) or a signal kill is a spawn/system failure, not an exit
+        // code — the old `err.code === undefined` test missed all of these and
+        // mislabeled them as exit 1 ("no results").
+        let code = 0, spawnError = "";
+        if (err) {
+          if (typeof err.code === "number") code = err.code;
+          else { code = -1; spawnError = err.message || String(err.code || err.signal || "spawn failed"); }
+        }
+        resolve({ code, stdout: (stdout || "").trim(), stderr: (stderr || "").trim(), spawnError });
       },
     );
   });
@@ -135,10 +144,16 @@ async function callTool(name, rawArgs) {
   const argv = tool.argv(rawArgs && typeof rawArgs === "object" ? rawArgs : {});
   const { code, stdout, stderr, spawnError } = await runAgentmap(argv);
   if (spawnError) return { content: [{ type: "text", text: `failed to launch agentmap: ${spawnError}` }], isError: true };
-  // Exit 1 = query returned zero results (a valid answer, not a tool failure):
-  // surface stdout when present, else a friendly empty note. Exit ≥2 = real
-  // error → mark isError and prefer stderr.
-  if (code >= 2) return { content: [{ type: "text", text: stderr || stdout || `agentmap exited ${code}` }], isError: true };
+  // Exit ≥2 (usage error) or <0 (spawn/signal) = real failure → isError.
+  if (code >= 2 || code < 0) return { content: [{ type: "text", text: stderr || stdout || `agentmap exited ${code}` }], isError: true };
+  // Exit 1 is overloaded: the CLI uses it for "zero results", but it is also
+  // Node's default code for an uncaught exception. Genuine zero-result queries
+  // ALWAYS print one JSON object to stdout in --json mode (progress goes to
+  // stderr); a crash leaves stdout empty. So exit-1-with-empty-stdout is a
+  // crash — surface it as an error instead of a false "no results".
+  if (code === 1 && !stdout) {
+    return { content: [{ type: "text", text: stderr || "agentmap failed (exit 1, no output)" }], isError: true };
+  }
   const text = stdout || (code === 1 ? `no results` : stderr) || "";
   return { content: [{ type: "text", text }] };
 }
