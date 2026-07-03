@@ -85,3 +85,40 @@ test("moving HEAD while a file stays dirty invalidates the dirty cache", () => {
       "HEAD move must invalidate the dirty cache (fingerprint includes HEAD)");
   } finally { cleanup(dir); }
 });
+
+// --- Batch 5 correctness: cache-busting for config edits + rename-to-non-source ---
+
+test("editing tsconfig.json (alias change, no source touched) busts the cache", () => {
+  const dir = makeRepo({
+    "tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@lib/*":["src/lib-a/*"]}}}\n',
+    "src/lib-a/helper.ts": "export const A = 1;\n",
+    "src/lib-b/helper.ts": "export const B = 2;\n",
+    "src/index.ts": "import { A } from '@lib/helper';\nexport const x = A;\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const prime = runErr(dir, "--relates", "src/index.ts", "--json");
+    assert.deepEqual(JSON.parse(prime.stdout).imports, ["src/lib-a/helper.ts"], "primes to lib-a");
+    // repoint the alias — touch ONLY tsconfig.json
+    writeFiles(dir, { "tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@lib/*":["src/lib-b/*"]}}}\n' });
+    const r = runErr(dir, "--relates", "src/index.ts", "--json");
+    assert.ok(didReparse(r), "a dirty tsconfig must bust the cache (alias resolution changed)");
+    assert.deepEqual(JSON.parse(r.stdout).imports, ["src/lib-b/helper.ts"],
+      "import edge must reflect the new alias target, not the stale pre-edit one");
+  } finally { cleanup(dir); }
+});
+
+test("git mv of a source file to a NON-source extension busts the cache", () => {
+  const dir = makeRepo({
+    "src/a.ts": "export const fromA = 42;\n",
+    "src/b.ts": "import { fromA } from './a';\nexport const x = fromA;\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--hubs");                                   // prime clean
+    git(dir, "mv", "src/a.ts", "src/a.txt");              // rename source → non-source
+    const r = runErr(dir, "--relates", "src/b.ts");
+    assert.ok(didReparse(r), "rename to a non-source ext must bust the cache");
+    assert.doesNotMatch(r.stdout, /src\/a\.ts\b/, "the renamed-away source file must not still appear");
+  } finally { cleanup(dir); }
+});
