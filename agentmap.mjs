@@ -431,7 +431,7 @@ function nearestAliasConfig(fromAbsDir, configs, rootAbs, rootOpts) {
 // Construct a ts-morph Project robustly: use tsconfig.json when present + valid;
 // else (missing / malformed / solution-style references that index 0 files) fall
 // back to broad source globs so the tool degrades gracefully instead of crashing.
-function makeProject() {
+function makeProject(inc = null) {
   const { Project } = tsMorph();
   // skipFileDependencyResolution: ~40% faster build, verified identical edge
   // set (we resolve module specifiers explicitly below, never via the implicit
@@ -449,6 +449,52 @@ function makeProject() {
     }
     return {};
   })();
+
+  // ---- Tier 2 INCREMENTAL project construction --------------------------------
+  // Parse ONLY the changed files (real content); add empty ts-morph stubs for
+  // every OTHER cached key so a changed file's import edges resolve to exactly the
+  // same keys a full build would — without paying to parse unchanged content.
+  // tsconfig is intentionally NOT auto-loaded (that eagerly parses the whole tree,
+  // the cost we're avoiding); alias resolution still works via aliasOpts +
+  // packageAliasConfigs. Vue `<script>` blocks for changed .vue files are parsed
+  // as virtual sources; unchanged .vue keys become resolution-only vueReal marks.
+  if (inc) {
+    const cwdp = process.cwd().replace(/\\/g, "/");
+    const seg = (f) => { const s = f.split("/"); return s.includes("node_modules") || s.includes(".next"); };
+    const project = new Project({ compilerOptions: { allowJs: true, ...aliasOpts }, ...FAST });
+    const changedSet = new Set(inc.changed);
+    const vueFiles = [];
+    const changedCode = [];
+    for (const f of inc.changed) {
+      if (seg(f)) continue;
+      if (CODE_EXT_RE.test(f)) changedCode.push(f);
+      else if (f.endsWith(".vue")) vueFiles.push(f);
+    }
+    if (changedCode.length) project.addSourceFilesAtPaths(changedCode);
+    const vueMap = Object.create(null);
+    const vueReal = Object.create(null);
+    for (const key of inc.cachedKeys) {
+      if (changedSet.has(key) || seg(key)) continue;
+      if (key.endsWith(".vue")) vueReal[`${cwdp}/${key}`] = true;                       // resolution target only
+      else if (CODE_EXT_RE.test(key)) { try { project.createSourceFile(`${cwdp}/${key}`, "", { overwrite: true }); } catch {} }
+    }
+    // Config discovery must see the SAME input as a full build (git ls-files
+    // includes package.json/tsconfig.json, which the source-only cachedKeys don't)
+    // so monorepo alias resolution matches. Cheap — no source parsing.
+    const listed = sh("git ls-files --cached --others --exclude-standard").split("\n").filter(Boolean);
+    const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
+    for (const f of vueFiles) {
+      let text; try { text = readFileSync(f, "utf8"); } catch { continue; }
+      const block = extractVueScripts(text);
+      if (!block || !block.text.trim()) continue;
+      const vpath = vueVirtualPath(f, block.lang);
+      project.createSourceFile(`${cwdp}/${vpath}`, block.text, { overwrite: true });
+      vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
+      vueReal[`${cwdp}/${f}`] = true;
+    }
+    return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs };
+  }
+  // ---- end incremental --------------------------------------------------------
 
   let project;
   if (existsSync("tsconfig.json")) {
@@ -557,8 +603,8 @@ function makeProject() {
 // } }
 // A single pathological file is skipped + warned, never fatal (graceful degrade).
 // ---------------------------------------------------------------------------
-function extractFacts() {
-  const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject();
+function extractFacts(inc = null) {
+  const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject(inc);
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
   const cwd = process.cwd().replace(/\\/g, "/");
@@ -635,13 +681,24 @@ function extractFacts() {
     spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : resolveAlias(spec, fromAbsDir);
 
   const sourceFiles = project.getSourceFiles();
-  process.stderr.write(`# agentmap: parsing ${sourceFiles.length} source files…\n`);
+  // In incremental mode only the changed files carry real content; the rest are
+  // empty resolution stubs. Extract facts for the changed set only (stubs would
+  // otherwise overwrite good cached facts with empty ones).
+  const only = inc ? new Set(inc.changed) : null;
+  process.stderr.write(`# agentmap: parsing ${only ? only.size : sourceFiles.length} source files${inc ? " (incremental)" : ""}…\n`);
   for (const sf of sourceFiles) {
     const path = rel(sf.getFilePath());
     if (excluded(path)) continue;
+    if (only && !only.has(path)) continue;
     try {
     const fromDir = sf.getDirectoryPath().replace(/\\/g, "/");
     const reExports = new Set(); // #2: names that are pass-through re-exports, not real uses
+    // Files this file re-exports FROM (`export … from './x'`). Its `exports` list
+    // transitively includes those targets' exports (getExportedDeclarations follows
+    // the re-export), so re-parsing it in incremental mode against EMPTY stubs would
+    // drop them. Tier 2 declines incremental when a re-export touches the changed
+    // set. INTERNAL — stripped in assemble() so it never reaches map.json.
+    const reExportsFrom = new Set();
     // exports, remembering which exported name was the file's DEFAULT export so
     // default-import edges can later resolve "default" → the real symbol name.
     let defaultExportName = null;
@@ -684,8 +741,10 @@ function extractFacts() {
       if (exp.isTypeOnly()) continue; // type-only re-exports excluded from edges
       const t = exp.getModuleSpecifierSourceFile();
       if (t) {
+        const tp = rel(t.getFilePath());
         const names = exp.getNamedExports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
-        addEdge(rel(t.getFilePath()), names);   // keep the FILE-level edge (barrel depends on origin)
+        addEdge(tp, names);                     // keep the FILE-level edge (barrel depends on origin)
+        reExportsFrom.add(tp);                  // this file's exports transitively depend on tp's content
         for (const n of names) reExports.add(n); // #2: mark as re-export so rankSymbols won't count it as a reference
       }
     }
@@ -705,7 +764,7 @@ function extractFacts() {
       if (tp) addEdge(tp, ["*"]);
     }
     const imports = Object.keys(importedSymbols);
-    files[path] = { exports, imports, importedSymbols, defaultExportName, reExports: [...reExports] };
+    files[path] = { exports, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom] };
     } catch (e) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
@@ -724,7 +783,20 @@ function extractFacts() {
 // ---------------------------------------------------------------------------
 function build({ target = MAP, extra = null } = {}) {
   const t0 = Date.now();
-  const files = extractFacts();
+  return assemble(extractFacts(), { target, extra, t0 });
+}
+
+// assemble() — the backend-agnostic graph assembly + persistence shared by the
+// full build() and the Tier 2 incremental rebuild. Takes raw per-file facts
+// (exports/imports/importedSymbols/defaultExportName/reExports), resolves
+// default-import edges, inverts dependents, groups features, computes file
+// PageRank + the Aider-style symbol ranking, picks hubs, and persists the cache.
+// MUTATES `files`, so incremental passes a disposable copy.
+function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
+  // Snapshot raw facts BEFORE the mutations below so a CLEAN build can persist
+  // them (Tier 2) for a later incremental rebuild. Clean builds only — a dirty or
+  // incremental build never re-bases off its own output.
+  const rawFacts = target === MAP ? structuredClone(files) : null;
   // 7: resolve default-import edges. A default import was recorded literally as
   // "default"; rankSymbols skips "default", so default-exported symbols (the
   // dominant Next.js component) never ranked. Map each "default" entry to the
@@ -766,9 +838,10 @@ function build({ target = MAP, extra = null } = {}) {
     .slice(0, HUBS_LIMIT)
     .map(([p, pr, deg]) => `${p} (deg ${deg}, pr ${pr})`);
 
-  // defaultExportName was only needed for the fix-#7 post-pass — drop it before
-  // persisting so the on-disk `files` shape stays stable.
-  for (const p of nodes) delete files[p].defaultExportName;
+  // defaultExportName was only needed for the fix-#7 post-pass, and reExportsFrom
+  // only for Tier 2's re-export gate — drop both before persisting so the on-disk
+  // `files` shape (map.json) stays byte-identical.
+  for (const p of nodes) { delete files[p].defaultExportName; delete files[p].reExportsFrom; }
 
   const sha = currentSha();
   const out = {
@@ -786,6 +859,16 @@ function build({ target = MAP, extra = null } = {}) {
   const tmp = target + ".tmp";
   writeFileSync(tmp, JSON.stringify(out));
   renameSync(tmp, target);
+  // Tier 2: persist the raw facts snapshot for CLEAN git builds so a later dirty
+  // query can reparse only the changed files instead of the whole repo. Never
+  // fatal — the snapshot is a pure optimization.
+  if (rawFacts && sha) {
+    try {
+      const ftmp = FACTS + ".tmp";
+      writeFileSync(ftmp, JSON.stringify({ schema: SCHEMA_VERSION, generatedSha: sha, facts: rawFacts }));
+      renameSync(ftmp, FACTS);
+    } catch {}
+  }
   process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms\n`);
   return out;
 }
@@ -935,22 +1018,90 @@ function ensureFresh() {
 // error it falls through to a full build() — incremental is a pure optimization
 // and must never be the reason a query fails or returns a wrong map.
 function buildDirty(sha, dirtyList, dfp) {
-  try {
-    const inc = buildIncremental(sha, dirtyList, dfp);
-    if (inc) return inc;
-  } catch (e) {
-    process.stderr.write(`# agentmap: incremental rebuild fell back to full build (${e?.message ?? e})\n`);
+  // AGENTMAP_NO_INCREMENTAL forces the full dirty build — used by the regression
+  // suite to prove the incremental map is byte-identical to a full rebuild.
+  if (!process.env.AGENTMAP_NO_INCREMENTAL) {
+    try {
+      const inc = buildIncremental(sha, dirtyList, dfp);
+      if (inc) return inc;
+    } catch (e) {
+      process.stderr.write(`# agentmap: incremental rebuild fell back to full build (${e?.message ?? e})\n`);
+    }
   }
   return build({ target: MAP_DIRTY, extra: { dirtyFingerprint: dfp } });
 }
 
 // Tier 2 (true incremental) — reparse only the git-changed files against the
-// cached clean-HEAD facts snapshot, then re-run the (global, cheap) assembly.
-// Returns the map object on success, or null to signal "fall back to full build"
-// (no facts snapshot, HEAD mismatch, or an edit shape it declines to handle).
-// Implemented in the Tier 2 step; a null here means Tier 1's full dirty build.
-function buildIncremental(_sha, _dirtyList, _dfp) {
-  return null;
+// cached clean-HEAD facts snapshot, merge, then re-run the (global but cheap)
+// assembly. Returns the map object on success, or null to signal "fall back to a
+// full dirty build" (no / mismatched facts snapshot). Correctness rests on: a
+// file's own facts depend only on its own source (so unchanged cached facts stay
+// valid); changed files' edges resolve against empty stubs of the unchanged files
+// (same keys a full build produces); and every derived step (dependents, both
+// PageRanks, features, hubs) is recomputed fully from the merged facts.
+function buildIncremental(sha, dirtyList, dfp) {
+  if (!sha || !existsSync(FACTS)) return null;
+  let snap; try { snap = JSON.parse(readFileSync(FACTS, "utf8")); } catch { return null; }
+  if (!snap || snap.schema !== SCHEMA_VERSION || snap.generatedSha !== sha || !snap.facts) return null;
+  // Nested tsconfig/jsconfig (monorepo) can redefine a ROOT alias to a different
+  // dir. The full build resolves such an alias via ts-morph's root-tsconfig-native
+  // resolution, but the incremental resolver falls back to the hand-rolled
+  // resolveAlias (nearest config) — the two disagree on colliding alias names.
+  // Decline when any NESTED config exists; the common single-config repo (root
+  // tsconfig only) is unaffected. Cross-platform (no shell globbing).
+  let listed = [];
+  try { listed = execFileSync("git", ["ls-files"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).split("\n"); } catch {}
+  if (listed.some((f) => /\/(tsconfig|jsconfig)(\.[\w.-]+)?\.json$/.test(f))) return null;
+  const cached = snap.facts;
+  // Incremental is byte-identical to a full rebuild ONLY when the file SET is
+  // unchanged — every dirty entry must be a MODIFICATION of a file already in the
+  // snapshot. Adds/deletes/renames are declined (return null → full dirty build,
+  // still cached by Tier 1), because they:
+  //   • change the `files` key ordering (a new file lands at a different position
+  //     than ts-morph's full-build order → shifts rank tie-breaks), and
+  //   • flip edges in UNCHANGED importers we don't re-parse (a full build drops an
+  //     importer's edge to a deleted file, or forms one to a newly-added file).
+  // A modification never changes the file set, and an importer's edge NAMES come
+  // from its own (unchanged) import statement, so a pure-modify merge is exact.
+  for (const { code, path, oldPath } of dirtyList) {
+    if (oldPath) return null;                              // rename / copy
+    if (!Object.hasOwn(cached, path)) return null;         // added / new-untracked file
+    if ((code || "").includes("D")) return null;           // deleted (staged or worktree)
+  }
+  const changed = dirtyList.map((d) => d.path);            // all modifications of existing files
+  const changedSet = new Set(changed);
+  // Re-export hazard, REVERSE: an UNCHANGED barrel that `export … from` a changed
+  // file derives its OWN exports from that file (getExportedDeclarations follows
+  // the re-export). We don't re-parse the barrel, so its cached exports would go
+  // stale. cached[].reExportsFrom is reliable (recorded at the clean build, where
+  // targets were real). Decline → full dirty build (Tier-1 cached).
+  for (const k in cached) {
+    const rf = cached[k].reExportsFrom;
+    if (rf) for (const t of rf) if (changedSet.has(t)) return null;
+  }
+  // Re-export hazard, FORWARD: a changed file that itself `export … from` another
+  // module has its `exports` list transitively resolved through that target — which
+  // is an EMPTY stub in incremental mode, so its exports would be incomplete. We
+  // can't rely on ts-morph resolving the stub, so detect it syntactically on the
+  // changed file's own text (resolution-independent). Decline → full build.
+  const STAR_REEXPORT = /\bexport\s+(?:type\s+)?\*/;                       // export * / export * as / export type *
+  const NAMED_REEXPORT = /\bexport\s+(?:type\s+)?\{[\s\S]*?\}\s*from\s*['"]/; // export { … } from '…' (multi-line)
+  for (const p of changed) {
+    let txt; try { txt = readFileSync(p, "utf8"); } catch { return null; }
+    if (STAR_REEXPORT.test(txt) || NAMED_REEXPORT.test(txt)) return null;
+  }
+  const fresh = extractFacts({ changed, cachedKeys: Object.keys(cached) }); // reparse changed only
+  const merged = structuredClone(cached);                  // disposable copy (assemble mutates it)
+  for (const p of changed) {
+    if (!fresh[p]) return null;   // file dropped from the map (parse-skip / vue <script> removed) ⇒ set change ⇒ full build
+    // Re-export hazard, LAUNDERED (`export default Imported` / `export { Imported as default }`
+    // with no `from` clause): the export's declaration lives in another file, which is an EMPTY
+    // stub here, so getExportedDeclarations() can't name it → kind "?" and defaultExportName
+    // stays "default". A full build resolves the real name. Kind "?" is the tell — decline.
+    if (fresh[p].exports.some((e) => e.kind === "?")) return null;
+    merged[p] = fresh[p];
+  }
+  return assemble(merged, { target: MAP_DIRTY, extra: { dirtyFingerprint: dfp } });
 }
 
 // Resolve a query to a file key, in PREFERENCE order so a loose substring path
