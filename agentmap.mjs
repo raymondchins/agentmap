@@ -1043,15 +1043,20 @@ function buildIncremental(sha, dirtyList, dfp) {
   if (!sha || !existsSync(FACTS)) return null;
   let snap; try { snap = JSON.parse(readFileSync(FACTS, "utf8")); } catch { return null; }
   if (!snap || snap.schema !== SCHEMA_VERSION || snap.generatedSha !== sha || !snap.facts) return null;
-  // Nested tsconfig/jsconfig (monorepo) can redefine a ROOT alias to a different
-  // dir. The full build resolves such an alias via ts-morph's root-tsconfig-native
-  // resolution, but the incremental resolver falls back to the hand-rolled
-  // resolveAlias (nearest config) — the two disagree on colliding alias names.
-  // Decline when any NESTED config exists; the common single-config repo (root
-  // tsconfig only) is unaffected. Cross-platform (no shell globbing).
+  // Monorepo signals make the isolated-stub reparse diverge from ts-morph's
+  // whole-repo resolution, so decline when present (the common single-package repo
+  // is unaffected):
+  //   • a NESTED tsconfig/jsconfig can redefine a ROOT alias to a different dir —
+  //     the full build resolves via ts-morph's root-tsconfig-native resolution, the
+  //     incremental resolver via the hand-rolled resolveAlias (nearest config);
+  //   • a NESTED package.json makes a directory import (`import './mod'`) resolve
+  //     via its "main" in a full build, but the incremental index-ladder ignores it.
+  // Use the SAME listing discoverPackageAliasConfigs uses (--cached --others) so an
+  // UNTRACKED config can't slip the guard. Cross-platform (no shell globbing).
   let listed = [];
-  try { listed = execFileSync("git", ["ls-files"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).split("\n"); } catch {}
+  try { listed = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).split("\n"); } catch {}
   if (listed.some((f) => /\/(tsconfig|jsconfig)(\.[\w.-]+)?\.json$/.test(f))) return null;
+  if (listed.some((f) => /\/package\.json$/.test(f) && !f.split("/").includes("node_modules"))) return null;
   const cached = snap.facts;
   // Incremental is byte-identical to a full rebuild ONLY when the file SET is
   // unchanged — every dirty entry must be a MODIFICATION of a file already in the
@@ -1086,9 +1091,13 @@ function buildIncremental(sha, dirtyList, dfp) {
   // changed file's own text (resolution-independent). Decline → full build.
   const STAR_REEXPORT = /\bexport\s+(?:type\s+)?\*/;                       // export * / export * as / export type *
   const NAMED_REEXPORT = /\bexport\s+(?:type\s+)?\{[\s\S]*?\}\s*from\s*['"]/; // export { … } from '…' (multi-line)
+  // CommonJS export forms: getExportedDeclarations() returns [] for `module.exports`
+  // when the file is re-parsed in the isolated incremental project (it needs the
+  // whole-repo module context), so the changed file's exports would collapse.
+  const CJS_EXPORTS = /\bmodule\.exports\b|\bexports\.[A-Za-z_$]|\bexport\s*=/;
   for (const p of changed) {
     let txt; try { txt = readFileSync(p, "utf8"); } catch { return null; }
-    if (STAR_REEXPORT.test(txt) || NAMED_REEXPORT.test(txt)) return null;
+    if (STAR_REEXPORT.test(txt) || NAMED_REEXPORT.test(txt) || CJS_EXPORTS.test(txt)) return null;
   }
   const fresh = extractFacts({ changed, cachedKeys: Object.keys(cached) }); // reparse changed only
   const merged = structuredClone(cached);                  // disposable copy (assemble mutates it)

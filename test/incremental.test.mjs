@@ -247,6 +247,54 @@ test("a repo with a NESTED tsconfig falls back to full (alias-collision safety)"
   } finally { cleanup(dir); }
 });
 
+// --- More hazards found by the adversarial suite (round 2). Each must fall back
+// to a full build and stay byte-identical.
+test("modifying a CommonJS module.exports file falls back to full", () => {
+  const dir = makeRepo({
+    "x.js": "module.exports = { x: 1 };\n",
+    "main.js": "const a = require('./x');\nmodule.exports = { run: () => a };\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    assertIncrementalEqualsFull(dir,
+      { "main.js": "const a = require('./x');\n// touched\nmodule.exports = { run: () => a };\n" },
+      { expectIncremental: false });
+  } finally { cleanup(dir); }
+});
+
+test("a directory import backed by package.json \"main\" falls back to full (nested package.json)", () => {
+  const dir = makeRepo({
+    "mod/entry.ts": "export function entryFn() { return 1; }\n",
+    "mod/index.ts": "export function idxFn() { return 2; }\n",
+    "mod/package.json": '{"main":"./entry.ts"}\n',
+    "consumer.ts": "export function consume() { return 42; }\n",
+    "preview.ts": "import { entryFn } from './mod';\nexport const x = entryFn;\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    assertIncrementalEqualsFull(dir,
+      { "consumer.ts": "import { entryFn } from './mod';\nexport function u() { return entryFn(); }\n" },
+      { expectIncremental: false });
+  } finally { cleanup(dir); }
+});
+
+test("an UNTRACKED nested tsconfig still triggers the monorepo fallback", () => {
+  const dir = makeRepo({
+    "tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["src/shared/*"]}}}\n',
+    "src/shared/thing.ts": "export const rootThing = () => 'ROOT';\n",
+    "packages/pkg/src/shared/thing.ts": "export const pkgThing = () => 'PKG';\n",
+    "packages/pkg/src/consumer.ts": "import { pkgThing } from '@shared/thing';\nexport const useIt = () => pkgThing();\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    // create the nested tsconfig AFTER the commit so it stays UNTRACKED
+    writeFiles(dir, { "packages/pkg/tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["src/shared/*"]}}}\n' });
+    assertIncrementalEqualsFull(dir,
+      { "packages/pkg/src/consumer.ts": "import { pkgThing } from '@shared/thing';\nexport const useIt = () => pkgThing() + '!';\n" },
+      { expectIncremental: false });
+  } finally { cleanup(dir); }
+});
+
 test("missing facts snapshot falls back to a full build (no crash)", () => {
   const dir = makeRepo(BASE);
   try {
