@@ -157,15 +157,32 @@ is dirty. Agents work on dirty trees essentially always, so this is the #1
 real-world experience killer — and fixing it turns agentmap's always-fresh
 behavior into a real competitive claim vs CodeGraph's 2s sync.
 
+> 📐 **Full implementation-ready design + measured baseline:**
+> [`docs/batch3-dirty-tree-perf.md`](docs/batch3-dirty-tree-perf.md) (2026-07-03
+> research pass). Measured: warm clean cache = 0.10s, but **every** dirty query
+> re-parses the whole repo — content-os (370 files) = 1.67s per query, and
+> dirty #2 ≈ dirty #1 (zero reuse). Two-tier plan: Tier 1 dirty-map cache
+> (~0.5 day, zero risk, byte-identical, ~16× on repeated dirty queries) → ship
+> first; Tier 2 true incremental (~2–3 days). Also found: a cache-poison one-shot
+> rebuild on the dirty→clean transition (fold the fix into Tier 1).
+
 ### Tasks
 
-- [ ] **Dirty-map caching / incremental invalidation** — `agentmap.mjs:806`:
-  `ensureFresh()` rebuilds from scratch whenever the tree is dirty. Minimum:
-  cache a dirty-built map keyed by a fingerprint of the dirty file set
-  (`path:mtime:size`, like the existing non-git `sourceFingerprint`) so
-  back-to-back queries reuse one rebuild. Goal: keep the clean-HEAD map, re-parse
-  only the files `git status` reports changed, patch their nodes/edges, re-run
-  PageRank (cheap, ~100ms at 5k files). *(performance/high)*
+- [ ] **Dirty-map caching / incremental invalidation** — `ensureFresh()`
+  (`agentmap.mjs:841`, guard `:853`, fall-through `:864`) rebuilds from scratch
+  whenever the tree is dirty. **Tier 1 (ship first):** cache a dirty-built map to a
+  new `.claude/agentmap/map.dirty.json` keyed by `sha1(HEAD + dirty-file
+  path:mtime:size triples)` so back-to-back queries reuse one rebuild
+  (byte-identical — reuses `build()` verbatim). **Tier 2 (goal):** keep the
+  clean-HEAD facts, re-parse only the files `git status` reports changed via a
+  subset-scoped `extractFacts` + key-set resolution shim, re-run the (global, cheap)
+  derived steps. See the design doc for exact edit points + regression tests.
+  *(performance/high)*
+- [ ] **Cache-poison on dirty→clean transition** — `build()` bakes
+  `dirty: dirtyCount()` into `map.json` (`agentmap.mjs:730`), so a map built while
+  dirty can never self-validate again (`:853` requires `cached.dirty === 0`) → the
+  first query after the tree goes clean always pays one extra full rebuild. Fold the
+  fix into Tier 1. *(performance/medium)*
 - [ ] **Build wall-clock budget + visible skips** — `agentmap.mjs:638`: deep
   import chains cause superlinear blowup (16+ min at 5k files) with files silently
   dropped via stack overflow. Add a time budget (degrade to a partial map marked
