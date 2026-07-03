@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Programmatic API — agentmap.mjs is now importable with zero side effects.** The
+  CLI arg-parse + dispatch moved inside a `main()` guarded by an `import.meta.url`
+  check (the same one `mcp.mjs` uses), so `import("@raymondchins/agentmap")` no longer
+  executes the CLI or writes a cache into the importer's cwd. It exports the pure
+  building blocks: `pagerank`, `rankSymbols`, `identMul`, `resolveFile`,
+  `extractVueScripts`, `stripJsonComments`, `extractFacts`, `build`, `ensureFresh`,
+  `readPackageVersion`. (Batch 2 — modularization; unblocks in-process MCP + unit tests.)
+- **`extractFacts()` backend seam.** `build()` is split into `extractFacts()` — the only
+  code that knows ts-morph / Vue SFCs, returning per-file facts (exports, imports,
+  imported symbols, re-exports, default-export name) — and a backend-agnostic `build()`
+  that assembles the graph, PageRank, symbol ranking, and cache from those facts. A
+  second language backend becomes a drop-in producer of the same shape.
+- **In-process unit tests** (`test/unit.test.mjs`) exercising the exported pure functions
+  directly (no subprocess spawn), including the `extractFacts` seam contract.
+
+### Changed
+- **Internal refactor only — map output is byte-identical.** The source-extension list
+  (previously hardcoded in 5 places) is hoisted into one per-backend descriptor
+  (`CODE_EXT` / `SOURCE_EXT`), and the relative-specifier branch of `resolveSpec` (which
+  re-implemented `tryResolveAt` behind a `join` local that shadowed `joinPosix`) collapses
+  onto the shared helpers. No change to the map, hubs, rankings, or exit codes — verified
+  byte-identical against the pre-refactor build.
+
 ### Security
 - **Post-commit hook no longer runs a repo-local `./agentmap.mjs` by default.** A working-tree
   `agentmap.mjs` is attacker-plantable (any branch/PR can add it), so the hook firing on the
