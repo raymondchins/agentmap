@@ -49,7 +49,7 @@ Full research (with source URLs) is in the audit report — see *References* bel
 | Batch | Theme | Effort | State |
 |---|---|---|---|
 | **1** | Trust & truth (security + honesty) | 1–2 d | ✅ **DONE** (pushed) |
-| **2** | Modularize for testability + backend seam | 2–4 d | ⬜ next |
+| **2** | Modularize for testability + backend seam | 2–4 d | 🔨 in progress — 4/8 (all *high* + de-dup done, verified byte-identical) |
 | **3** | Dirty-tree performance | 3–5 d | ⬜ |
 | **4** | Distribution & release hygiene | 2–3 d | ⬜ |
 | **5** | TS-depth before language-breadth | weeks | ⬜ |
@@ -88,7 +88,7 @@ rebuild, multi-language optionality, a documented API) is gated on this.
 
 ### Tasks
 
-- [ ] **`main()` guard + exports** — `agentmap.mjs:1458` runs the whole arg-parse
+- [x] **`main()` guard + exports** — `agentmap.mjs:1458` runs the whole arg-parse
   + dispatch chain (1458–1831) as module side effects with `process.exit()`
   calls, and the file exports nothing → importing it executes the CLI and writes
   a cache into the importer's cwd. Wrap dispatch in a `main()` guarded by the
@@ -96,14 +96,14 @@ rebuild, multi-language optionality, a documented API) is gated on this.
   (`pagerank`, `rankSymbols`, `identMul`, `resolveFile`, `extractVueScripts`,
   `stripJsonComments`, `build`, `ensureFresh`, `readPackageVersion`).
   *(architecture/high)*
-- [ ] **Extract `extractFacts()` backend interface from `build()`** —
+- [x] **Extract `extractFacts()` backend interface from `build()`** —
   `agentmap.mjs:470–696` fuses parsing, module resolution, graph construction,
   ranking, and cache persistence. Extract:
   `extractFacts(repo) → Map<path, {exports:[{name,kind}], importedSymbols:{target:[names]}, reExports, defaultExportName}>`
   with the ts-morph+Vue code as the first backend; `build()` becomes
   backend-agnostic assembly (dependents inversion `:656`, PageRank `:658–665`,
   rankSymbols `:668`, persist `:688–693`). *(architecture/high)*
-- [ ] **Hoist the source-extension list** — currently hardcoded in 5 places
+- [x] **Hoist the source-extension list** — currently hardcoded in 5 places
   (`dirtyCount` regex `:101`, `SRC_EXT` `:113`, `makeProject` git-ls-files filter
   `:411`, non-git glob `:424–427`, `RES_EXT` `:493`) into one per-backend
   descriptor. Prerequisite for any second backend. *(architecture/high)*
@@ -112,7 +112,7 @@ rebuild, multi-language optionality, a documented API) is gated on this.
   rankSymbols, identMul), `lib/cache.mjs` (ensureFresh, sourceFingerprint,
   dirtyCount), `lib/setup.mjs` (installHooks, setupMcp, doctor — ~570 lines),
   `agentmap.mjs` as a thin bin shim. Keep `mcp.mjs`/`skills/install.mjs` working.
-- [ ] **De-dup module resolution** — `agentmap.mjs:541`: an inner `join` shadows
+- [x] **De-dup module resolution** — `agentmap.mjs:541`: an inner `join` shadows
   `node:path`'s join and `resolveSpec`'s relative branch re-implements
   `tryResolveAt`. Collapse to:
   `resolveSpec = (fromAbsDir, spec) => spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : resolveAlias(spec, fromAbsDir)`.
@@ -139,7 +139,8 @@ rebuild, multi-language optionality, a documented API) is gated on this.
   the whole map + 2 git subprocesses per tool call. After exports exist, run
   queries in-process against a map parsed once, invalidated by (sha,
   dirty-fingerprint). *(performance/low)*
-- [ ] **Direct unit tests** — with pure functions exported, add real unit tests
+- [x] **Direct unit tests** (started — `test/unit.test.mjs`, 9 in-process tests) —
+  with pure functions exported, add real unit tests
   for `pagerank`, `rankSymbols`, `resolveFile`, `stripJsonComments` (no subprocess
   spawn) — cheaper and faster than the black-box harness.
 

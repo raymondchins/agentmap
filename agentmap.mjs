@@ -59,6 +59,28 @@ const SYMS_PER_FILE = 8;         // per-file symbol cap in the --map digest
 const DEFAULT_SYMBOLS = 30;      // default count for --symbols with no n
 const MAXBUF = 64 * 1024 * 1024; // child_process maxBuffer — avoid ENOBUFS on big git output
 
+// ---------------------------------------------------------------------------
+// TS/JS backend descriptor — the single source of truth for which extensions
+// this backend handles. Hoisted out of the 5 sites that used to hardcode the
+// list (dirty-check, source fingerprint, ts-morph discovery, non-git glob
+// fallback, specifier resolution) so a second-language backend can be a drop-in
+// later (Batch 2 seam). Regex alternation order is irrelevant here — each source
+// path ends in exactly one extension — so one canonical list stays behavior-
+// identical to the old per-site orderings.
+//
+//   CODE_EXT   — extensions ts-morph parses directly. `.vue` is deliberately
+//                NOT here: a Vue SFC is not TS/JS, so it's indexed via a virtual
+//                `.vue.ts`/`.vue.js` source (see extractVueScripts), not handed
+//                to ts-morph raw.
+//   SOURCE_EXT — everything that counts as a "source file" for freshness / dirty
+//                detection. INCLUDES `.vue` so editing an SFC busts the cache.
+// ---------------------------------------------------------------------------
+const CODE_EXT = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+const SOURCE_EXT = [...CODE_EXT, "vue"];
+const extBrace = (list) => `{${list.join(",")}}`;                 // glob brace body
+const CODE_EXT_RE = new RegExp(`\\.(${CODE_EXT.join("|")})$`);    // ts-morph-parseable files
+const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXT.join("|")})$`); // any source file (incl. .vue)
+
 const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).toString().trim(); } catch { return ""; } };
 
 // Live content search for the --any fallback. `git grep` over tracked +
@@ -100,7 +122,7 @@ const dirtyCount = () =>
     // code avoids falsely splitting a plain file whose NAME contains " -> ".
     if (/[RC]/.test(xy) && p.includes(" -> ")) p = p.split(" -> ").pop(); // rename/copy: keep new path
     p = p.replace(/^"|"$/g, "");                         // unquote space/special paths
-    return /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|vue)$/.test(p);
+    return SOURCE_EXT_RE.test(p);
   }).length;
 const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
 
@@ -111,8 +133,7 @@ const getOrSet = (m, k, make) => { let v = m.get(k); if (v === undefined) { v = 
 // "path:mtimeMs:size" for source files so the cache can be trusted between runs
 // without a full reparse. Skips node_modules/.git/.next. Any error ⇒ "" (caller
 // falls through to build, i.e. current behavior). Never used on the git path.
-// Includes `.vue` so editing a Vue SFC invalidates the non-git cache too.
-const SRC_EXT = /\.(ts|tsx|mts|cts|jsx|js|mjs|cjs|vue)$/;
+// SOURCE_EXT_RE includes `.vue` so editing a Vue SFC invalidates the cache too.
 function sourceFingerprint() {
   try {
     const entries = [];
@@ -133,7 +154,7 @@ function sourceFingerprint() {
         try { st = lstatSync(full); } catch { continue; }
         if (st.isSymbolicLink()) continue;
         if (st.isDirectory()) walk(full, depth + 1);
-        else if (SRC_EXT.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
+        else if (SOURCE_EXT_RE.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
       }
     };
     walk(".", 0);
@@ -410,7 +431,7 @@ function makeProject() {
   if (listed.length) {
     const missing = [];
     for (const f of listed) {
-      if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/.test(f)) {
+      if (CODE_EXT_RE.test(f)) {
         const segs = f.split("/");
         if (segs.includes("node_modules") || segs.includes(".next")) continue;
         if (!loaded.has(`${cwdp}/${f}`)) missing.push(f);
@@ -423,10 +444,11 @@ function makeProject() {
     if (missing.length) project.addSourceFilesAtPaths(missing);
   } else {
     // non-git fallback: broad globs (mts/cts/mjs/cjs per base dir included).
+    const g = extBrace(CODE_EXT); // e.g. {ts,tsx,mts,cts,js,jsx,mjs,cjs}
     project.addSourceFilesAtPaths([
-      "src/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}", "app/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
-      "components/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}", "lib/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
-      "pages/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}", "*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+      `src/**/*.${g}`, `app/**/*.${g}`,
+      `components/**/*.${g}`, `lib/**/*.${g}`,
+      `pages/**/*.${g}`, `*.${g}`,
     ]);
     // Non-git `.vue` fallback: walk the tree like sourceFingerprint() does.
     try {
@@ -465,12 +487,24 @@ function makeProject() {
 }
 
 // ---------------------------------------------------------------------------
-// build() — parse the repo, extract file imports/exports (+ which named
-// symbols cross each edge), compute file PageRank, run the Aider-style
-// identifier graph to rank individual symbols, and persist agentmap.json.
+// extractFacts() — the language-BACKEND boundary. Parse the repo and return
+// per-file "facts": for each in-project source file, its exported symbols, the
+// files it imports (+ the named symbols crossing each edge), pass-through
+// re-exports, and which export is `default`. This is the ONLY function that
+// knows about ts-morph and Vue SFCs; build() assembles the graph + rankings
+// from these facts and is backend-agnostic. A second language = a second
+// producer of this same shape (the Batch 2 seam). Operates on process.cwd().
+//
+// Returns { [relPath]: {
+//   exports:         [{ name, kind }],
+//   imports:         [targetPath…],                    // = Object.keys(importedSymbols)
+//   importedSymbols: { [targetPath]: [names…] },        // "default"/"*" still literal
+//   defaultExportName: string | null,                   // resolved default-export name
+//   reExports:       [names…],                          // pass-through re-exports (barrels)
+// } }
+// A single pathological file is skipped + warned, never fatal (graceful degrade).
 // ---------------------------------------------------------------------------
-function build() {
-  const t0 = Date.now();
+function extractFacts() {
   const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject();
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
@@ -483,7 +517,7 @@ function build() {
     const real = vueMap[abs];
     return (real || abs).replace(cwd + "/", "");
   };
-  const files = {}, dependents = {}, features = {};
+  const files = {};
   // PATH-SEGMENT exclusion (not substring) so e.g. components/.next-demo or
   // src/node_modules_helper.ts are NOT wrongly excluded.
   const excluded = (p) => { const segs = p.split("/"); return segs.includes("node_modules") || segs.includes(".next"); };
@@ -492,7 +526,7 @@ function build() {
   // in-project source file key. Tries the bare path, then each extension, then
   // /index.*. Returns the rel key or null. Powers side-effect (6b) + dynamic
   // import()/require() (6c) edges that ts-morph's specifier resolution skips.
-  const RES_EXT = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+  const RES_EXT = CODE_EXT;
   // posix-join that collapses "" / "." / ".." segments (no fs access).
   const joinPosix = (a, b) => {
     const parts = (a + "/" + b).split("/"); const st = [];
@@ -537,30 +571,15 @@ function build() {
     }
     return null;
   };
-  const resolveSpec = (fromAbsDir, spec) => {
-    if (!spec.startsWith(".")) return resolveAlias(spec, fromAbsDir); // alias (baseUrl/paths) or null for non-relative
-    // normalize fromAbsDir + spec into an absolute-ish posix path
-    const join = (a, b) => {
-      const parts = (a + "/" + b).split("/"); const st = [];
-      for (const seg of parts) { if (seg === "" || seg === ".") continue; if (seg === "..") st.pop(); else st.push(seg); }
-      return (a.startsWith("/") ? "/" : "") + st.join("/");
-    };
-    const baseAbs = join(fromAbsDir, spec);
-    const tryGet = (abs) => { const sf = project.getSourceFile(abs); return sf ? sf : null; };
-    // Vue SFC: `import X from "./C.vue"` (exact) ALWAYS wins — the user wrote
-    // `.vue` explicitly, so we honor that. This check must stay BEFORE the
-    // TS/JS loop.
-    if (vueReal[baseAbs]) return rel(baseAbs);
-    let sf = tryGet(baseAbs);
-    if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}.${e}`); if (sf) break; }
-    if (!sf) for (const e of RES_EXT) { sf = tryGet(`${baseAbs}/index.${e}`); if (sf) break; }
-    // TS/JS SHADOW WINS: when a same-name .ts/.js exists, the extensionless
-    // `import "./C"` resolves to it (TS/JS-first priority is preserved). Only
-    // fall through to `.vue` as a last resort, when no TS/JS shadow exists.
-    if (sf) return rel(sf.getFilePath());
-    if (vueReal[`${baseAbs}.vue`]) return rel(`${baseAbs}.vue`);
-    return null;
-  };
+  // Resolve a module specifier to an in-project file key. A relative specifier is
+  // joined against the importer's dir and handed to tryResolveAt — which already
+  // encodes the full precedence ladder (exact `.vue` wins → extensionless →
+  // `.ext` TS/JS shadow → `/index.ext` → `.vue` fallback). A bare specifier goes
+  // through the tsconfig/jsconfig alias resolver. (The relative branch used to
+  // re-implement tryResolveAt's ladder behind a `join` local that shadowed
+  // joinPosix — collapsed here to the one shared joinPosix + tryResolveAt.)
+  const resolveSpec = (fromAbsDir, spec) =>
+    spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : resolveAlias(spec, fromAbsDir);
 
   const sourceFiles = project.getSourceFiles();
   process.stderr.write(`# agentmap: parsing ${sourceFiles.length} source files…\n`);
@@ -633,10 +652,7 @@ function build() {
       if (tp) addEdge(tp, ["*"]);
     }
     const imports = Object.keys(importedSymbols);
-    for (const tp of imports) (dependents[tp] ??= []).push(path);
     files[path] = { exports, imports, importedSymbols, defaultExportName, reExports: [...reExports] };
-    const feat = featureOf(path);
-    if (feat) (features[feat] ??= []).push(path);
     } catch (e) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
@@ -644,6 +660,18 @@ function build() {
       process.stderr.write(`# agentmap: skipped ${path} (parse error: ${e?.message ?? e})\n`);
     }
   }
+  return files;
+}
+
+// ---------------------------------------------------------------------------
+// build() — backend-agnostic assembly. Take per-file facts from extractFacts(),
+// resolve default-import edges, invert dependents, group features, compute file
+// PageRank + the Aider-style symbol ranking, pick hubs, and persist the cache.
+// Knows nothing about ts-morph / Vue — swapping the backend never touches this.
+// ---------------------------------------------------------------------------
+function build() {
+  const t0 = Date.now();
+  const files = extractFacts();
   // 7: resolve default-import edges. A default import was recorded literally as
   // "default"; rankSymbols skips "default", so default-exported symbols (the
   // dominant Next.js component) never ranked. Map each "default" entry to the
@@ -655,7 +683,16 @@ function build() {
       f.importedSymbols[tp] = f.importedSymbols[tp].map((n) => (n === "default" ? dn : n));
     }
   }
+  // Invert imports → dependents (who imports each file). Derived purely from the
+  // facts, in the same file/import iteration order the in-loop build used, so the
+  // per-file dependents arrays stay byte-identical.
+  const dependents = {};
+  for (const [p, f] of Object.entries(files)) for (const tp of f.imports) (dependents[tp] ??= []).push(p);
   for (const p in files) files[p].dependents = dependents[p] ?? [];
+
+  // Group files into features (first real app/ route segment) from their paths.
+  const features = {};
+  for (const p of Object.keys(files)) { const feat = featureOf(p); if (feat) (features[feat] ??= []).push(p); }
 
   // --- File PageRank: edges importer→imported, weighted by # symbols crossed.
   const nodes = Object.keys(files);
@@ -1453,43 +1490,13 @@ function setupMcp({ dryRun = false } = {}) {
   }
 }
 
-
 // ---------------------------------------------------------------------------
-// CLI
+// CLI — arg parsing + command dispatch. Lives inside main() so that IMPORTING
+// this module (for the exported pure functions below) has zero side effects:
+// no build, no cache write, no console output, no process.exit. main() runs
+// only when the file is executed directly (see the import.meta.url guard at the
+// very bottom — the same dual check mcp.mjs uses).
 // ---------------------------------------------------------------------------
-const args = process.argv.slice(2);
-const has = (f) => args.includes(f);
-// Return the value after flag `f`, but treat a missing value OR one that looks
-// like another flag (starts with "--") as undefined so the missing-arg guards
-// fire — e.g. `--any --foo` must NOT search for the literal "--foo".
-const arg = (f) => { const i = args.indexOf(f); if (i < 0) return undefined; const v = args[i + 1]; return v === undefined || v.startsWith("--") ? undefined : v; };
-
-// --json is a GLOBAL modifier: when present, the chosen command emits exactly
-// ONE JSON object to stdout (no prose). Branches build a result, then either
-// console.log(JSON.stringify(obj)) or fall through to the prose printer. Exit
-// codes are identical in both modes.
-const wantJson = has("--json");
-const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); else prose(); };
-
-// Every recognized flag (the global modifiers + maintenance flags + each
-// command + sub-flags that take a value). Anything starting with "-" that is
-// NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
-const KNOWN = new Set([
-  "--json", "--print",
-  "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
-  "--dry-run", "--setup-mcp", "--mcp",
-  "--any", "--find", "--relates", "--map", "--focus", "--tokens",
-  "--symbols", "--feature", "--features", "--hubs",
-]);
-
-// A token consumed as the VALUE of a value-taking flag is never itself a flag —
-// so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
-// mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
-// `--any --foo` still falls through to the missing-arg guard instead.)
-const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
-const valueIdx = new Set();
-for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
-
 const USAGE = `agentmap — the queryable, ranked repo map your coding agent is forced to use.
 
 Usage: agentmap [command] [--json]
@@ -1528,306 +1535,355 @@ Maintenance:
 
 Exit codes: 0 ok · 1 query had zero results · 2 usage error.`;
 
-// --help / --version short-circuit BEFORE any build or dispatch.
-if (has("--help") || has("-h")) {
-  console.log(USAGE);
-  process.exit(0);
-}
-if (has("--version") || has("-v")) {
-  let version = "0.0.0";
-  try { version = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version || version; } catch {}
-  console.log(version);
-  process.exit(0);
-}
+async function main() {
+  const args = process.argv.slice(2);
+  const has = (f) => args.includes(f);
+  // Return the value after flag `f`, but treat a missing value OR one that looks
+  // like another flag (starts with "--") as undefined so the missing-arg guards
+  // fire — e.g. `--any --foo` must NOT search for the literal "--foo".
+  const arg = (f) => { const i = args.indexOf(f); if (i < 0) return undefined; const v = args[i + 1]; return v === undefined || v.startsWith("--") ? undefined : v; };
 
-// --mcp: hand off to the stdio MCP server (authored separately). Dynamic import
-// so a missing mcp.mjs only fails when --mcp is actually requested.
-if (has("--mcp")) {
-  try {
-    const m = await import(new URL("./mcp.mjs", import.meta.url));
-    await m.serve();
-  } catch (e) {
-    console.error(`agentmap --mcp failed: ${e?.message || e}`);
-    process.exit(1);
-  }
-}
-// --install-hooks: wire the git post-commit refresh + emit the PreToolUse
-// snippet. Self-contained (resolves the package hooks/ dir relative to here).
-else if (has("--install-hooks")) {
-  try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
-  catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
-}
-// --install-skill: copy packaged SKILL.md / Cursor rule (see skills/install.mjs).
-else if (has("--install-skill")) {
-  try {
-    // lazy import keeps skills/install.mjs (and its package.json read) OFF the
-    // hot path — warm --any/--find queries must not load it.
-    const { installSkill } = await import("./skills/install.mjs");
-    installSkill({
-      platforms: arg("--platform") || "all",
-      project: !has("--global"),
-      global: has("--global"),
-      dryRun: has("--dry-run"),
-    });
+  // --json is a GLOBAL modifier: when present, the chosen command emits exactly
+  // ONE JSON object to stdout (no prose). Branches build a result, then either
+  // console.log(JSON.stringify(obj)) or fall through to the prose printer. Exit
+  // codes are identical in both modes.
+  const wantJson = has("--json");
+  const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); else prose(); };
+
+  // Every recognized flag (the global modifiers + maintenance flags + each
+  // command + sub-flags that take a value). Anything starting with "-" that is
+  // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
+  const KNOWN = new Set([
+    "--json", "--print",
+    "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
+    "--dry-run", "--setup-mcp", "--mcp",
+    "--any", "--find", "--relates", "--map", "--focus", "--tokens",
+    "--symbols", "--feature", "--features", "--hubs",
+  ]);
+
+  // A token consumed as the VALUE of a value-taking flag is never itself a flag —
+  // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
+  // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
+  // `--any --foo` still falls through to the missing-arg guard instead.)
+  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const valueIdx = new Set();
+  for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
+
+  // --help / --version short-circuit BEFORE any build or dispatch.
+  if (has("--help") || has("-h")) {
+    console.log(USAGE);
     process.exit(0);
-  } catch (e) {
-    console.error(`agentmap --install-skill failed: ${e?.message || e}`);
-    process.exit(1);
   }
-}
-// --hook-status: report post-commit / nudge / settings wiring (no writes).
-else if (has("--hook-status")) {
-  try { hookStatus(); process.exit(0); }
-  catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(1); }
-}
-// --doctor: read-only harness health report (hooks + skills + MCP + map cache).
-// Always exits 0; never writes. --json emits the structured report.
-else if (has("--doctor")) {
-  try {
-    const report = await collectDoctorReport();
-    if (wantJson) console.log(JSON.stringify(report, null, 2));
-    else console.log(formatDoctorReport(report));
+  if (has("--version") || has("-v")) {
+    let version = "0.0.0";
+    try { version = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version || version; } catch {}
+    console.log(version);
     process.exit(0);
-  } catch (e) {
-    console.error(`agentmap --doctor failed: ${e?.message || e}`);
-    process.exit(1);
   }
-}
-// --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
-else if (has("--setup-mcp")) {
-  try { setupMcp({ dryRun: has("--dry-run") }); process.exit(0); }
-  catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
-}
-// Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
-// 2). Runs BEFORE the bare-build fallthrough so a typo never silently rebuilds.
-// Bare invocation with NO flags still builds (handled in the final else).
-else if (args.some((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i))) {
-  const bad = args.find((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i));
-  console.error(`unknown flag: ${bad}\ntry \`agentmap --help\` for the list of commands.`);
-  process.exit(2);
-}
-else if (has("--any")) {
-  // Unified router: cached structure (file → symbol → feature) then a LIVE
-  // git-grep fallback for data/copy/string-literals the graph never indexes.
-  const raw = arg("--any");
-  if (!raw) { console.error('--any needs a query, e.g. `--any PremiumCard` or `--any "multi-modal"`'); process.exitCode = 2; }
-  else {
-    const q = raw.toLowerCase();
-    const data = ensureFresh();
-    const keys = Object.keys(data.files);
-    const { key: fileKey, candidates } = resolveFile(keys, data.files, raw);
-    // structured symbol/feature hits (reused by both prose + JSON shapes)
-    const symObjs = [];
-    for (const [path, f] of Object.entries(data.files))
-      for (const e of f.exports)
-        if (e.name.toLowerCase().includes(q)) symObjs.push({ file: path, name: e.name, kind: e.kind });
-    const symHits = symObjs.map((s) => `  ${s.file} → ${s.name} (${s.kind})`);
-    const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
-    if (fileKey) {
-      // A file resolved — but ALSO surface symbol/feature hits (fix #3) so a
-      // loose path match (e.g. "auth") can't shadow a symbol the user wanted.
-      const f = data.files[fileKey];
-      out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
-        console.log(`[structure:file] ${fileKey}  (pr ${f.pagerank ?? "—"})`);
-        fileBlock(fileKey, f);
-        if (symHits.length) { console.log(`[structure] ${symHits.length} symbol match for "${raw}":`); console.log(symHits.join("\n")); }
-        if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
+
+  // --mcp: hand off to the stdio MCP server (authored separately). Dynamic import
+  // so a missing mcp.mjs only fails when --mcp is actually requested.
+  if (has("--mcp")) {
+    try {
+      const m = await import(new URL("./mcp.mjs", import.meta.url));
+      await m.serve();
+    } catch (e) {
+      console.error(`agentmap --mcp failed: ${e?.message || e}`);
+      process.exit(1);
+    }
+  }
+  // --install-hooks: wire the git post-commit refresh + emit the PreToolUse
+  // snippet. Self-contained (resolves the package hooks/ dir relative to here).
+  else if (has("--install-hooks")) {
+    try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
+    catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+  }
+  // --install-skill: copy packaged SKILL.md / Cursor rule (see skills/install.mjs).
+  else if (has("--install-skill")) {
+    try {
+      // lazy import keeps skills/install.mjs (and its package.json read) OFF the
+      // hot path — warm --any/--find queries must not load it.
+      const { installSkill } = await import("./skills/install.mjs");
+      installSkill({
+        platforms: arg("--platform") || "all",
+        project: !has("--global"),
+        global: has("--global"),
+        dryRun: has("--dry-run"),
       });
-    } else if (symHits.length || featNames.length) {
-      out({ command: "any", query: raw, kind: "structure", symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
-        console.log(`[structure] ${symHits.length} symbol, ${featNames.length} feature match for "${raw}"`);
-        if (symHits.length) console.log(symHits.join("\n"));
-        if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
-      });
-    } else if (candidates && candidates.length > 1) {
-      out({ command: "any", query: raw, kind: "candidates", candidates }, () => {
-        console.log(`[structure] "${raw}" matched ${candidates.length} files — narrow it:`);
-        for (const k of candidates) console.log(`  ${k}`);
-      });
-    } else {
-      const res = contentSearch(raw);
-      if (!res) {
-        process.exitCode = 1;
-        out({ command: "any", query: raw, kind: "empty" }, () => console.log(`[content] 0 match for "${raw}" (git grep, tracked + untracked)`));
+      process.exit(0);
+    } catch (e) {
+      console.error(`agentmap --install-skill failed: ${e?.message || e}`);
+      process.exit(1);
+    }
+  }
+  // --hook-status: report post-commit / nudge / settings wiring (no writes).
+  else if (has("--hook-status")) {
+    try { hookStatus(); process.exit(0); }
+    catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(1); }
+  }
+  // --doctor: read-only harness health report (hooks + skills + MCP + map cache).
+  // Always exits 0; never writes. --json emits the structured report.
+  else if (has("--doctor")) {
+    try {
+      const report = await collectDoctorReport();
+      if (wantJson) console.log(JSON.stringify(report, null, 2));
+      else console.log(formatDoctorReport(report));
+      process.exit(0);
+    } catch (e) {
+      console.error(`agentmap --doctor failed: ${e?.message || e}`);
+      process.exit(1);
+    }
+  }
+  // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
+  else if (has("--setup-mcp")) {
+    try { setupMcp({ dryRun: has("--dry-run") }); process.exit(0); }
+    catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
+  }
+  // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
+  // 2). Runs BEFORE the bare-build fallthrough so a typo never silently rebuilds.
+  // Bare invocation with NO flags still builds (handled in the final else).
+  else if (args.some((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i))) {
+    const bad = args.find((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i));
+    console.error(`unknown flag: ${bad}\ntry \`agentmap --help\` for the list of commands.`);
+    process.exit(2);
+  }
+  else if (has("--any")) {
+    // Unified router: cached structure (file → symbol → feature) then a LIVE
+    // git-grep fallback for data/copy/string-literals the graph never indexes.
+    const raw = arg("--any");
+    if (!raw) { console.error('--any needs a query, e.g. `--any PremiumCard` or `--any "multi-modal"`'); process.exitCode = 2; }
+    else {
+      const q = raw.toLowerCase();
+      const data = ensureFresh();
+      const keys = Object.keys(data.files);
+      const { key: fileKey, candidates } = resolveFile(keys, data.files, raw);
+      // structured symbol/feature hits (reused by both prose + JSON shapes)
+      const symObjs = [];
+      for (const [path, f] of Object.entries(data.files))
+        for (const e of f.exports)
+          if (e.name.toLowerCase().includes(q)) symObjs.push({ file: path, name: e.name, kind: e.kind });
+      const symHits = symObjs.map((s) => `  ${s.file} → ${s.name} (${s.kind})`);
+      const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
+      if (fileKey) {
+        // A file resolved — but ALSO surface symbol/feature hits (fix #3) so a
+        // loose path match (e.g. "auth") can't shadow a symbol the user wanted.
+        const f = data.files[fileKey];
+        out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
+          console.log(`[structure:file] ${fileKey}  (pr ${f.pagerank ?? "—"})`);
+          fileBlock(fileKey, f);
+          if (symHits.length) { console.log(`[structure] ${symHits.length} symbol match for "${raw}":`); console.log(symHits.join("\n")); }
+          if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
+        });
+      } else if (symHits.length || featNames.length) {
+        out({ command: "any", query: raw, kind: "structure", symbols: symObjs, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
+          console.log(`[structure] ${symHits.length} symbol, ${featNames.length} feature match for "${raw}"`);
+          if (symHits.length) console.log(symHits.join("\n"));
+          if (featNames.length) console.log("features: " + featNames.map((n) => `${n} (${data.features[n].length})`).join(", "));
+        });
+      } else if (candidates && candidates.length > 1) {
+        out({ command: "any", query: raw, kind: "candidates", candidates }, () => {
+          console.log(`[structure] "${raw}" matched ${candidates.length} files — narrow it:`);
+          for (const k of candidates) console.log(`  ${k}`);
+        });
       } else {
-        const lines = res.split("\n");
-        const shown = lines.slice(0, CONTENT_LINES_LIMIT);
-        out({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown }, () => {
-          console.log(`[content] ${lines.length} line${lines.length > 1 ? "s" : ""}${lines.length > CONTENT_LINES_LIMIT ? ` (showing ${CONTENT_LINES_LIMIT})` : ""}:`);
-          console.log(shown.join("\n"));
+        const res = contentSearch(raw);
+        if (!res) {
+          process.exitCode = 1;
+          out({ command: "any", query: raw, kind: "empty" }, () => console.log(`[content] 0 match for "${raw}" (git grep, tracked + untracked)`));
+        } else {
+          const lines = res.split("\n");
+          const shown = lines.slice(0, CONTENT_LINES_LIMIT);
+          out({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown }, () => {
+            console.log(`[content] ${lines.length} line${lines.length > 1 ? "s" : ""}${lines.length > CONTENT_LINES_LIMIT ? ` (showing ${CONTENT_LINES_LIMIT})` : ""}:`);
+            console.log(shown.join("\n"));
+          });
+        }
+      }
+    }
+  } else if (has("--find")) {
+    const raw = arg("--find");
+    if (!raw) { console.error("--find needs a symbol query, e.g. `--find PremiumCard`"); process.exitCode = 2; }
+    else {
+      const q = raw.toLowerCase();
+      const data = ensureFresh();
+      const matches = [];
+      for (const [path, f] of Object.entries(data.files))
+        for (const e of f.exports)
+          if (e.name.toLowerCase().includes(q)) matches.push({ file: path, name: e.name, kind: e.kind });
+      if (!matches.length) process.exitCode = 1;
+      out({ command: "find", query: raw, matches }, () => {
+        console.log(`find "${raw}": ${matches.length} match`);
+        if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})`).join("\n"));
+      });
+    }
+  } else if (has("--relates")) {
+    const q = arg("--relates");
+    if (!q) { console.error("--relates needs a file path/name, e.g. `--relates agentmap.mjs`"); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      const keys = Object.keys(data.files);
+      const { key, candidates } = resolveFile(keys, data.files, q);
+      if (!key) {
+        process.exitCode = 1;
+        out({ command: "relates", error: "no match", query: q, candidates: candidates || [] }, () => {
+          if (candidates && candidates.length > 1) { console.log(`relates: "${q}" matched ${candidates.length} files — narrow it:`); for (const k of candidates) console.log(`  ${k}`); }
+          else console.log(`relates: no file matching "${q}"`);
+        });
+      } else {
+        const f = data.files[key];
+        // query-focused relevance: personalized PageRank (random-walk-with-restart)
+        // on a BIDIRECTIONAL graph → files most related to the target, transitively.
+        const biEdges = [];
+        for (const [p, ff] of Object.entries(data.files))
+          for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
+        const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
+        const top = Object.entries(rel).filter(([k]) => k !== key).sort((a, b) => b[1] - a[1]).slice(0, RELATED_LIMIT);
+        out({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
+          console.log(`relates: ${key}  (pr ${f.pagerank ?? "—"})`);
+          fileBlock(key, f);
+          console.log(`related (random-walk relevance):`);
+          for (const [k, r] of top) console.log(`  ${k} (${r.toFixed(4)})`);
         });
       }
     }
-  }
-} else if (has("--find")) {
-  const raw = arg("--find");
-  if (!raw) { console.error("--find needs a symbol query, e.g. `--find PremiumCard`"); process.exitCode = 2; }
-  else {
+  } else if (has("--map")) {
+    // Token-budgeted ranked digest (Aider's killer feature). --focus <path>
+    // personalizes toward a file; default budget FOCUS_BUDGET, ×8 with no focus.
+    const focusArg = arg("--focus");
+    // #14: `--focus` present but with NO value (it's the last arg, or another
+    // flag follows) — warn + exit 2 instead of silently using the global budget.
+    if (has("--focus") && focusArg === undefined) {
+      console.error("--focus needs a file path/name, e.g. `--map --focus agentmap.mjs`");
+      process.exitCode = 2;
+    } else {
+      const data = ensureFresh();
+      const tk = parseInt(arg("--tokens") ?? "", 10);
+      const budget = Number.isFinite(tk) && tk > 0 ? tk : (focusArg ? FOCUS_BUDGET : DEFAULT_BUDGET);
+      let ranked = data.rankedSymbols || [];
+      let focusLabel = "global";
+      if (focusArg) {
+        const { key, candidates } = resolveFile(Object.keys(data.files), data.files, focusArg);
+        if (key) { ranked = rankSymbols(data.files, new Set([key])); focusLabel = key; }
+        else console.error(`# warning: --focus "${focusArg}" matched ${(candidates && candidates.length) || 0} files — using global ranking`);
+      }
+      // Fallback for default-export-heavy repos (sparse named-symbol graph): build
+      // the digest from file PageRank so --map is never empty.
+      if (!ranked.length)
+        ranked = Object.entries(data.files)
+          .sort((a, b) => (b[1].pagerank || 0) - (a[1].pagerank || 0))
+          .flatMap(([file, f]) => (f.exports || []).map((e) => ({ file, name: e.name, kind: e.kind, rank: f.pagerank || 0 })));
+      // Budget the digest into per-file blocks; collect the SHOWN files (with the
+      // exact symbols that fit) so prose + JSON render from one source of truth.
+      let used = 0;
+      const byFile = new Map();
+      for (const s of ranked) { if (!byFile.has(s.file)) byFile.set(s.file, []); byFile.get(s.file).push(s); }
+      const shownFiles = []; // [{ file, symbols:[{name,kind}] }]
+      let first = true;
+      for (const [file, syms] of byFile) {
+        const capped = syms.slice(0, SYMS_PER_FILE);
+        const lineOf = (arr) => `\n${file}:\n` + arr.map((s) => `  ${s.name} (${s.kind})`).join("\n");
+        const t = tokEst(lineOf(capped));
+        if (used + t > budget) {
+          // #13: if the FIRST (highest-ranked) block alone overruns the budget,
+          // emit a PARTIAL block (fewer symbols) so the top file is never wholly
+          // omitted. Otherwise `continue` so smaller lower-ranked files can still
+          // fill the remaining budget (don't `break` on the first overflow).
+          if (first && budget > 0) {
+            // #6 fix: try progressively fewer symbols DOWN TO ONE. The old
+            // `while (partial.length > 1)` sliced before testing and never tried
+            // the single-symbol block, so a tiny --tokens could emit NOTHING for
+            // the top file despite the "never wholly omitted" intent. If even one
+            // symbol overflows the budget, nothing fits (correct) — but we now try.
+            for (let k = capped.length - 1; k >= 1; k--) {
+              const partial = capped.slice(0, k);
+              const pt = tokEst(lineOf(partial));
+              if (used + pt <= budget) {
+                used += pt;
+                shownFiles.push({ file, symbols: partial.map((s) => ({ name: s.name, kind: s.kind })) });
+                break;
+              }
+            }
+            first = false;
+          }
+          continue;
+        }
+        used += t; first = false;
+        shownFiles.push({ file, symbols: capped.map((s) => ({ name: s.name, kind: s.kind })) });
+      }
+      out({ command: "map", focus: focusLabel, budget, tokens: used, files: shownFiles }, () => {
+        console.log(`# agentmap (${data.fileCount} files, sha ${data.generatedSha}) — focus: ${focusLabel}, budget ~${budget} tok`);
+        for (const { file, symbols } of shownFiles)
+          console.log(`\n${file}:\n` + symbols.map((s) => `  ${s.name} (${s.kind})`).join("\n"));
+        console.log(`\n# ~${used} tokens (${shownFiles.length} files shown)`);
+      });
+    }
+  } else if (has("--symbols")) {
+    const data = ensureFresh();
+    const sn = parseInt(arg("--symbols") ?? "", 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
+    const syms = (data.rankedSymbols || []).slice(0, n);
+    out({ command: "symbols", symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) }, () => {
+      console.log(`top ${n} ranked symbols (Aider-style):`);
+      for (const s of syms) console.log(`  ${s.rank}  ${s.file} → ${s.name} (${s.kind})`);
+    });
+  } else if (has("--feature")) {
+    const raw = arg("--feature");
+    if (!raw) { console.error("--feature needs a name, e.g. `--feature dashboard` (run --features to list)"); process.exitCode = 2; }
+    else {
     const q = raw.toLowerCase();
     const data = ensureFresh();
-    const matches = [];
-    for (const [path, f] of Object.entries(data.files))
-      for (const e of f.exports)
-        if (e.name.toLowerCase().includes(q)) matches.push({ file: path, name: e.name, kind: e.kind });
-    if (!matches.length) process.exitCode = 1;
-    out({ command: "find", query: raw, matches }, () => {
-      console.log(`find "${raw}": ${matches.length} match`);
-      if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})`).join("\n"));
-    });
-  }
-} else if (has("--relates")) {
-  const q = arg("--relates");
-  if (!q) { console.error("--relates needs a file path/name, e.g. `--relates agentmap.mjs`"); process.exitCode = 2; }
-  else {
-    const data = ensureFresh();
-    const keys = Object.keys(data.files);
-    const { key, candidates } = resolveFile(keys, data.files, q);
-    if (!key) {
+    const name = Object.keys(data.features).find((k) => k.toLowerCase() === q) || Object.keys(data.features).find((k) => k.toLowerCase().includes(q));
+    if (!name) {
       process.exitCode = 1;
-      out({ command: "relates", error: "no match", query: q, candidates: candidates || [] }, () => {
-        if (candidates && candidates.length > 1) { console.log(`relates: "${q}" matched ${candidates.length} files — narrow it:`); for (const k of candidates) console.log(`  ${k}`); }
-        else console.log(`relates: no file matching "${q}"`);
-      });
+      out({ command: "feature", error: "no match", query: raw }, () => console.log(`feature: no match for "${raw}" — run --features to list them.`));
     } else {
-      const f = data.files[key];
-      // query-focused relevance: personalized PageRank (random-walk-with-restart)
-      // on a BIDIRECTIONAL graph → files most related to the target, transitively.
-      const biEdges = [];
-      for (const [p, ff] of Object.entries(data.files))
-        for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
-      const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
-      const top = Object.entries(rel).filter(([k]) => k !== key).sort((a, b) => b[1] - a[1]).slice(0, RELATED_LIMIT);
-      out({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
-        console.log(`relates: ${key}  (pr ${f.pagerank ?? "—"})`);
-        fileBlock(key, f);
-        console.log(`related (random-walk relevance):`);
-        for (const [k, r] of top) console.log(`  ${k} (${r.toFixed(4)})`);
+      const fl = data.features[name], set = new Set(fl), exts = new Set();
+      for (const p of fl) for (const dep of (data.files[p]?.dependents || [])) if (!set.has(dep)) exts.add(dep);
+      out({ command: "feature", name, files: fl, externalDependents: [...exts] }, () => {
+        console.log(`feature "${name}": ${fl.length} files`);
+        for (const p of fl) console.log(`  ${p}`);
+        console.log(`external dependents (${exts.size}): ${[...exts].join(", ") || "—"}`);
       });
     }
-  }
-} else if (has("--map")) {
-  // Token-budgeted ranked digest (Aider's killer feature). --focus <path>
-  // personalizes toward a file; default budget FOCUS_BUDGET, ×8 with no focus.
-  const focusArg = arg("--focus");
-  // #14: `--focus` present but with NO value (it's the last arg, or another
-  // flag follows) — warn + exit 2 instead of silently using the global budget.
-  if (has("--focus") && focusArg === undefined) {
-    console.error("--focus needs a file path/name, e.g. `--map --focus agentmap.mjs`");
-    process.exitCode = 2;
-  } else {
+    }
+  } else if (has("--features")) {
     const data = ensureFresh();
-    const tk = parseInt(arg("--tokens") ?? "", 10);
-    const budget = Number.isFinite(tk) && tk > 0 ? tk : (focusArg ? FOCUS_BUDGET : DEFAULT_BUDGET);
-    let ranked = data.rankedSymbols || [];
-    let focusLabel = "global";
-    if (focusArg) {
-      const { key, candidates } = resolveFile(Object.keys(data.files), data.files, focusArg);
-      if (key) { ranked = rankSymbols(data.files, new Set([key])); focusLabel = key; }
-      else console.error(`# warning: --focus "${focusArg}" matched ${(candidates && candidates.length) || 0} files — using global ranking`);
-    }
-    // Fallback for default-export-heavy repos (sparse named-symbol graph): build
-    // the digest from file PageRank so --map is never empty.
-    if (!ranked.length)
-      ranked = Object.entries(data.files)
-        .sort((a, b) => (b[1].pagerank || 0) - (a[1].pagerank || 0))
-        .flatMap(([file, f]) => (f.exports || []).map((e) => ({ file, name: e.name, kind: e.kind, rank: f.pagerank || 0 })));
-    // Budget the digest into per-file blocks; collect the SHOWN files (with the
-    // exact symbols that fit) so prose + JSON render from one source of truth.
-    let used = 0;
-    const byFile = new Map();
-    for (const s of ranked) { if (!byFile.has(s.file)) byFile.set(s.file, []); byFile.get(s.file).push(s); }
-    const shownFiles = []; // [{ file, symbols:[{name,kind}] }]
-    let first = true;
-    for (const [file, syms] of byFile) {
-      const capped = syms.slice(0, SYMS_PER_FILE);
-      const lineOf = (arr) => `\n${file}:\n` + arr.map((s) => `  ${s.name} (${s.kind})`).join("\n");
-      const t = tokEst(lineOf(capped));
-      if (used + t > budget) {
-        // #13: if the FIRST (highest-ranked) block alone overruns the budget,
-        // emit a PARTIAL block (fewer symbols) so the top file is never wholly
-        // omitted. Otherwise `continue` so smaller lower-ranked files can still
-        // fill the remaining budget (don't `break` on the first overflow).
-        if (first && budget > 0) {
-          // #6 fix: try progressively fewer symbols DOWN TO ONE. The old
-          // `while (partial.length > 1)` sliced before testing and never tried
-          // the single-symbol block, so a tiny --tokens could emit NOTHING for
-          // the top file despite the "never wholly omitted" intent. If even one
-          // symbol overflows the budget, nothing fits (correct) — but we now try.
-          for (let k = capped.length - 1; k >= 1; k--) {
-            const partial = capped.slice(0, k);
-            const pt = tokEst(lineOf(partial));
-            if (used + pt <= budget) {
-              used += pt;
-              shownFiles.push({ file, symbols: partial.map((s) => ({ name: s.name, kind: s.kind })) });
-              break;
-            }
-          }
-          first = false;
-        }
-        continue;
-      }
-      used += t; first = false;
-      shownFiles.push({ file, symbols: capped.map((s) => ({ name: s.name, kind: s.kind })) });
-    }
-    out({ command: "map", focus: focusLabel, budget, tokens: used, files: shownFiles }, () => {
-      console.log(`# agentmap (${data.fileCount} files, sha ${data.generatedSha}) — focus: ${focusLabel}, budget ~${budget} tok`);
-      for (const { file, symbols } of shownFiles)
-        console.log(`\n${file}:\n` + symbols.map((s) => `  ${s.name} (${s.kind})`).join("\n"));
-      console.log(`\n# ~${used} tokens (${shownFiles.length} files shown)`);
+    const list = Object.entries(data.features).map(([k, v]) => [k, v.length]).sort((a, b) => b[1] - a[1]);
+    out({ command: "features", features: Object.fromEntries(list) }, () => {
+      console.log(`features (${list.length}):`);
+      for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
     });
-  }
-} else if (has("--symbols")) {
-  const data = ensureFresh();
-  const sn = parseInt(arg("--symbols") ?? "", 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
-  const syms = (data.rankedSymbols || []).slice(0, n);
-  out({ command: "symbols", symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) }, () => {
-    console.log(`top ${n} ranked symbols (Aider-style):`);
-    for (const s of syms) console.log(`  ${s.rank}  ${s.file} → ${s.name} (${s.kind})`);
-  });
-} else if (has("--feature")) {
-  const raw = arg("--feature");
-  if (!raw) { console.error("--feature needs a name, e.g. `--feature dashboard` (run --features to list)"); process.exitCode = 2; }
-  else {
-  const q = raw.toLowerCase();
-  const data = ensureFresh();
-  const name = Object.keys(data.features).find((k) => k.toLowerCase() === q) || Object.keys(data.features).find((k) => k.toLowerCase().includes(q));
-  if (!name) {
-    process.exitCode = 1;
-    out({ command: "feature", error: "no match", query: raw }, () => console.log(`feature: no match for "${raw}" — run --features to list them.`));
+  } else if (has("--hubs")) {
+    const data = ensureFresh();
+    out({ command: "hubs", fileCount: data.fileCount, sha: data.generatedSha, hubs: data.hubs }, () => {
+      console.log(`agentmap: ${data.fileCount} files (sha ${data.generatedSha})`);
+      console.log("hubs (PageRank importance):");
+      for (const h of data.hubs) console.log(`  ${h}`);
+    });
+  } else if (has("--print")) {
+    const data = ensureFresh();
+    // --print is already JSON-only; add top-level fileCount (was omitted before).
+    console.log(JSON.stringify({ fileCount: data.fileCount, hubs: data.hubs, features: data.features, rankedSymbols: data.rankedSymbols, files: data.files }));
   } else {
-    const fl = data.features[name], set = new Set(fl), exts = new Set();
-    for (const p of fl) for (const dep of (data.files[p]?.dependents || [])) if (!set.has(dep)) exts.add(dep);
-    out({ command: "feature", name, files: fl, externalDependents: [...exts] }, () => {
-      console.log(`feature "${name}": ${fl.length} files`);
-      for (const p of fl) console.log(`  ${p}`);
-      console.log(`external dependents (${exts.size}): ${[...exts].join(", ") || "—"}`);
+    // Bare invocation (possibly `--json` alone): build + one-line summary, or the
+    // {command:"build", ...} JSON object.
+    const built = build();
+    const topHub = built.hubs[0] || null;
+    out({ command: "build", fileCount: built.fileCount, features: Object.fromEntries(Object.entries(built.features).map(([k, v]) => [k, v.length])), topHub }, () => {
+      console.log(`agentmap: ${built.fileCount} files | ${Object.keys(built.features).length} features | top hub: ${topHub || "—"}`);
     });
   }
-  }
-} else if (has("--features")) {
-  const data = ensureFresh();
-  const list = Object.entries(data.features).map(([k, v]) => [k, v.length]).sort((a, b) => b[1] - a[1]);
-  out({ command: "features", features: Object.fromEntries(list) }, () => {
-    console.log(`features (${list.length}):`);
-    for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
-  });
-} else if (has("--hubs")) {
-  const data = ensureFresh();
-  out({ command: "hubs", fileCount: data.fileCount, sha: data.generatedSha, hubs: data.hubs }, () => {
-    console.log(`agentmap: ${data.fileCount} files (sha ${data.generatedSha})`);
-    console.log("hubs (PageRank importance):");
-    for (const h of data.hubs) console.log(`  ${h}`);
-  });
-} else if (has("--print")) {
-  const data = ensureFresh();
-  // --print is already JSON-only; add top-level fileCount (was omitted before).
-  console.log(JSON.stringify({ fileCount: data.fileCount, hubs: data.hubs, features: data.features, rankedSymbols: data.rankedSymbols, files: data.files }));
-} else {
-  // Bare invocation (possibly `--json` alone): build + one-line summary, or the
-  // {command:"build", ...} JSON object.
-  const built = build();
-  const topHub = built.hubs[0] || null;
-  out({ command: "build", fileCount: built.fileCount, features: Object.fromEntries(Object.entries(built.features).map(([k, v]) => [k, v.length])), topHub }, () => {
-    console.log(`agentmap: ${built.fileCount} files | ${Object.keys(built.features).length} features | top hub: ${topHub || "—"}`);
-  });
+}
+
+// ---------------------------------------------------------------------------
+// Programmatic API. Importing agentmap.mjs executes NOTHING (see the guard
+// below), so these pure building blocks can be used in-process by the MCP
+// server, tests, and any future library caller without spawning a subprocess.
+// ---------------------------------------------------------------------------
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion };
+
+// Run the CLI only when executed directly (`node agentmap.mjs …`), never when
+// imported. Dual check (matches mcp.mjs) so it holds on Windows (backslash
+// argv[1]) and POSIX alike.
+if (import.meta.url === `file://${process.argv[1]}` || (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])) {
+  await main();
 }
