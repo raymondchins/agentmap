@@ -31,6 +31,8 @@ const tsMorph = () => (_tsm ??= _require("ts-morph"));
 
 const MAP = ".claude/agentmap/map.json";
 const MAP_LEGACY = ".claude/agentmap.json"; // pre-namespacing path; read for migration
+const MAP_DIRTY = ".claude/agentmap/map.dirty.json"; // dirty-tree build cache, keyed by dirtyFingerprint (Batch 3 Tier 1)
+const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for incremental rebuild (Batch 3 Tier 2)
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
 // Old caches (schema 2) are ignored so the first run after upgrade rebuilds.
@@ -119,19 +121,42 @@ const contentSearch = (q) => {
   } catch { return ""; }
 };
 const currentSha = () => sh("git rev-parse --short HEAD");
-const dirtyCount = () =>
-  // --untracked-files=all so a new file inside a brand-new untracked DIR is
-  // listed individually (default "all" folds it to "?? newdir/" and the
-  // extension regex misses it → a STALE cache would be served).
-  sh("git status --porcelain --untracked-files=all").split("\n").filter(Boolean).filter((l) => {
-    const xy = l.slice(0, 2);                            // porcelain status code (XY)
+// Parse `git status --porcelain` into the list of DIRTY SOURCE files — the work
+// list that both the dirty gate (dirtyCount) and the dirty-map cache key
+// (dirtyFingerprint) read, so the count and the key can never diverge. Each
+// entry: { code, path, oldPath? }. `oldPath` is captured for rename/copy entries
+// (Tier 2 needs it; the count/filter below is unaffected, keeping dirtyCount
+// byte-identical to the old inline implementation).
+// --untracked-files=all so a new file inside a brand-new untracked DIR is listed
+// individually (default "all" folds it to "?? newdir/" and the extension regex
+// misses it → a STALE cache would be served).
+function dirtyFiles() {
+  // Raw (UNTRIMMED) git output: `sh()` trims, which strips the leading space of
+  // an unstaged " M path" line and shifts the fixed-column parse (dropping the
+  // path's first char). dirtyCount only tested the extension suffix so it still
+  // counted correctly, but the fingerprint needs the true path for lstat.
+  let raw;
+  try { raw = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }); }
+  catch { return []; } // not a git repo / git failure → treat as no dirty files
+  const out = [];
+  for (const l of raw.split("\n")) {
+    if (!l) continue;
+    const code = l.slice(0, 2);                          // porcelain status code (XY)
     let p = l.slice(3);                                  // strip "XY " status prefix
+    let oldPath;
     // only rename/copy entries use the ` old -> new ` form — gating on the status
     // code avoids falsely splitting a plain file whose NAME contains " -> ".
-    if (/[RC]/.test(xy) && p.includes(" -> ")) p = p.split(" -> ").pop(); // rename/copy: keep new path
+    if (/[RC]/.test(code) && p.includes(" -> ")) {
+      const parts = p.split(" -> ");
+      oldPath = parts[0].replace(/^"|"$/g, "");          // rename/copy: remember old path
+      p = parts.pop();                                   // …keep new path
+    }
     p = p.replace(/^"|"$/g, "");                         // unquote space/special paths
-    return SOURCE_EXT_RE.test(p);
-  }).length;
+    if (SOURCE_EXT_RE.test(p)) out.push({ code, path: p, oldPath }); // same filter as before → count identical
+  }
+  return out;
+}
+const dirtyCount = () => dirtyFiles().length;
 const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
 
 // get-or-init a Map value (readable replacement for the dense `m.get(k) ?? m.set(...)` idiom).
@@ -169,6 +194,26 @@ function sourceFingerprint() {
     entries.sort();
     return createHash("sha1").update(entries.join("\n")).digest("hex");
   } catch { return ""; }
+}
+
+// Fingerprint of the DIRTY working-tree state for the dirty-map cache (Tier 1).
+// sha1 over HEAD sha + sorted per-dirty-file tokens: an existing file →
+// "path:mtimeMs:size" (mirrors sourceFingerprint, and only lstat's the handful
+// of dirty files, not the whole tree); a deleted/unstattable file → "CODE:path";
+// a rename additionally appends "R:old->new" so it can't collide with an
+// independent add+delete. HEAD is included so the same edit against a different
+// HEAD keys differently. The key changes iff the dirty rebuild's output would.
+function dirtyFingerprint(sha, list) {
+  const toks = [];
+  for (const { code, path, oldPath } of list) {
+    let tok;
+    try { const st = lstatSync(path); tok = `${path}:${st.mtimeMs}:${st.size}`; }
+    catch { tok = `${(code || "").trim() || "?"}:${path}`; }   // deleted / unstattable
+    if (oldPath) tok += ` R:${oldPath}->${path}`;         // rename ≠ add+delete
+    toks.push(tok);
+  }
+  toks.sort();
+  return createHash("sha1").update("HEAD:" + sha + "\n" + toks.join("\n")).digest("hex");
 }
 
 // =============================================================================
@@ -677,7 +722,7 @@ function extractFacts() {
 // PageRank + the Aider-style symbol ranking, pick hubs, and persist the cache.
 // Knows nothing about ts-morph / Vue — swapping the backend never touches this.
 // ---------------------------------------------------------------------------
-function build() {
+function build({ target = MAP, extra = null } = {}) {
   const t0 = Date.now();
   const files = extractFacts();
   // 7: resolve default-import edges. A default import was recorded literally as
@@ -732,12 +777,15 @@ function build() {
     fingerprint: sha ? undefined : sourceFingerprint(),
     hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), files,
   };
+  // `extra` (dirty-map cache key etc.) is merged for non-default targets only;
+  // a default clean build passes extra=null so map.json stays byte-identical.
+  if (extra) Object.assign(out, extra);
   mkdirSync(".claude/agentmap", { recursive: true });
   // Atomic write: tmp + rename so a concurrent background rebuild can never
-  // expose a torn/truncated map.json to a reader.
-  const tmp = MAP + ".tmp";
+  // expose a torn/truncated map to a reader.
+  const tmp = target + ".tmp";
   writeFileSync(tmp, JSON.stringify(out));
-  renameSync(tmp, MAP);
+  renameSync(tmp, target);
   process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms\n`);
   return out;
 }
@@ -861,7 +909,48 @@ function ensureFresh() {
       }
     } catch {}
   }
+  // Dirty git tree (Tier 1): the clean fast-path above didn't return, so either
+  // HEAD/schema drifted or the tree is dirty. Serve a cached dirty build keyed by
+  // the dirty file set so back-to-back queries on an UNCHANGED dirty tree reuse
+  // ONE rebuild instead of re-parsing the whole repo every call. Sits outside the
+  // map.json block so it runs even before the first clean build exists.
+  if (sha) {
+    const dl = dirtyFiles();
+    if (dl.length) {                                     // provably dirty
+      const dfp = dirtyFingerprint(sha, dl);
+      if (existsSync(MAP_DIRTY)) {
+        try {
+          const dc = JSON.parse(readFileSync(MAP_DIRTY, "utf8"));
+          if (dc.schema === SCHEMA_VERSION && dc.dirtyFingerprint === dfp) return dc;
+        } catch {}
+      }
+      return buildDirty(sha, dl, dfp);
+    }
+  }
   return build();
+}
+
+// Produce the dirty-tree map and cache it to MAP_DIRTY, keyed by `dfp`. Tries the
+// Tier 2 incremental path (reparse only changed files) first; on ANY miss or
+// error it falls through to a full build() — incremental is a pure optimization
+// and must never be the reason a query fails or returns a wrong map.
+function buildDirty(sha, dirtyList, dfp) {
+  try {
+    const inc = buildIncremental(sha, dirtyList, dfp);
+    if (inc) return inc;
+  } catch (e) {
+    process.stderr.write(`# agentmap: incremental rebuild fell back to full build (${e?.message ?? e})\n`);
+  }
+  return build({ target: MAP_DIRTY, extra: { dirtyFingerprint: dfp } });
+}
+
+// Tier 2 (true incremental) — reparse only the git-changed files against the
+// cached clean-HEAD facts snapshot, then re-run the (global, cheap) assembly.
+// Returns the map object on success, or null to signal "fall back to full build"
+// (no facts snapshot, HEAD mismatch, or an edit shape it declines to handle).
+// Implemented in the Tier 2 step; a null here means Tier 1's full dirty build.
+function buildIncremental(_sha, _dirtyList, _dfp) {
+  return null;
 }
 
 // Resolve a query to a file key, in PREFERENCE order so a loose substring path
@@ -1928,7 +2017,7 @@ async function main() {
 // below), so these pure building blocks can be used in-process by the MCP
 // server, tests, and any future library caller without spawning a subprocess.
 // ---------------------------------------------------------------------------
-export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion };
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental };
 
 // Run the CLI only when executed directly (`node agentmap.mjs …`), never when
 // imported. Dual check (matches mcp.mjs) so it holds on Windows (backslash
