@@ -28,8 +28,10 @@ jobs:
         run: npm ci
 
       # Black-box suite — drives the real CLI as a subprocess against temp repos.
+      # Runs via npm so CI uses the same glob set as `npm test` locally
+      # (test/*.test.mjs alone silently skipped the test/vue-sfc/ suite).
       - name: Run tests
-        run: node --test test/*.test.mjs
+        run: npm test
 
       # Smoke: the binary builds + prints a hub map against agentmap's own repo.
       - name: Smoke (--hubs on self)
