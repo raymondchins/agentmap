@@ -1018,9 +1018,15 @@ function ensureFresh() {
 // error it falls through to a full build() — incremental is a pure optimization
 // and must never be the reason a query fails or returns a wrong map.
 function buildDirty(sha, dirtyList, dfp) {
-  // AGENTMAP_NO_INCREMENTAL forces the full dirty build — used by the regression
-  // suite to prove the incremental map is byte-identical to a full rebuild.
-  if (!process.env.AGENTMAP_NO_INCREMENTAL) {
+  // Tier 2 incremental is EXPERIMENTAL and OPT-IN (AGENTMAP_INCREMENTAL=1). For the
+  // common modify cases it is byte-identical to a full rebuild AND much faster, but
+  // adversarial verification found a tail of resolution edge cases where an
+  // isolated-stub reparse diverges from a whole-repo build (re-export chains, .d.ts
+  // edges, package.json "exports", …; see docs/batch3-dirty-tree-perf.md). Until
+  // that tail is exhausted it stays OFF by default so the proven, byte-identical
+  // Tier 1 dirty-map cache is what ships. When on, any miss/error falls back to a
+  // full dirty build.
+  if (/^(1|true)$/.test(process.env.AGENTMAP_INCREMENTAL || "")) {
     try {
       const inc = buildIncremental(sha, dirtyList, dfp);
       if (inc) return inc;
@@ -1089,8 +1095,10 @@ function buildIncremental(sha, dirtyList, dfp) {
   // is an EMPTY stub in incremental mode, so its exports would be incomplete. We
   // can't rely on ts-morph resolving the stub, so detect it syntactically on the
   // changed file's own text (resolution-independent). Decline → full build.
-  const STAR_REEXPORT = /\bexport\s+(?:type\s+)?\*/;                       // export * / export * as / export type *
-  const NAMED_REEXPORT = /\bexport\s+(?:type\s+)?\{[\s\S]*?\}\s*from\s*['"]/; // export { … } from '…' (multi-line)
+  // \s* (not \s+) after `export` so whitespace-free minified forms like
+  // `export*from"./a"` / `export{x}from"./a"` don't dodge the guard.
+  const STAR_REEXPORT = /\bexport\s*(?:type\s+)?\*/;                       // export * / export * as / export type *
+  const NAMED_REEXPORT = /\bexport\s*(?:type\s+)?\{[\s\S]*?\}\s*from\s*['"]/; // export { … } from '…' (multi-line)
   // CommonJS export forms: getExportedDeclarations() returns [] for `module.exports`
   // when the file is re-parsed in the isolated incremental project (it needs the
   // whole-repo module context), so the changed file's exports would collapse.
@@ -1103,6 +1111,10 @@ function buildIncremental(sha, dirtyList, dfp) {
   const merged = structuredClone(cached);                  // disposable copy (assemble mutates it)
   for (const p of changed) {
     if (!fresh[p]) return null;   // file dropped from the map (parse-skip / vue <script> removed) ⇒ set change ⇒ full build
+    // Backstop for the forward re-export gate: if the parsed file DID record a
+    // module re-export (ts-morph resolved the specifier through a stub), decline —
+    // its transitive exports were resolved against empty stubs.
+    if (fresh[p].reExportsFrom && fresh[p].reExportsFrom.length) return null;
     // Re-export hazard, LAUNDERED (`export default Imported` / `export { Imported as default }`
     // with no `from` clause): the export's declaration lives in another file, which is an EMPTY
     // stub here, so getExportedDeclarations() can't name it → kind "?" and defaultExportName

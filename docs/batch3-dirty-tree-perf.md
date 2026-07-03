@@ -211,6 +211,30 @@ modify-only gate:
   require, namespace, default-name, type-only, vue, circular, monorepo, shadowing,
   jsx). All byte-identical or safely-fallen-back.
 
-Deferred (still open): add/delete/rename incremental (would need re-parsing affected
-importers + reproducing full-build key order); the §1 build-budget / memory-ceiling
-items; the post-commit incremental rebuild.
+### Tier 2 is EXPERIMENTAL and opt-in (`AGENTMAP_INCREMENTAL=1`)
+
+Three rounds of adversarial verification (20 import-resolution shapes × up to 28
+variations each, across 7 real repos) drove the gate list above, and round 3 still
+surfaced a residual tail of isolated-reparse edge cases where an **ungated** modify
+diverges from a full build:
+
+- **whitespace-free re-exports** (`export*from"./a"`) dodged the spaced regex →
+  fixed (regex now `\s*`, plus a `reExportsFrom` backstop);
+- **`.d.ts` edges** — `RES_EXT` omits `d.ts`, so adding a runtime import to a `.d.ts`
+  drops the edge incrementally (ts-morph native resolves it in a full build);
+- **`package.json` `exports` subpath field** and **barrel+target modified together**
+  — still diverge in some shapes.
+
+Every divergence is the SAME class (isolated-stub reparse ≠ whole-repo parse) and is
+*safe when gated* (falls back to a correct full build), but the tail is clearly not
+exhausted. Rather than gate a release on an unbounded hardening loop, Tier 2 ships
+**off by default**: the default dirty path is Tier 1 (proven byte-identical, ~15× on
+repeated queries). `AGENTMAP_INCREMENTAL=1` enables Tier 2 for the ~2.9× first-query
+win, with all the gates above + a full-build fallback on any miss/error. Promote to
+default-on once the residual tail (`.d.ts`, `exports` field, barrel+target) is closed
+and an adversarial round comes back fully clean.
+
+Deferred (still open): close the Tier 2 residual tail (then flip default-on);
+add/delete/rename incremental (would need re-parsing affected importers + reproducing
+full-build key order); the §1 build-budget / memory-ceiling items; the post-commit
+incremental rebuild.
