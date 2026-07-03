@@ -3,6 +3,47 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+- **Post-commit hook no longer runs a repo-local `./agentmap.mjs` by default.** A working-tree
+  `agentmap.mjs` is attacker-plantable (any branch/PR can add it), so the hook firing on the
+  next commit was arbitrary code execution. Repo-local execution now requires an explicit
+  `AGENTMAP_HOOK_ALLOW_LOCAL=1` opt-in (for developing agentmap itself); by default the hook
+  runs only the installed package — `node_modules/.bin/agentmap`, a PATH binary verified to be
+  `@raymondchins/agentmap`, or `npx @raymondchins/agentmap` — which also closes the bare-`agentmap`
+  PATH-hijack fallback. Replaces the previous `AGENTMAP_HOOK_NO_LOCAL` opt-out.
+- **Content-search secret exclusion now matches plain secret files.** The `--any` denylist used
+  `*.password*` (only `foo.password.ts`); it now uses `*password*` so `password.txt` /
+  `passwords.json` are excluded too.
+
+### Fixed
+- **MCP server no longer reports crashes as "no results".** Exit code 1 is overloaded (the CLI
+  uses it for zero-results, but it is also Node's uncaught-exception code), so a hard crash was
+  returned to the client as a successful empty answer. Exit-1-with-empty-stdout is now surfaced
+  as `isError`; genuine zero-result queries (which always print JSON to stdout) are unaffected.
+  Spawn failures whose `err.code` is a string (`ENOENT`, `EACCES`, …) are now detected too.
+- **CI ran only part of the test suite.** The workflow ran `node --test test/*.test.mjs`
+  (116 tests), silently skipping the entire `test/vue-sfc/` suite; it now runs `npm test`
+  (159 tests).
+
+### Docs
+- Truth-synced `SECURITY.md`, `README.md`, `hooks/INSTALL.md`, and `CONTRIBUTING.md`: corrected
+  the cache path (`.claude/agentmap/map.json`), removed the nonexistent `--refresh` flag and the
+  removed `scripts/agentmap.mjs` lookup, fixed the sensitive-file exclusion list, added the
+  `--setup-mcp` flag and Vue SFC support to the README, and corrected the nudge verify commands
+  (they need `tool_name`).
+
+## [0.9.0] - 2026-06-16
+
+### Added
+- **`--doctor`** — a read-only harness health report that checks, in one place, the git
+  `post-commit` hook, the `PreToolUse` nudge and its `.claude/settings.json` wiring, installed
+  skills / Cursor rule freshness vs the `package.json` version, MCP config entries for
+  OpenCode / Antigravity, and map-cache presence/freshness. Always exits 0 and suggests fix
+  commands (`--install-hooks`, `--install-skill`, `--setup-mcp`) but never writes files. Pair
+  with `--json` for a structured report.
+
 ## [0.8.0] - 2026-06-15
 
 ### Added
@@ -57,6 +98,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Docs
 - Clarified that the `--any` content fallback is case-insensitive by design
   (matches `--find`); matches are printed verbatim so true casing is visible.
+
+## [0.6.0] - 2026-06-14
+
+### Added
+- **`--setup-mcp`** — configure agentmap as an MCP server for OpenCode and the Antigravity
+  IDE (merge-safe write into each platform's MCP config; `--dry-run` previews without writing).
+  Complements the existing `--mcp` stdio server so MCP-capable agents can query the map without
+  a manual config edit.
+
+## [0.5.0] - 2026-06-14
+
+### Added
+- **Vue SFC `<script>` indexing (#2).** `.vue` single-file components are now indexed:
+  their `<script>` / `<script setup>` blocks are extracted (via a virtual TS/JS path) and
+  participate in the import/symbol graph like any other source file, so `--relates`,
+  `--find`, and the ranked map cover Vue components too. Best-effort — the template block is
+  not parsed. Bumps the cache `SCHEMA_VERSION` (old caches rebuild automatically).
 
 ## [0.4.0] - 2026-06-14
 
@@ -220,7 +278,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/raymondchins/agentmap/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/raymondchins/agentmap/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/raymondchins/agentmap/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/raymondchins/agentmap/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/raymondchins/agentmap/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/raymondchins/agentmap/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/raymondchins/agentmap/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/raymondchins/agentmap/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/raymondchins/agentmap/compare/v0.2.2...v0.2.3

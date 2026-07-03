@@ -72,14 +72,16 @@ const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore
 // Exclude sensitive files from the --untracked sweep so a local .env / key /
 // secrets file never gets scanned and surfaced (and via MCP fed to an LLM).
 // Mix of path globs (env/key/cert/SSH-key shapes) and case-insensitive name
-// matches (anything *secret* / *credential* / *.password*). These are pathspecs,
+// matches (anything *secret* / *credential* / *password*). These are pathspecs,
 // not regexes — git applies them as exclusions to the search tree.
 const SENSITIVE_EXCLUDES = [
   ":!.env", ":!.env.*", ":!**/.env", ":!**/.env.*",
   // also any *.env (e.g. prod.env, .env.local already covered above) at any depth
   ":!*.env", ":!**/*.env",
   ":!*.pem", ":!*.key", ":!*.p12", ":!*.pfx", ":!*.crt", ":!id_rsa*",
-  ":(exclude,icase)*secret*", ":(exclude,icase)*credential*", ":(exclude,icase)*.password*",
+  // name-substring matches: `*password*` (not `*.password*`) so a plain
+  // password.txt / passwords.json is excluded, not just foo.password.ts.
+  ":(exclude,icase)*secret*", ":(exclude,icase)*credential*", ":(exclude,icase)*password*",
 ];
 const contentSearch = (q) => {
   try {

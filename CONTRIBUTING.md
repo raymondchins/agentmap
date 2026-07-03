@@ -53,7 +53,7 @@ provide it."
 # install the single dependency
 npm install
 
-# build + write .claude/agentmap.json for the current repo
+# build + write .claude/agentmap/map.json for the current repo
 node agentmap.mjs
 # or
 npm run map
@@ -78,7 +78,7 @@ files that `tsconfig.include` typically omits).
 ## The freshness invariant (do NOT break this)
 
 agentmap's contract with the agent loop is that **a query never returns a stale
-map**. The cache at `.claude/agentmap.json` is served **only when it is provably
+map**. The cache at `.claude/agentmap/map.json` is served **only when it is provably
 current**, which means ALL of:
 
 1. `cached.generatedSha === git rev-parse --short HEAD` (map was built at the
@@ -93,7 +93,7 @@ reflects in-flight edits. This is what makes agentmap safe to wire into a
 
 When you touch caching, building, or the schema:
 
-- **Bump `SCHEMA_VERSION`** whenever the shape of `agentmap.json` changes, so old
+- **Bump `SCHEMA_VERSION`** whenever the shape of `map.json` changes, so old
   caches are invalidated instead of mis-read.
 - **Never** serve the cache on a dirty tree or a mismatched SHA. Don't add a
   "skip the freshness check for speed" flag — staleness is the one failure mode
