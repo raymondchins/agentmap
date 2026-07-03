@@ -917,6 +917,30 @@ function parseSettings(text, settingsPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared hook-wiring identifiers — the SINGLE source of truth consumed by both
+// the writer (installHooks) and the checker (collectHookStatus). Previously
+// each redeclared its own copies (nudgeDestRel/IGNORE_LINE vs NUDGE_REL/
+// MAP_IGNORE_LINE) kept in sync only by comments; now there's one definition.
+// ---------------------------------------------------------------------------
+// Marker string baked into hooks/post-commit — used by --hook-status to detect our
+// hook even when chained with other tools in the same file.
+const POST_COMMIT_MARKER = "agentmap — git post-commit hook";
+const NUDGE_REL = ".claude/hooks/agentmap-nudge.mjs";
+const MAP_IGNORE_LINE = ".claude/agentmap/";
+const NUDGE_SETTINGS_PATH = ".claude/settings.json";
+const NUDGE_CMD = `node "$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs"`;
+const NUDGE_MATCHERS = ["Grep", "Bash"];
+
+// True when a PreToolUse entry list already wires our nudge to `matcher`.
+// Shared predicate: installHooks uses it to decide whether to add an entry,
+// collectHookStatus uses it to report wired/missing per matcher.
+function nudgeMatcherWired(entries, matcher) {
+  return entries.some(
+    (e) => e?.matcher === matcher && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // --install-hooks: copy the package post-commit hook into .git/hooks, copy the
 // PreToolUse nudge into .claude/hooks/agentmap-nudge.mjs, ensure .claude/agentmap/
 // is gitignored, and auto-wire the Claude Code PreToolUse(Grep|Bash) nudge into
@@ -948,12 +972,11 @@ function installHooks({ dryRun = false } = {}) {
   // self-contained (Node stdlib only, no relative package imports), so copying it
   // standalone is safe. CLAUDE_PROJECT_DIR is set by Claude Code at hook time, so
   // the wired command resolves the copied file regardless of cwd.
-  const nudgeDestRel = ".claude/hooks/agentmap-nudge.mjs";
-  const NUDGE_CMD = `node "$CLAUDE_PROJECT_DIR/.claude/hooks/agentmap-nudge.mjs"`;
+  const nudgeDestRel = NUDGE_REL;
 
   // .gitignore line: ignore the namespaced map DIR (not the legacy single file).
-  const IGNORE_LINE = ".claude/agentmap/";
-  const settingsPath = ".claude/settings.json";
+  const IGNORE_LINE = MAP_IGNORE_LINE;
+  const settingsPath = NUDGE_SETTINGS_PATH;
 
   // --- Determine what WOULD change (so --dry-run and the pre-write notice both
   // describe the real plan). ---
@@ -967,12 +990,8 @@ function installHooks({ dryRun = false } = {}) {
   }
   settings.hooks ??= {};
   settings.hooks.PreToolUse ??= [];
-  const hasGrep = settings.hooks.PreToolUse.some(
-    (e) => e?.matcher === "Grep" && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
-  );
-  const hasBash = settings.hooks.PreToolUse.some(
-    (e) => e?.matcher === "Bash" && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
-  );
+  const hasGrep = nudgeMatcherWired(settings.hooks.PreToolUse, "Grep");
+  const hasBash = nudgeMatcherWired(settings.hooks.PreToolUse, "Bash");
   const alreadyWired = hasGrep && hasBash;
 
   // The set of files this run touches — used by both the dry-run report and the
@@ -1030,12 +1049,6 @@ function installHooks({ dryRun = false } = {}) {
     : `wired PreToolUse(Grep|Bash) → agentmap nudge into ${settingsPath} (map enforcement on by default)`);
   console.log("\nDone — the map auto-refreshes on commit, and greps are nudged to agentmap first.");
 }
-
-// Marker string baked into hooks/post-commit — used by --hook-status to detect our
-// hook even when chained with other tools in the same file.
-const POST_COMMIT_MARKER = "agentmap — git post-commit hook";
-const NUDGE_REL = ".claude/hooks/agentmap-nudge.mjs";
-const MAP_IGNORE_LINE = ".claude/agentmap/";
 
 // Collect hook wiring as structured data. `degradedOutsideGit` switches the
 // outside-git behavior: --hook-status (legacy) bails out and prints one line,
@@ -1095,7 +1108,7 @@ function collectHookStatus({ degradedOutsideGit = false } = {}) {
     suggestion: nudgeInstalled ? null : "agentmap --install-hooks",
   });
 
-  const settingsPath = ".claude/settings.json";
+  const settingsPath = NUDGE_SETTINGS_PATH;
   let settings = null;
   let settingsInvalid = false;
   if (existsSync(settingsPath)) {
@@ -1106,10 +1119,7 @@ function collectHookStatus({ degradedOutsideGit = false } = {}) {
     }
   }
   const entries = settings?.hooks?.PreToolUse || [];
-  const matcherWired = (matcher) => entries.some(
-    (e) => e?.matcher === matcher && Array.isArray(e?.hooks) && e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
-  );
-  for (const matcher of ["Grep", "Bash"]) {
+  for (const matcher of NUDGE_MATCHERS) {
     let status, detail;
     if (settingsInvalid) {
       status = "invalid";
@@ -1117,7 +1127,7 @@ function collectHookStatus({ degradedOutsideGit = false } = {}) {
     } else if (!existsSync(settingsPath)) {
       status = "missing";
       detail = "not wired";
-    } else if (matcherWired(matcher)) {
+    } else if (nudgeMatcherWired(entries, matcher)) {
       status = "wired";
       detail = "wired";
     } else {
@@ -1178,6 +1188,11 @@ function hookStatus() {
 
 // Same 3 targets setupMcp() writes — keep labels/paths aligned so doctor's
 // "missing entry" actually maps to "agentmap --setup-mcp will add it here".
+// Each target: the ONE definition consumed by both collectMcpStatus (checker:
+// path/has) and setupMcp (writer: path/graft). Antigravity is written to BOTH
+// its entries on purpose — older builds read only the IDE-specific
+// ~/.gemini/antigravity path, newer unified builds read the shared
+// ~/.gemini/config path, so writing both is version-proof.
 const MCP_TARGETS = [
   {
     name: "opencode",
@@ -1186,6 +1201,7 @@ const MCP_TARGETS = [
     displayPath: "~/.config/opencode/opencode.json",
     has: (cfg) => Boolean(cfg?.mcp?.agentmap),
     objectPath: "mcp.agentmap",
+    graft: (cfg, { command, args }) => { (cfg.mcp ??= {}).agentmap = { type: "stdio", command, args, enabled: true }; },
   },
   {
     name: "antigravity",
@@ -1194,6 +1210,7 @@ const MCP_TARGETS = [
     displayPath: "~/.gemini/antigravity/mcp_config.json",
     has: (cfg) => Boolean(cfg?.mcpServers?.agentmap),
     objectPath: "mcpServers.agentmap",
+    graft: (cfg, { command, args }) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
   },
   {
     name: "antigravity-shared",
@@ -1202,6 +1219,7 @@ const MCP_TARGETS = [
     displayPath: "~/.gemini/config/mcp_config.json",
     has: (cfg) => Boolean(cfg?.mcpServers?.agentmap),
     objectPath: "mcpServers.agentmap",
+    graft: (cfg, { command, args }) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
   },
 ];
 
@@ -1448,37 +1466,18 @@ function setupMcp({ dryRun = false } = {}) {
   const command = isNpx ? "npx" : process.execPath;
   const args = isNpx ? ["-y", "@raymondchins/agentmap", "--mcp"] : [mcpPath];
 
-  // Each target: a global config file + how to graft the agentmap entry into it.
-  // Antigravity is written to BOTH paths on purpose — older builds read only the
-  // IDE-specific ~/.gemini/antigravity path, newer unified builds read the shared
-  // ~/.gemini/config path, so writing both is version-proof.
-  const targets = [
-    {
-      label: "OpenCode",
-      path: join(homedir(), ".config", "opencode", "opencode.json"),
-      graft: (cfg) => { (cfg.mcp ??= {}).agentmap = { type: "stdio", command, args, enabled: true }; },
-    },
-    {
-      label: "Antigravity IDE",
-      path: join(homedir(), ".gemini", "antigravity", "mcp_config.json"),
-      graft: (cfg) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
-    },
-    {
-      label: "Antigravity (shared)",
-      path: join(homedir(), ".gemini", "config", "mcp_config.json"),
-      graft: (cfg) => { (cfg.mcpServers ??= {}).agentmap = { command, args }; },
-    },
-  ];
-
   if (dryRun) console.log("--dry-run: would configure MCP server (no changes written):");
 
-  for (const { label, path, graft } of targets) {
+  // Same MCP_TARGETS table collectMcpStatus() reads — one source of truth for
+  // labels/paths; each entry's `graft` builds the writer's config shape.
+  for (const { label, path: pathFn, graft } of MCP_TARGETS) {
+    const path = pathFn();
     // Reuse parseSettings so JSONC (comments) is tolerated and a malformed file
     // throws a clear error WITHOUT clobbering the original (we never write on the
     // failure path, so no .bak dance is needed).
     let cfg = {};
     if (existsSync(path)) cfg = parseSettings(readFileSync(path, "utf8"), path);
-    graft(cfg);
+    graft(cfg, { command, args });
 
     if (dryRun) {
       console.log(`  ${label}: would write to ${path}`);
@@ -1533,7 +1532,7 @@ Maintenance:
   --help, -h           show this help
   --version, -v        print the version
 
-Exit codes: 0 ok · 1 query had zero results · 2 usage error.`;
+Exit codes: 0 ok · 1 query had zero results (incl. --map --focus with no match) · 2 usage error · 3 maintenance command failed.`;
 
 async function main() {
   const args = process.argv.slice(2);
@@ -1581,6 +1580,46 @@ async function main() {
     process.exit(0);
   }
 
+  // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
+  // 2). Runs BEFORE any command dispatch (incl. the maintenance flags below, each
+  // of which process.exit()s in its own branch) so a typo never silently triggers
+  // the wrong command or a bare build. A token bound as a value-flag's value
+  // (valueIdx) is never treated as a flag.
+  if (args.some((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i))) {
+    const bad = args.find((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i));
+    console.error(`unknown flag: ${bad}\ntry \`agentmap --help\` for the list of commands.`);
+    process.exit(2);
+  }
+
+  // Declarative command table. The dispatch below is order-insensitive set
+  // membership, so without this pass two commands at once (`--map --doctor`) or an
+  // orphan sub-flag (`--focus` with no `--map`) is silently accepted — whichever
+  // branch matches first wins, no warning. Each key is a command; its value lists
+  // the sub-flags that only make sense with it. `--json` is a global modifier (not
+  // a command) and is deliberately absent — valid with any command or with none.
+  const COMMANDS = {
+    "--mcp": [], "--install-hooks": ["--dry-run"],
+    "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
+    "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
+    "--any": [], "--find": [], "--relates": [], "--map": ["--focus", "--tokens"],
+    "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
+  };
+  const presentCommands = Object.keys(COMMANDS).filter(has);
+  if (presentCommands.length > 1) {
+    console.error(`conflicting commands: ${presentCommands.join(", ")} — pass exactly one.\ntry \`agentmap --help\` for the list of commands.`);
+    process.exit(2);
+  }
+  // sub-flag → its declared parent command(s). A sub-flag shared by two commands
+  // (--dry-run: --install-hooks or --setup-mcp) is valid if ANY parent is present.
+  const subFlagParents = new Map();
+  for (const [cmd, subs] of Object.entries(COMMANDS))
+    for (const sub of subs) getOrSet(subFlagParents, sub, () => []).push(cmd);
+  for (const [sub, parents] of subFlagParents)
+    if (has(sub) && !parents.some(has)) {
+      console.error(`${sub} requires ${parents.join(" or ")} — got: ${args.join(" ") || "(none)"}\ntry \`agentmap --help\` for usage.`);
+      process.exit(2);
+    }
+
   // --mcp: hand off to the stdio MCP server (authored separately). Dynamic import
   // so a missing mcp.mjs only fails when --mcp is actually requested.
   if (has("--mcp")) {
@@ -1589,14 +1628,14 @@ async function main() {
       await m.serve();
     } catch (e) {
       console.error(`agentmap --mcp failed: ${e?.message || e}`);
-      process.exit(1);
+      process.exit(3);
     }
   }
   // --install-hooks: wire the git post-commit refresh + emit the PreToolUse
   // snippet. Self-contained (resolves the package hooks/ dir relative to here).
   else if (has("--install-hooks")) {
     try { installHooks({ dryRun: has("--dry-run") }); process.exit(0); }
-    catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(1); }
+    catch (e) { console.error(`agentmap --install-hooks failed: ${e?.message || e}`); process.exit(3); }
   }
   // --install-skill: copy packaged SKILL.md / Cursor rule (see skills/install.mjs).
   else if (has("--install-skill")) {
@@ -1613,13 +1652,13 @@ async function main() {
       process.exit(0);
     } catch (e) {
       console.error(`agentmap --install-skill failed: ${e?.message || e}`);
-      process.exit(1);
+      process.exit(3);
     }
   }
   // --hook-status: report post-commit / nudge / settings wiring (no writes).
   else if (has("--hook-status")) {
     try { hookStatus(); process.exit(0); }
-    catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(1); }
+    catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(3); }
   }
   // --doctor: read-only harness health report (hooks + skills + MCP + map cache).
   // Always exits 0; never writes. --json emits the structured report.
@@ -1631,21 +1670,13 @@ async function main() {
       process.exit(0);
     } catch (e) {
       console.error(`agentmap --doctor failed: ${e?.message || e}`);
-      process.exit(1);
+      process.exit(3);
     }
   }
   // --setup-mcp: configure MCP server for OpenCode & Antigravity IDE.
   else if (has("--setup-mcp")) {
     try { setupMcp({ dryRun: has("--dry-run") }); process.exit(0); }
-    catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(1); }
-  }
-  // Unknown-flag guard: any "-"-prefixed token not in KNOWN → usage error (exit
-  // 2). Runs BEFORE the bare-build fallthrough so a typo never silently rebuilds.
-  // Bare invocation with NO flags still builds (handled in the final else).
-  else if (args.some((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i))) {
-    const bad = args.find((a, i) => a.startsWith("-") && !KNOWN.has(a) && !valueIdx.has(i));
-    console.error(`unknown flag: ${bad}\ntry \`agentmap --help\` for the list of commands.`);
-    process.exit(2);
+    catch (e) { console.error(`agentmap --setup-mcp failed: ${e?.message || e}`); process.exit(3); }
   }
   else if (has("--any")) {
     // Unified router: cached structure (file → symbol → feature) then a LIVE
@@ -1761,10 +1792,22 @@ async function main() {
       const budget = Number.isFinite(tk) && tk > 0 ? tk : (focusArg ? FOCUS_BUDGET : DEFAULT_BUDGET);
       let ranked = data.rankedSymbols || [];
       let focusLabel = "global";
+      // focusResolved reports the outcome of a REQUESTED --focus only: true when it
+      // resolved to a file, false when it matched 0 or 2+ candidates (the silent-
+      // degrade case). Left undefined when no --focus was passed, so the JSON key is
+      // omitted below — nothing was requested, so there's nothing to report.
+      let focusResolved;
       if (focusArg) {
         const { key, candidates } = resolveFile(Object.keys(data.files), data.files, focusArg);
-        if (key) { ranked = rankSymbols(data.files, new Set([key])); focusLabel = key; }
-        else console.error(`# warning: --focus "${focusArg}" matched ${(candidates && candidates.length) || 0} files — using global ranking`);
+        if (key) { ranked = rankSymbols(data.files, new Set([key])); focusLabel = key; focusResolved = true; }
+        else {
+          console.error(`# warning: --focus "${focusArg}" matched ${(candidates && candidates.length) || 0} files — using global ranking`);
+          focusResolved = false;
+          // Reserve exit 1 for "query had zero results": an unresolved --focus is an
+          // unresolved query even though the global digest below still prints a
+          // useful (degraded) answer — same shape as --find/--feature no-match.
+          process.exitCode = 1;
+        }
       }
       // Fallback for default-export-heavy repos (sparse named-symbol graph): build
       // the digest from file PageRank so --map is never empty.
@@ -1810,7 +1853,7 @@ async function main() {
         used += t; first = false;
         shownFiles.push({ file, symbols: capped.map((s) => ({ name: s.name, kind: s.kind })) });
       }
-      out({ command: "map", focus: focusLabel, budget, tokens: used, files: shownFiles }, () => {
+      out({ command: "map", focus: focusLabel, ...(focusResolved !== undefined ? { focusResolved } : {}), budget, tokens: used, files: shownFiles }, () => {
         console.log(`# agentmap (${data.fileCount} files, sha ${data.generatedSha}) — focus: ${focusLabel}, budget ~${budget} tok`);
         for (const { file, symbols } of shownFiles)
           console.log(`\n${file}:\n` + symbols.map((s) => `  ${s.name} (${s.kind})`).join("\n"));

@@ -20,8 +20,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   second language backend becomes a drop-in producer of the same shape.
 - **In-process unit tests** (`test/unit.test.mjs`) exercising the exported pure functions
   directly (no subprocess spawn), including the `extractFacts` seam contract.
+- **Command-table validation.** A declarative command table now rejects conflicting
+  commands (`--map --doctor`) and orphan sub-flags (`--focus` with no `--map`, `--platform`
+  with no `--install-skill`, …) with a clear usage error (exit 2) instead of silently
+  running whichever branch matched first.
+- **`focusResolved` in `--map --json` output** — `true`/`false` when `--focus` was
+  requested (resolved or not), omitted when no `--focus` was passed. The structured half
+  of the exit-code signal below.
 
 ### Changed
+- **Exit-code contract tightened.** Exit 1 is now reserved for "query had zero results"
+  — and an unresolved `--map --focus <no-match>` joins that bucket (it used to silently
+  degrade to the global digest at exit 0; it still prints the digest, now at exit 1 with
+  `focusResolved:false`). Maintenance-command failures (`--install-hooks`, `--install-skill`,
+  `--setup-mcp`, `--doctor`, `--hook-status`, `--mcp`) now exit **3** instead of colliding
+  with the exit-1 "zero results" bucket. USAGE + the MCP classifier comment updated to match.
+- **Writer/checker pairs unified.** `setupMcp` (writer) and `collectMcpStatus` (checker) now
+  read one `MCP_TARGETS` table; `installHooks` and `collectHookStatus` share one set of
+  hook-wiring identifiers + a `nudgeMatcherWired` predicate — no more parallel literals kept
+  in sync by comment. Behavior-identical.
 - **Internal refactor only — map output is byte-identical.** The source-extension list
   (previously hardcoded in 5 places) is hoisted into one per-backend descriptor
   (`CODE_EXT` / `SOURCE_EXT`), and the relative-specifier branch of `resolveSpec` (which

@@ -128,7 +128,7 @@ test("--install-skill --platform all,agents expands and dedupes", () => {
 test("--install-skill unknown platform fails", () => {
   const dir = makeRepo({});
   const r = run(dir, "--install-skill", "--platform", "notaplatform");
-  assert.notEqual(r.status, 0);
+  assert.equal(r.status, 3, "maintenance-command failure → exit 3 (exit-code contract)");
   assert.match(r.stderr, /unknown platform/);
   cleanup(dir);
 });

@@ -147,13 +147,41 @@ test("--setup-mcp throws on malformed JSON config without clobbering the origina
   writeFileSync(openCodeConfigPath, "{ malformed json }");
 
   const r = runWithHome(dir, homeDir, "--setup-mcp");
-  assert.equal(r.status, 1, "Should fail with code 1");
+  assert.equal(r.status, 3, "Should fail with code 3 (maintenance-command failure, not the exit-1 empty-results bucket)");
   assert.ok(r.stderr.includes("agentmap --setup-mcp failed"), "Should print failure message on stderr");
   
   // The original is left untouched (we never write on the failure path) and no
   // stray .bak is dropped next to it.
   assert.equal(readFileSync(openCodeConfigPath, "utf8"), "{ malformed json }", "Original file should not be clobbered");
   assert.ok(!existsSync(openCodeConfigPath + ".bak"), "No .bak should be created");
+
+  cleanup(dir);
+  cleanup(homeDir);
+});
+
+// Task 7 — writer/checker single-source-of-truth guard. setupMcp (writer) and
+// collectMcpStatus (checker) now consume the SAME MCP_TARGETS table. Chain them:
+// every target setupMcp writes must be reported `wired` by doctor. Catches the
+// drift class the old hand-synced parallel arrays allowed (a 4th target added to
+// one side only, or an objectPath/has mismatch).
+test("--setup-mcp then --doctor: every target the writer configures, the checker reports wired", () => {
+  const dir = makeRepo({ "dummy.ts": "" });
+  const homeDir = makeRepo({});
+  gitInit(dir, { commit: true });
+
+  const setup = runWithHome(dir, homeDir, "--setup-mcp");
+  assert.equal(setup.status, 0, `--setup-mcp failed: ${setup.stderr}`);
+
+  const doctor = runWithHome(dir, homeDir, "--doctor", "--json");
+  assert.equal(doctor.status, 0, `--doctor failed: ${doctor.stderr}`);
+  const report = JSON.parse(doctor.stdout);
+
+  const labels = report.checks.mcp.map((c) => c.label).sort();
+  assert.deepEqual(labels, ["Antigravity (shared)", "Antigravity IDE", "OpenCode"].sort());
+  for (const c of report.checks.mcp) {
+    assert.equal(c.status, "wired", `${c.label} should be wired after --setup-mcp, got ${c.status}`);
+    assert.equal(c.suggestion, null, `${c.label} should have no suggestion once wired`);
+  }
 
   cleanup(dir);
   cleanup(homeDir);

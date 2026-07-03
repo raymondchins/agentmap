@@ -49,7 +49,7 @@ Full research (with source URLs) is in the audit report — see *References* bel
 | Batch | Theme | Effort | State |
 |---|---|---|---|
 | **1** | Trust & truth (security + honesty) | 1–2 d | ✅ **DONE** (pushed) |
-| **2** | Modularize for testability + backend seam | 2–4 d | 🔨 in progress — 4/8 (all *high* + de-dup done, verified byte-identical) |
+| **2** | Modularize for testability + backend seam | 2–4 d | ✅ **DONE** — all substantive tasks landed (map byte-identical, 189 tests). Deferred-optional: `lib/` file split + in-process MCP. |
 | **3** | Dirty-tree performance | 3–5 d | ⬜ |
 | **4** | Distribution & release hygiene | 2–3 d | ⬜ |
 | **5** | TS-depth before language-breadth | weeks | ⬜ |
@@ -117,16 +117,16 @@ rebuild, multi-language optionality, a documented API) is gated on this.
   `tryResolveAt`. Collapse to:
   `resolveSpec = (fromAbsDir, spec) => spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : resolveAlias(spec, fromAbsDir)`.
   *(architecture/medium)*
-- [ ] **Declarative command table** — `agentmap.mjs:1602`: flag parsing is
+- [x] **Declarative command table** — `agentmap.mjs:1602`: flag parsing is
   order-insensitive set membership, so orphan sub-flags (`--focus` without
   `--map`) and conflicting commands are silently accepted. Add a post-parse
   validation pass (exactly one command; each sub-flag declares its parent; exit 2
   on violation). *(architecture/medium)*
-- [ ] **Unify writer/checker pairs** — `agentmap.mjs:1142`: `setupMcp` vs
+- [x] **Unify writer/checker pairs** — `agentmap.mjs:1142`: `setupMcp` vs
   `MCP_TARGETS`, `installHooks` vs `collectHookStatus` duplicate targets/predicates
   kept in sync only by comments. Hoist one shared TARGETS/PREDICATES structure per
   pair. *(architecture/medium)*
-- [ ] **Exit-code contract** — `agentmap.mjs:1724`: `--map --focus` with no match
+- [x] **Exit-code contract** — `agentmap.mjs:1724`: `--map --focus` with no match
   silently degrades to global ranking + exit 0 (every other unresolved query is
   exit 1); maintenance-command failures reuse exit 1 (documented as "zero
   results"). Reserve exit 1 for empty query results, move maintenance failures to

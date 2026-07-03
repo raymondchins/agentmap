@@ -144,13 +144,21 @@ async function callTool(name, rawArgs) {
   const argv = tool.argv(rawArgs && typeof rawArgs === "object" ? rawArgs : {});
   const { code, stdout, stderr, spawnError } = await runAgentmap(argv);
   if (spawnError) return { content: [{ type: "text", text: `failed to launch agentmap: ${spawnError}` }], isError: true };
-  // Exit ≥2 (usage error) or <0 (spawn/signal) = real failure → isError.
+  // Exit ≥2 = usage error (2) or maintenance-command failure (3); <0 = spawn/
+  // signal failure. All are real failures → isError. Maintenance flags use exit 3
+  // as of the exit-code contract, but the TOOLS registry above only ever spawns
+  // query commands (any/find/relates/map/hubs/features/feature/symbols) — never a
+  // maintenance flag — so exit 3 realistically never reaches here; `code >= 2`
+  // still catches it correctly if that ever changes.
   if (code >= 2 || code < 0) return { content: [{ type: "text", text: stderr || stdout || `agentmap exited ${code}` }], isError: true };
-  // Exit 1 is overloaded: the CLI uses it for "zero results", but it is also
-  // Node's default code for an uncaught exception. Genuine zero-result queries
-  // ALWAYS print one JSON object to stdout in --json mode (progress goes to
-  // stderr); a crash leaves stdout empty. So exit-1-with-empty-stdout is a
-  // crash — surface it as an error instead of a false "no results".
+  // Exit 1 is overloaded: the CLI uses it for "zero results" (now including an
+  // unresolved `--map --focus`, which still prints the global-fallback digest to
+  // stdout), but exit 1 is also Node's default code for an uncaught exception.
+  // Genuine zero-result queries ALWAYS print one JSON object to stdout in --json
+  // mode (progress goes to stderr); a crash leaves stdout empty. So exit-1-with-
+  // empty-stdout is a crash — surface it as an error, not a false "no results".
+  // An unresolved --map --focus has NON-empty stdout (the digest JSON, with
+  // focusResolved:false inside), so it falls through to the success path below.
   if (code === 1 && !stdout) {
     return { content: [{ type: "text", text: stderr || "agentmap failed (exit 1, no output)" }], isError: true };
   }
