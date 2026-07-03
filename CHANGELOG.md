@@ -5,23 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-03
+
 ### Performance
 - **Dirty-tree caching (Batch 3).** A dirty git working tree no longer re-parses the
-  whole repo on every query.
-  - **Tier 1 — dirty-map cache.** The dirty build is cached to
+  whole repo on every query — the #1 real-world cost, since agents work on dirty
+  trees essentially always.
+  - **Tier 1 — dirty-map cache (default, on).** The dirty build is cached to
     `.claude/agentmap/map.dirty.json`, keyed by `sha1(HEAD + dirty-file
     path:mtime:size)`. Back-to-back queries on an unchanged dirty tree reuse ONE
-    rebuild (content-os 365 files: ~1.8s → ~0.12s, ~15×). The clean `map.json` is
-    never clobbered by a dirty build, so the dirty→clean transition serves the clean
-    cache with no extra rebuild (also closes the old cache-poison bug).
-  - **Tier 2 — true incremental.** When every change is a MODIFICATION of a file
-    already in the map, agentmap re-parses ONLY the changed files (against empty
-    ts-morph stubs of the rest) and re-runs the cheap global assembly — a
-    byte-identical map at a fraction of the cost (dirty-1 ~1.8s → ~0.62s, ~2.9×).
-    Adds/deletes/renames and any re-export-barrel change fall back to a full dirty
-    build (still Tier-1 cached), because they can shift file ordering or flip edges
-    in files we don't re-parse. Verified byte-identical to a full rebuild across 7
-    real repos and a 12-shape adversarial resolution suite.
+    rebuild (content-os 365 files: ~1.8s → ~0.12s, **~15×**). The clean `map.json`
+    is never clobbered by a dirty build, so the dirty→clean transition serves the
+    clean cache with no extra rebuild (also closes the old cache-poison bug).
+    Byte-identical to the previous dirty output; verified on a fixed corpus.
+  - **Tier 2 — true incremental (experimental, opt-in via `AGENTMAP_INCREMENTAL=1`).**
+    When every change is a MODIFICATION of a file already in the map, agentmap
+    re-parses ONLY the changed files (against empty ts-morph stubs of the rest) and
+    re-runs the cheap global assembly — byte-identical to a full rebuild at a
+    fraction of the cost (dirty-1 ~1.8s → ~0.62s, **~2.9×**). It declines to a full
+    dirty build (Tier-1 cached) for adds/deletes/renames, re-export barrels,
+    CommonJS `module.exports`, monorepo nested tsconfig/package.json, and laundered
+    default re-exports. Three rounds of adversarial verification (20 import-resolution
+    shapes across 7 real repos) found a tail of isolated-reparse edge cases where an
+    ungated modify could still diverge (`.d.ts` edges, `package.json` `exports`
+    field, barrel+target combos), so Tier 2 ships **off by default** until that tail
+    is exhausted; the proven byte-identical Tier 1 is the default win. On any
+    miss/error it falls back to a full build.
   - Clean builds persist a raw per-file facts snapshot to `.claude/agentmap/facts.json`
     for the incremental rebuild. `map.json` output is unchanged (byte-identical).
 

@@ -174,6 +174,10 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
   rebuild (~15×, byte-identical). **Tier 2:** modify-only true incremental —
   re-parse just the changed files against empty ts-morph stubs of the rest, re-run
   the cheap global assembly; byte-identical to a full rebuild (~2.9× on dirty-1).
+  **Tier 2 ships EXPERIMENTAL / opt-in (`AGENTMAP_INCREMENTAL=1`)** — three
+  adversarial rounds found a residual isolated-reparse tail (`.d.ts` edges,
+  package.json `exports` field, barrel+target), so the default dirty path stays
+  Tier 1 (proven byte-identical). Promote to default-on once that tail is closed.
   Add/delete/rename + any re-export-barrel change fall back to a full dirty build
   (Tier-1 cached). As-built scoping is narrower than the original goal-tier design
   (see the "As-built" note in `docs/batch3-dirty-tree-perf.md`): incremental is gated
