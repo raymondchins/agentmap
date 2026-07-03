@@ -118,26 +118,31 @@ const SENSITIVE_EXCLUDES = [
 ];
 const contentSearch = (q) => {
   try {
-    return execFileSync("git", ["grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap/", ...SENSITIVE_EXCLUDES], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim();
+    return execFileSync("git", ["-c", "core.quotePath=off", "grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap/", ...SENSITIVE_EXCLUDES], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim();
   } catch { return ""; }
 };
 const currentSha = () => sh("git rev-parse --short HEAD");
-// Parse `git status --porcelain` into the list of DIRTY SOURCE files — the work
-// list that both the dirty gate (dirtyCount) and the dirty-map cache key
-// (dirtyFingerprint) read, so the count and the key can never diverge. Each
-// entry: { code, path, oldPath? }. `oldPath` is captured for rename/copy entries
-// (Tier 2 needs it; the count/filter below is unaffected, keeping dirtyCount
-// byte-identical to the old inline implementation).
-// --untracked-files=all so a new file inside a brand-new untracked DIR is listed
-// individually (default "all" folds it to "?? newdir/" and the extension regex
-// misses it → a STALE cache would be served).
-function dirtyFiles() {
-  // Raw (UNTRIMMED) git output: `sh()` trims, which strips the leading space of
-  // an unstaged " M path" line and shifts the fixed-column parse (dropping the
-  // path's first char). dirtyCount only tested the extension suffix so it still
-  // counted correctly, but the fingerprint needs the true path for lstat.
+// git ls-files (tracked + untracked-not-ignored) as an array. `-z` (NUL-separated)
+// so non-ASCII / space / special-char filenames come back RAW — the default
+// newline output C-quotes them (`"src/caf\303\251.ts"`), which fails the extension
+// check and silently drops those files from the map. Returns [] on any git error.
+const gitListFiles = () => {
+  try { return execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).split("\0").filter(Boolean); }
+  catch { return []; }
+};
+// Parse `git status --porcelain` into entries { code, path, oldPath? }. One parse
+// feeds both the dirty-SOURCE list (dirtyFiles) and the dirty-CONFIG list
+// (dirtyConfigFiles), so the freshness gate + cache key can't diverge.
+// - RAW (UNTRIMMED) output: `sh()` trims, which strips the leading space of an
+//   unstaged " M path" line and shifts the fixed-column parse (dropping the path's
+//   first char); the fingerprint needs the true path for lstat.
+// - core.quotePath=off so non-ASCII paths come back as UTF-8, not C-quoted octal
+//   (`"src/caf\303\251.ts"`) — otherwise those files silently escape detection.
+// - --untracked-files=all so a new file inside a brand-new untracked DIR is listed
+//   individually (default "all" folds it to "?? newdir/" and the regex misses it).
+function parsePorcelain() {
   let raw;
-  try { raw = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }); }
+  try { raw = execFileSync("git", ["-c", "core.quotePath=off", "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }); }
   catch { return []; } // not a git repo / git failure → treat as no dirty files
   const out = [];
   for (const l of raw.split("\n")) {
@@ -152,10 +157,25 @@ function dirtyFiles() {
       oldPath = parts[0].replace(/^"|"$/g, "");          // rename/copy: remember old path
       p = parts.pop();                                   // …keep new path
     }
-    p = p.replace(/^"|"$/g, "");                         // unquote space/special paths
-    if (SOURCE_EXT_RE.test(p)) out.push({ code, path: p, oldPath }); // same filter as before → count identical
+    p = p.replace(/^"|"$/g, "");                         // unquote any residual (literal quote/newline)
+    out.push({ code, path: p, oldPath });
   }
   return out;
+}
+// tsconfig.json / jsconfig.json (any name e.g. tsconfig.build.json), at any depth.
+const CONFIG_DIRTY_RE = /(^|\/)(tsconfig|jsconfig)(\.[\w.-]+)?\.json$/;
+// Dirty SOURCE files — the Tier-2 changed-set + Tier-1 fingerprint input. BOTH
+// sides of a rename count: a source file renamed to a NON-source name (git mv
+// a.ts a.txt) still removes it from the map, so the cache must bust.
+function dirtyFiles() {
+  return parsePorcelain().filter((e) => SOURCE_EXT_RE.test(e.path) || (e.oldPath && SOURCE_EXT_RE.test(e.oldPath)));
+}
+// Dirty tsconfig/jsconfig files. These aren't SOURCE (nothing to reparse for their
+// own text) but editing them silently changes alias/path RESOLUTION for every
+// file, so they must bust the cache WITHOUT entering the source changed-set (which
+// would make Tier-2 try to parse JSON as TS). Gate freshness + fingerprint only.
+function dirtyConfigFiles() {
+  return parsePorcelain().filter((e) => CONFIG_DIRTY_RE.test(e.path) || (e.oldPath && CONFIG_DIRTY_RE.test(e.oldPath)));
 }
 const dirtyCount = () => dirtyFiles().length;
 const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
@@ -214,12 +234,15 @@ function sourceFingerprint() {
 // a rename additionally appends "R:old->new" so it can't collide with an
 // independent add+delete. HEAD is included so the same edit against a different
 // HEAD keys differently. The key changes iff the dirty rebuild's output would.
-function dirtyFingerprint(sha, list) {
+function dirtyFingerprint(sha, list, configList = []) {
   const toks = [];
-  for (const { code, path, oldPath } of list) {
-    let tok;
-    try { const st = lstatSync(path); tok = `${path}:${st.mtimeMs}:${st.size}`; }
-    catch { tok = `${(code || "").trim() || "?"}:${path}`; }   // deleted / unstattable
+  // Source dirty files, plus dirty configs (c: marker) so a tsconfig/jsconfig edit
+  // — changes resolution but isn't reparsed as source — still re-keys the cache.
+  const entries = [...list, ...configList.map((e) => ({ ...e, _cfg: true }))];
+  for (const { code, path, oldPath, _cfg } of entries) {
+    let tok = _cfg ? "c:" : "";
+    try { const st = lstatSync(path); tok += `${path}:${st.mtimeMs}:${st.size}`; }
+    catch { tok += `${(code || "").trim() || "?"}:${path}`; }   // deleted / unstattable
     if (oldPath) tok += ` R:${oldPath}->${path}`;         // rename ≠ add+delete
     toks.push(tok);
   }
@@ -368,6 +391,17 @@ function identMul(ident, defineCount, mentioned) {
   return mul;
 }
 
+// posix-join that resolves ./ .. and returns an absolute-ish path; passes an
+// already-absolute `b` through. Used to anchor a tsconfig baseUrl to the dir of
+// the config that DEFINED it (module-scope twin of the joinPosix inside extractFacts).
+function joinPosixAbs(a, b) {
+  if (/^(\/|[A-Za-z]:[\\/])/.test(b)) return b.replace(/\\/g, "/"); // already absolute
+  const abs = a.replace(/\\/g, "/");
+  const parts = (abs + "/" + b).split("/"); const st = [];
+  for (const seg of parts) { if (seg === "" || seg === ".") continue; if (seg === "..") st.pop(); else st.push(seg); }
+  return (abs.startsWith("/") ? "/" : "") + st.join("/");
+}
+
 // Read baseUrl+paths from a tsconfig/jsconfig file. Returns null when absent.
 // Follows `extends` recursively (depth-capped) so a package tsconfig that only
 // `extends` a shared base (Turborepo tsconfig.base.json holding all `paths`)
@@ -376,11 +410,11 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
   try {
     const raw = JSON.parse(readFileSync(cfgPath, "utf8")) || {};
     const co = raw.compilerOptions || {};
+    const here = dirname(cfgPath).replace(/\\/g, "/");
     // Resolve inherited opts from `extends` first (parent), then layer self on top.
     let inherited = null;
     if (raw.extends && _depth < 10) {
       const exts = Array.isArray(raw.extends) ? raw.extends : [raw.extends];
-      const here = dirname(cfgPath);
       for (const ext of exts) {
         if (typeof ext !== "string" || !ext) continue;
         // Only resolve path-like extends (./, ../, absolute). Bare package
@@ -396,7 +430,11 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
       }
     }
     const self = {};
-    if (co.baseUrl) self.baseUrl = co.baseUrl;
+    // Anchor baseUrl to THIS config's own dir at read time — before it's merged
+    // into a child via `extends`. Once absolute it resolves correctly no matter
+    // which dir a downstream consumer pairs it with (fixes inherited baseUrl/paths
+    // resolving against the child config's dir instead of the base's origin).
+    if (co.baseUrl) self.baseUrl = joinPosixAbs(here, co.baseUrl);
     if (co.paths) self.paths = co.paths;
     const out = { ...(inherited || {}), ...self };
     if (!Object.keys(out).length) return null;
@@ -417,9 +455,12 @@ function discoverPackageAliasConfigs(rootAbs, listed) {
     if (!existsSync(full)) continue;
     const opts = readTsconfigAliasOpts(full);
     if (!opts) continue;
+    const cfgDir = join(root, dirname(rel)).replace(/\\/g, "/");
     configs.push({
-      dir: join(root, dirname(rel)).replace(/\\/g, "/"),
-      baseUrl: opts.baseUrl || ".",
+      dir: cfgDir,
+      // baseUrl from readTsconfigAliasOpts is already absolute (anchored at read
+      // time); the fallback is this config's own dir, not the literal ".".
+      baseUrl: opts.baseUrl || cfgDir,
       paths: opts.paths || {},
     });
   }
@@ -436,7 +477,7 @@ function nearestAliasConfig(fromAbsDir, configs, rootAbs, rootOpts) {
     if (norm === d || norm.startsWith(d + "/")) { best = c; break; } // configs sorted deepest-first
   }
   if (best) return best;
-  return { dir: rootAbs, baseUrl: rootOpts.baseUrl || ".", paths: rootOpts.paths || {} };
+  return { dir: rootAbs, baseUrl: rootOpts.baseUrl || rootAbs, paths: rootOpts.paths || {} };
 }
 
 // Construct a ts-morph Project robustly: use tsconfig.json when present + valid;
@@ -492,7 +533,7 @@ function makeProject(inc = null) {
     // Config discovery must see the SAME input as a full build (git ls-files
     // includes package.json/tsconfig.json, which the source-only cachedKeys don't)
     // so monorepo alias resolution matches. Cheap — no source parsing.
-    const listed = sh("git ls-files --cached --others --exclude-standard").split("\n").filter(Boolean);
+    const listed = gitListFiles();
     const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
     for (const f of vueFiles) {
       let text; try { text = readFileSync(f, "utf8"); } catch { continue; }
@@ -529,7 +570,7 @@ function makeProject(inc = null) {
   // files not already loaded. Non-git repos fall back to the broad globs.
   const loaded = new Set(project.getSourceFiles().map((s) => s.getFilePath()));
   const cwdp = process.cwd().replace(/\\/g, "/");
-  const listed = sh("git ls-files --cached --others --exclude-standard").split("\n").filter(Boolean);
+  const listed = gitListFiles();
   const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
   // `.vue` discovery: same channel as TS/JS (git ls-files when available, else
   // a broad glob fallback). We do NOT hand `.vue` straight to ts-morph (it is
@@ -661,8 +702,17 @@ function extractFacts(inc = null) {
   const ROOTABS = process.cwd().replace(/\\/g, "/");
   const resolveAlias = (spec, fromAbsDir) => {
     const cfg = nearestAliasConfig(fromAbsDir, packageAliasConfigs, ROOTABS, aliasOpts);
-    const aliasBase = joinPosix(cfg.dir, cfg.baseUrl || ".");
-    const aliasEntries = Object.entries(cfg.paths || {});
+    const aliasBase = cfg.baseUrl || cfg.dir; // baseUrl is already absolute (anchored at read time)
+    // TS `paths` precedence: an EXACT (no `*`) pattern wins over any wildcard, and
+    // among wildcards the LONGEST fixed prefix wins — not source/JSON order. Sort
+    // by descending specificity (stable, so equal-specificity aliases keep order,
+    // keeping non-overlapping-alias repos byte-identical).
+    const aliasEntries = Object.entries(cfg.paths || {}).sort((a, b) => {
+      const sa = a[0].indexOf("*"), sb = b[0].indexOf("*");
+      const exactA = sa === -1, exactB = sb === -1;
+      if (exactA !== exactB) return exactA ? -1 : 1;              // exact beats wildcard
+      return (exactB ? b[0].length : sb) - (exactA ? a[0].length : sa); // longer prefix wins
+    });
     for (const [pat, targets] of aliasEntries) {
       const star = pat.indexOf("*");
       let sub = null;
@@ -982,6 +1032,12 @@ function rankSymbols(files, focus) {
 // clean tree. A dirty tree REBUILDS from disk so queries reflect in-flight edits.
 function ensureFresh() {
   const sha = currentSha();
+  // One porcelain parse drives the whole freshness decision: dirty SOURCE files
+  // (dl) AND dirty tsconfig/jsconfig (cfgDirty). A config edit changes alias
+  // resolution without touching any source file, so it must bust the cache too.
+  const porc = sha ? parsePorcelain() : [];
+  const dl = porc.filter((e) => SOURCE_EXT_RE.test(e.path) || (e.oldPath && SOURCE_EXT_RE.test(e.oldPath)));
+  const cfgDirty = porc.filter((e) => CONFIG_DIRTY_RE.test(e.path) || (e.oldPath && CONFIG_DIRTY_RE.test(e.oldPath)));
   // Read the namespaced path; fall back to the legacy '.claude/agentmap.json'
   // when the new path is missing (migration from a pre-namespacing install — the
   // legacy file is still trustworthy, the next build() rewrites to the new path).
@@ -992,7 +1048,7 @@ function ensureFresh() {
       // Trust cache only if: same HEAD, known schema, it was built CLEAN
       // (cached.dirty === 0 — never trust a map built mid-edit, even after a
       // revert returns the tree to clean), AND the tree is clean right now.
-      if (sha && cached.generatedSha === sha && cached.schema === SCHEMA_VERSION && cached.dirty === 0 && dirtyCount() === 0) return cached;
+      if (sha && cached.generatedSha === sha && cached.schema === SCHEMA_VERSION && cached.dirty === 0 && dl.length === 0 && cfgDirty.length === 0) return cached;
       // NON-git repo (sha === ""): no HEAD to compare. Trust the cache when a
       // lightweight source fingerprint (path:mtime:size hash) is unchanged so
       // we don't full-reparse on every call. Best-effort — any mismatch/error
@@ -1008,18 +1064,15 @@ function ensureFresh() {
   // the dirty file set so back-to-back queries on an UNCHANGED dirty tree reuse
   // ONE rebuild instead of re-parsing the whole repo every call. Sits outside the
   // map.json block so it runs even before the first clean build exists.
-  if (sha) {
-    const dl = dirtyFiles();
-    if (dl.length) {                                     // provably dirty
-      const dfp = dirtyFingerprint(sha, dl);
-      if (existsSync(MAP_DIRTY)) {
-        try {
-          const dc = JSON.parse(readFileSync(MAP_DIRTY, "utf8"));
-          if (dc.schema === SCHEMA_VERSION && dc.dirtyFingerprint === dfp) return dc;
-        } catch {}
-      }
-      return buildDirty(sha, dl, dfp);
+  if (sha && (dl.length || cfgDirty.length)) {           // dirty source OR dirty config
+    const dfp = dirtyFingerprint(sha, dl, cfgDirty);
+    if (existsSync(MAP_DIRTY)) {
+      try {
+        const dc = JSON.parse(readFileSync(MAP_DIRTY, "utf8"));
+        if (dc.schema === SCHEMA_VERSION && dc.dirtyFingerprint === dfp) return dc;
+      } catch {}
     }
+    return buildDirty(sha, dl, dfp);
   }
   return build();
 }
@@ -1070,8 +1123,7 @@ function buildIncremental(sha, dirtyList, dfp) {
   //     via its "main" in a full build, but the incremental index-ladder ignores it.
   // Use the SAME listing discoverPackageAliasConfigs uses (--cached --others) so an
   // UNTRACKED config can't slip the guard. Cross-platform (no shell globbing).
-  let listed = [];
-  try { listed = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).split("\n"); } catch {}
+  const listed = gitListFiles();
   if (listed.some((f) => /\/(tsconfig|jsconfig)(\.[\w.-]+)?\.json$/.test(f))) return null;
   if (listed.some((f) => /\/package\.json$/.test(f) && !f.split("/").includes("node_modules"))) return null;
   const cached = snap.facts;
@@ -1143,7 +1195,11 @@ function buildIncremental(sha, dirtyList, dfp) {
 //   (c) unique case-insensitive SUBSTRING match (weakest — only when a/b miss)
 //   (d) multiple substring matches → {key:null, candidates} for disambiguation
 function resolveFile(keys, filesObj, q) {
-  if (filesObj[q]) return { key: q };                                              // (a)
+  // Object.hasOwn (not `filesObj[q]`) so a query equal to an Object.prototype
+  // property name (constructor / toString / __proto__ / hasOwnProperty / …) can't
+  // hit an inherited property and fabricate a false file match (JSON/MCP) or crash
+  // fileBlock() on the undefined value (prose).
+  if (Object.hasOwn(filesObj, q)) return { key: q };                              // (a)
   const ql = q.toLowerCase();
   const base = keys.filter((k) => k.split("/").pop().toLowerCase() === ql);        // (b) case-insensitive basename
   if (base.length === 1) return { key: base[0] };
