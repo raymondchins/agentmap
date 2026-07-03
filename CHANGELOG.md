@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Correctness quick-wins (Batch 5).** Six independent resolution/robustness bugs,
+  each found + confirmed with a repro and covered by a regression test:
+  - **tsconfig `extends` origin** — inherited `baseUrl`/`paths` now resolve against
+    the base config's own directory (anchored absolute at read time), not the child's,
+    so monorepo shared-config alias edges resolve correctly instead of being dropped
+    or mis-wired to a same-named local file.
+  - **Longest-prefix alias precedence** — overlapping `paths` (e.g. `@/*` +
+    `@/components/*`) now follow TypeScript's rule (exact, then longest fixed prefix)
+    instead of first-declared order.
+  - **Dirty tsconfig busts the cache** — editing `tsconfig.json`/`jsconfig.json`
+    (which changes alias resolution for every file) now invalidates the cache; before,
+    a config-only edit served a stale map with wrong import edges.
+  - **Rename to a non-source path** — `git mv foo.ts foo.txt` now busts the cache
+    (the vanished source file is removed from the map) instead of leaving a ghost.
+  - **Non-ASCII / special-char filenames** — files like `src/café.ts` no longer
+    silently disappear from the map (`git ls-files -z` + `core.quotePath=off`).
+  - **Prototype-pollution in `resolveFile`** — `--any constructor` / `--relates toString`
+    (any `Object.prototype` name) no longer crash (prose) or fabricate a false file
+    hit (JSON/MCP); uses `Object.hasOwn`.
+
 ### Performance
 - **Capped `--find`/`--any` symbol matches (Batch 3).** A broad symbol query used to
   emit every matching export (thousands / ~93k tokens on a large repo, defeating the

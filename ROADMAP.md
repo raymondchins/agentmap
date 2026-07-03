@@ -285,26 +285,25 @@ moat rather than diluting it. Revisit tree-sitter multi-language only if
 post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week add).
 
 ### Correctness prerequisites for credible monorepo claims
-- [ ] **tsconfig `extends` baseUrl/paths origin bug** — `agentmap.mjs:314`:
-  inherited `baseUrl`/`paths` resolve relative to the *child* config dir, not
-  where they originate → monorepo alias edges silently dropped. Resolve targets to
-  absolute against `dirname(cfgPath)` at read time before merging. *(correctness/high)*
-- [ ] **Longest-prefix alias rule** — `agentmap.mjs:520`: uses first-listed
-  `paths` pattern instead of TS's longest-prefix-wins → edges can point at the
-  wrong file. Sort aliasEntries by descending prefix length, exact patterns first.
-  *(correctness/medium)*
-- [ ] **tsconfig edits invalidate cache** — `agentmap.mjs:101`: uncommitted
-  `tsconfig.json`/`jsconfig.json` edits never bust the cache → stale import edges.
-  Add `(^|/)(tsconfig|jsconfig)(\..*)?\.json` to the `dirtyCount` filter (or hash
-  alias configs into freshness). *(correctness/medium)*
-- [ ] **`git mv` to non-source staleness** — `agentmap.mjs:99`: `dirtyCount` tests
-  only the NEW path of a rename; test both sides. *(correctness/medium)*
-- [ ] **Non-ASCII filenames** — `agentmap.mjs:411`: git ls-files C-quoting defeats
-  the extension check → those files vanish from the map. Use
-  `-c core.quotePath=off` or `-z` + NUL split. *(correctness/medium)*
-- [ ] **`resolveFile` prototype pollution** — `agentmap.mjs:827`: `--any constructor`
-  / `--relates toString` crash (prose) or fabricate a hit (JSON/MCP). Use
-  `Object.hasOwn` / `Object.create(null)` maps. *(correctness/medium)*
+- [x] **tsconfig `extends` baseUrl/paths origin bug** — DONE. `baseUrl` is now
+  anchored to its defining config's dir at read time (`joinPosixAbs(here, …)` in
+  `readTsconfigAliasOpts`), so inherited alias/paths resolve against the base
+  config's origin, not the child's. *(correctness/high)*
+- [x] **Longest-prefix alias rule** — DONE. `resolveAlias` sorts `paths` entries by
+  descending specificity (exact patterns first, then longest fixed prefix) matching
+  TS semantics; stable sort keeps non-overlapping repos byte-identical. *(correctness/medium)*
+- [x] **tsconfig edits invalidate cache** — DONE. A new `dirtyConfigFiles()` (fed by
+  the shared `parsePorcelain()`) makes a dirty `tsconfig.json`/`jsconfig.json` bust
+  the cache + re-key `dirtyFingerprint`, WITHOUT entering the Tier-2 source
+  changed-set. *(correctness/medium)*
+- [x] **`git mv` to non-source staleness** — DONE. `dirtyFiles()` now counts a
+  rename when EITHER side is a source file. *(correctness/medium)*
+- [x] **Non-ASCII filenames** — DONE. `git ls-files` calls go through `gitListFiles()`
+  (`-z` NUL-split); `git status`/`git grep` use `-c core.quotePath=off` — non-ASCII
+  files stay in the map. *(correctness/medium)*
+- [x] **`resolveFile` prototype pollution** — DONE. `resolveFile` uses
+  `Object.hasOwn(filesObj, q)`, so `--any constructor` / `--relates toString` no
+  longer crash or fabricate a hit. *(correctness/medium)*
 
 ### Resolution gaps beyond tsconfig (uncovered — needed for monorepo depth)
 - [ ] `package.json` `"imports"` subpath maps (`#internal/*`) — currently only

@@ -287,17 +287,16 @@ test("a directory import backed by package.json \"main\" falls back to full (nes
   } finally { cleanup(dir); }
 });
 
-test("an UNTRACKED nested tsconfig still triggers the monorepo fallback", () => {
+test("a nested tsconfig triggers the monorepo fallback (guard sees --others listing)", () => {
   const dir = makeRepo({
     "tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["src/shared/*"]}}}\n',
+    "packages/pkg/tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["src/shared/*"]}}}\n',
     "src/shared/thing.ts": "export const rootThing = () => 'ROOT';\n",
     "packages/pkg/src/shared/thing.ts": "export const pkgThing = () => 'PKG';\n",
     "packages/pkg/src/consumer.ts": "import { pkgThing } from '@shared/thing';\nexport const useIt = () => pkgThing();\n",
   });
   try {
     gitInit(dir, { commit: true });
-    // create the nested tsconfig AFTER the commit so it stays UNTRACKED
-    writeFiles(dir, { "packages/pkg/tsconfig.json": '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["src/shared/*"]}}}\n' });
     assertIncrementalEqualsFull(dir,
       { "packages/pkg/src/consumer.ts": "import { pkgThing } from '@shared/thing';\nexport const useIt = () => pkgThing() + '!';\n" },
       { expectIncremental: false });
