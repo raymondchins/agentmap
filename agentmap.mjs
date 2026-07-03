@@ -13,7 +13,7 @@
 //  Near-zero deps (ts-morph only). Runs in the target repo's cwd.
 //  Algorithm credit: Aider's repo map (Apache-2.0) — github.com/Aider-AI/aider
 // ============================================================================
-import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, statSync, lstatSync, chmodSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, lstatSync, chmodSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -101,6 +101,14 @@ const SENSITIVE_EXCLUDES = [
   // also any *.env (e.g. prod.env, .env.local already covered above) at any depth
   ":!*.env", ":!**/*.env",
   ":!*.pem", ":!*.key", ":!*.p12", ":!*.pfx", ":!*.crt", ":!id_rsa*",
+  // more private-key / keystore shapes + SSH key variants beyond id_rsa.
+  ":!*.p8", ":!*.jks", ":!*.keystore", ":!id_ed25519*", ":!id_ecdsa*",
+  // conventionally-named credential dotfiles (root + any depth). Deliberately NOT
+  // a broad `*token*` name match — that would over-exclude source files like
+  // tokenizer.ts / token.ts / useToken.tsx from the content search.
+  ":!.npmrc", ":!**/.npmrc", ":!.netrc", ":!**/.netrc",
+  ":!.git-credentials", ":!**/.git-credentials", ":!.pgpass", ":!**/.pgpass",
+  ":!.htpasswd", ":!**/.htpasswd", ":!.pypirc", ":!**/.pypirc",
   // name-substring matches: `*password*` (not `*.password*`) so a plain
   // password.txt / passwords.json is excluded, not just foo.password.ts.
   ":(exclude,icase)*secret*", ":(exclude,icase)*credential*", ":(exclude,icase)*password*",
@@ -1574,9 +1582,7 @@ async function main() {
     process.exit(0);
   }
   if (has("--version") || has("-v")) {
-    let version = "0.0.0";
-    try { version = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version || version; } catch {}
-    console.log(version);
+    console.log(readPackageVersion().version);
     process.exit(0);
   }
 

@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-03
+
 ### Added
 - **Programmatic API — agentmap.mjs is now importable with zero side effects.** The
   CLI arg-parse + dispatch moved inside a `main()` guarded by an `import.meta.url`
@@ -45,8 +47,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-implemented `tryResolveAt` behind a `join` local that shadowed `joinPosix`) collapses
   onto the shared helpers. No change to the map, hubs, rankings, or exit codes — verified
   byte-identical against the pre-refactor build.
+- **Housekeeping.** Removed a dead `statSync` import; `--version` now reuses the exported
+  `readPackageVersion()` instead of re-reading `package.json` inline.
 
 ### Security
+- **Expanded the content-search secret denylist.** The `--any` / MCP content fallback now also
+  excludes SSH private keys (`id_ed25519*`, `id_ecdsa*`), keystores (`*.p8`, `*.jks`,
+  `*.keystore`), and credential dotfiles (`.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`,
+  `.htpasswd`, `.pypirc`) at any depth. Deliberately NOT a broad `token` name match — that
+  would over-exclude ordinary source like `tokenizer.ts`. SECURITY.md + regression tests updated.
 - **Post-commit hook no longer runs a repo-local `./agentmap.mjs` by default.** A working-tree
   `agentmap.mjs` is attacker-plantable (any branch/PR can add it), so the hook firing on the
   next commit was arbitrary code execution. Repo-local execution now requires an explicit
@@ -319,7 +328,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/raymondchins/agentmap/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/raymondchins/agentmap/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/raymondchins/agentmap/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/raymondchins/agentmap/compare/v0.6.1...v0.7.0
