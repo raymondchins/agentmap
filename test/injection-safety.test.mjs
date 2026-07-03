@@ -44,6 +44,25 @@ test('--any "-O/bin/sh" is treated as a literal, not a git-grep flag', () => {
   cleanup(dir);
 });
 
+test('sensitive files are excluded from the --any content sweep (no secret leak)', () => {
+  // A value living in a conventionally-named secret file must NOT be surfaced by
+  // the content fallback (it would otherwise be fed to the LLM via --any / MCP).
+  // Covers the *password* fix: a plain password.txt, not just foo.password.ts.
+  const SECRET = "SUPER_SECRET_VALUE_ZZQ";
+  const dir = makeRepo({
+    ...FIXTURE,
+    ".env": `API_KEY=${SECRET}\n`,
+    "passwords.txt": `${SECRET}\n`,
+    "deploy.key": `${SECRET}\n`,
+  });
+  gitInit(dir, { commit: true });
+  const r = run(dir, "--any", SECRET);
+  assert.doesNotMatch(r.stdout, /passwords\.txt|deploy\.key|\.env/, "a sensitive file leaked into content-search results");
+  // With every hit excluded, the query resolves to no results (contract exit 1).
+  assert.equal(r.status, 1, `expected no-result exit 1 after excluding secrets, got ${r.status}: ${r.stderr}`);
+  cleanup(dir);
+});
+
 test('a literal that DOES exist still matches inertly (positive control)', () => {
   // Prove the content path actually works for a benign literal containing a
   // metacharacter-ish token, so the inert-on-injection result above isn't just
