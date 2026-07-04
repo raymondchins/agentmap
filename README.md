@@ -233,6 +233,63 @@ Codex and OpenCode share one repo-root `AGENTS.md` on project install. Existing 
 
 Pair with `--install-hooks` (Claude Code) or `--mcp` (Cursor MCP).
 
+### 4. Claude Code plugin (one-command bundle)
+
+Prefer the plugin over `--install-skill`/`--install-hooks` if you're on Claude Code and
+want the skill, the `PreToolUse` grep/Bash nudge, and the stdio MCP server in a single
+install that auto-updates:
+
+```bash
+# in Claude Code
+/plugin marketplace add raymondchins/agentmap
+/plugin install agentmap@agentmap
+```
+
+The plugin bundles: the packaged **SKILL.md**, the **PreToolUse nudge** (both the `Grep`
+tool and Bash text-searchers, via `${CLAUDE_PLUGIN_ROOT}`), and the **stdio MCP server**
+(`npx -y @raymondchins/agentmap --mcp`, so `ts-morph` is fetched on demand — the plugin
+cache ships no `node_modules`).
+
+> **One thing the plugin can't do: install the git `post-commit` hook.** Claude Code
+> plugins can't write into `.git/hooks/`, so the auto-refresh-on-commit still needs a
+> one-time `npx @raymondchins/agentmap --install-hooks` in each repo (it also wires the
+> nudge into `.claude/settings.json`, harmlessly redundant with the plugin's copy).
+> Without it the map still rebuilds on any dirty query — you just lose the commit-time
+> refresh.
+
+### Onboarding by platform
+
+Enforcement isn't uniform — some CLIs get a **live hook** that actively steers grep to
+agentmap, some get an **MCP server** the agent can call, and some are **docs-only** (a
+skill/rule the agent may or may not consult). Honest matrix:
+
+| Platform | Install | Enforcement | Known gaps |
+|----------|---------|-------------|------------|
+| **Claude Code** | `/plugin install agentmap@agentmap` (or `--install-hooks`) | **live hook** — `PreToolUse` nudge on `Grep` + Bash searchers | non-blocking (never denies grep); bare-symbol `Grep` nudge requires the #3 hook fix |
+| **Gemini CLI** | `--install-skill --platform gemini` | **live hook** — `.gemini/settings.json` nudge | fires on the `AfterTool`/`systemMessage` path (the earlier `BeforeTool` + `additionalContext` combo was silently dropped — fixed in #4) |
+| **OpenCode** | `--install-skill --platform opencode` | **log-only** — `.opencode/plugins/agentmap-nudge.js` writes to the log, does not inject context | plugin can't steer the model; relies on the `AGENTS.md` block being read |
+| **Cursor** | `--install-skill --platform cursor` + `.cursor/mcp.json` (below) | **MCP + docs** — `alwaysApply` rule + the MCP server | Cursor's own hooks aren't wired; the rule is advisory |
+| **Codex CLI** | `--install-skill --platform codex` | **docs-only** — `AGENTS.md` block | no PreToolUse enforcement (a hard grep `deny` needs an allow-fallback — tracked in Batch 4) |
+| **Copilot CLI** | `--install-skill --platform copilot` | **docs-only** — `.copilot/skills/` | same as Codex — no live hook yet |
+
+**Cursor MCP — copy-paste `.cursor/mcp.json`** (Cursor's `--mcp` wiring is a documented
+dead-end otherwise; drop this at your repo root):
+
+```json
+{
+  "mcpServers": {
+    "agentmap": {
+      "command": "npx",
+      "args": ["-y", "@raymondchins/agentmap", "--mcp"]
+    }
+  }
+}
+```
+
+Then Cursor exposes the 8 query tools (`any`, `find`, `relates`, `map`, `hubs`,
+`features`, `feature`, `symbols`). Run `agentmap --doctor` any time to see what's wired
+vs missing.
+
 ---
 
 ## Quickstart
@@ -551,6 +608,17 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
   `import` / re-export declarations and the named symbols crossing them. It does **not**
   do call-site or full reference resolution — `--relates` tells you which files import a
   module, not every line that calls a given function.
+- **Alias & workspace resolution.** Resolves `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/
+  `webpack` `resolve.alias` (string entries, parsed from the AST — the config is **never
+  executed**), and pnpm/npm/yarn workspace cross-package imports (`@org/pkg` → its source).
+  A build reports `edgeCoverage` (the share of repo-local imports that resolved) and prints a
+  one-line warning when a repo's imports mostly *don't* resolve — so a broken/empty map is
+  never silently framed as success.
+- **Scoping — `.agentmapignore` + `.d.ts`.** Generated `.d.ts` declaration files are excluded
+  from the symbol ranking **by default** (so a 200-symbol generated types file, or
+  `next-env.d.ts`, doesn't flood `--find`/`--symbols`/`--hubs`); `--include-dts` restores
+  them, and they stay live import-resolution targets either way. A repo-root `.agentmapignore`
+  (gitignore-style subset: anchored `/`, dir `/`, `*` globs, `#` comments) excludes extra paths.
 - **PageRank + symbol ranking are real and implemented** (damping 0.85, deterministic
   power iteration; personalized variants for `--relates` and `--map --focus`). The symbol
   ranking is a faithful port of Aider's identifier-graph approach (credit:
