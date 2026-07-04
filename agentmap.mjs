@@ -611,6 +611,63 @@ function discoverPackageAliasConfigs(rootAbs, listed) {
   return configs;
 }
 
+// Collect workspace cross-package resolution targets from every tracked
+// package.json that declares a "name" (pnpm/npm/yarn workspaces). Maps the
+// package NAME → { dir, entries, subpaths } where `dir` is the package's absolute
+// posix directory, `entries` are the raw "." source-entry candidates in
+// preference order (SOURCE over dist): "exports"["."] → "module" → "main" →
+// "./index", and `subpaths` maps a declared "exports" subpath (`./button`) to its
+// source target. Actual file resolution is deferred to the resolver's
+// tryResolveAt (which needs the ts-morph project), so a `dist/index.js` entry
+// with no source sibling still can't wrongly resolve — it just misses, same as
+// today. Any package.json with no "name" (root/private shells) contributes
+// nothing. node_modules is path-segment excluded. Empty when no NAMED
+// package.json is tracked, so a single-package repo stays byte-identical (the
+// workspace branch never fires).
+function discoverWorkspacePackages(rootAbs, listed) {
+  const root = rootAbs.replace(/\\/g, "/");
+  const pkgs = Object.create(null);
+  const pkgRels = listed.length
+    ? listed.filter((f) => /(^|\/)package\.json$/.test(f) && !f.split("/").includes("node_modules"))
+    : [];
+  for (const rel of pkgRels) {
+    const full = join(root, rel);
+    if (!existsSync(full)) continue;
+    let pkg; try { pkg = JSON.parse(readFileSync(full, "utf8")); } catch { continue; }
+    const name = pkg && typeof pkg.name === "string" ? pkg.name : "";
+    if (!name) continue;                              // unnamed / root shell → not a resolution target
+    const dir = join(root, dirname(rel)).replace(/\\/g, "/");
+    // "." entry candidates, SOURCE-first & deduped, plus a subpath map from any
+    // declared "exports" subpaths. condLeaf() pulls a string target out of a
+    // string OR a conditions object (prefer import/default, then any leaf).
+    const entries = [];
+    const subpaths = Object.create(null);
+    const push = (v) => { if (typeof v === "string" && v && !entries.includes(v)) entries.push(v); };
+    const condLeaf = (c) => {
+      if (typeof c === "string") return c;
+      if (c && typeof c === "object") { for (const k of ["import", "default"]) if (typeof c[k] === "string") return c[k]; for (const k in c) if (typeof c[k] === "string") return c[k]; }
+      return null;
+    };
+    const exp = pkg.exports;
+    if (typeof exp === "string") push(exp);
+    else if (exp && typeof exp === "object") {
+      for (const key of Object.keys(exp)) {
+        const leaf = condLeaf(exp[key]);
+        if (!leaf) continue;
+        if (key === ".") push(leaf);
+        else if (key.startsWith("./")) subpaths[key.slice(2)] = leaf; // "./button" → "button"
+      }
+      // A bare conditions object (no "." and no "./x" keys) is itself the "." entry.
+      if (!Object.keys(exp).some((k) => k === "." || k.startsWith("."))) { const leaf = condLeaf(exp); if (leaf) push(leaf); }
+    }
+    push(pkg.module);
+    push(pkg.main);
+    push("./index");
+    pkgs[name] = { dir, entries, subpaths };
+  }
+  return pkgs;
+}
+
 // Longest matching tsconfig dir wins (monorepo package boundary).
 function nearestAliasConfig(fromAbsDir, configs, rootAbs, rootOpts) {
   const norm = fromAbsDir.replace(/\\/g, "/");
@@ -678,6 +735,7 @@ function makeProject(inc = null) {
     // so monorepo alias resolution matches. Cheap — no source parsing.
     const listed = gitListFiles();
     const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
+    const workspacePackages = discoverWorkspacePackages(cwdp, listed);
     for (const f of vueFiles) {
       let text; try { text = readFileSync(f, "utf8"); } catch { continue; }
       const block = extractVueScripts(text);
@@ -687,7 +745,7 @@ function makeProject(inc = null) {
       vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
       vueReal[`${cwdp}/${f}`] = true;
     }
-    return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs };
+    return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs, workspacePackages };
   }
   // ---- end incremental --------------------------------------------------------
 
@@ -715,6 +773,7 @@ function makeProject(inc = null) {
   const cwdp = process.cwd().replace(/\\/g, "/");
   const listed = gitListFiles();
   const packageAliasConfigs = discoverPackageAliasConfigs(cwdp, listed);
+  const workspacePackages = discoverWorkspacePackages(cwdp, listed);
   // `.vue` discovery: same channel as TS/JS (git ls-files when available, else
   // a broad glob fallback). We do NOT hand `.vue` straight to ts-morph (it is
   // not TS/JS). Instead, for each `.vue` file we read its `<script>` block via
@@ -777,7 +836,7 @@ function makeProject(inc = null) {
     vueMap[`${cwdp}/${vpath}`] = `${cwdp}/${f}`;
     vueReal[`${cwdp}/${f}`] = true;
   }
-  return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs };
+  return { project, vueMap, vueReal, aliasOpts, packageAliasConfigs, workspacePackages };
 }
 
 // ---------------------------------------------------------------------------
@@ -804,7 +863,7 @@ function extractFacts(inc = null) {
   // false flag) so a repo with neither is byte-identical to pre-feature behavior.
   const ignoreMatcher = loadIgnoreMatcher();
   const includeDts = INCLUDE_DTS;
-  const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject(inc);
+  const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs, workspacePackages } = makeProject(inc);
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
   const cwd = process.cwd().replace(/\\/g, "/");
@@ -891,15 +950,43 @@ function extractFacts(inc = null) {
     }
     return null;
   };
+  // Workspace cross-package resolution (pnpm/npm/yarn workspaces): a BARE
+  // specifier that equals a workspace package NAME (`@org/pkg`) or is a subpath of
+  // one (`@org/pkg/sub`) resolves to that package's SOURCE. Bare name → the entry
+  // candidates (src/index.* preferred); subpath → a declared "exports" subpath
+  // target, else the naive package dir + subpath, run through the same
+  // tryResolveAt ladder (extensionless / .ext / /index.ext / .vue). Returns a rel
+  // key or null (miss → fall through to alias resolution, so a workspace name that
+  // also matches a tsconfig alias still resolves). No named workspace package.json
+  // ⇒ workspacePackages is empty ⇒ this never fires.
+  const resolveWorkspace = (spec) => {
+    if (spec.startsWith(".")) return null;
+    for (const name in workspacePackages) {
+      const { dir, entries, subpaths } = workspacePackages[name];
+      if (spec === name) {                                      // bare package import → "." entry
+        for (const e of entries) { const hit = tryResolveAt(joinPosix(dir, e)); if (hit) return hit; }
+      } else if (spec.startsWith(name + "/")) {                 // subpath import
+        const sub = spec.slice(name.length + 1);
+        // Prefer a declared "exports" subpath target ("./button" → src/…); else
+        // fall back to the naive package-dir + subpath (source mirroring the
+        // import path, the layout when there's no "exports" map).
+        const mapped = subpaths[sub];
+        const hit = mapped ? tryResolveAt(joinPosix(dir, mapped)) : null;
+        return hit || tryResolveAt(joinPosix(dir, sub));
+      }
+    }
+    return null;
+  };
   // Resolve a module specifier to an in-project file key. A relative specifier is
   // joined against the importer's dir and handed to tryResolveAt — which already
   // encodes the full precedence ladder (exact `.vue` wins → extensionless →
-  // `.ext` TS/JS shadow → `/index.ext` → `.vue` fallback). A bare specifier goes
-  // through the tsconfig/jsconfig alias resolver. (The relative branch used to
-  // re-implement tryResolveAt's ladder behind a `join` local that shadowed
-  // joinPosix — collapsed here to the one shared joinPosix + tryResolveAt.)
+  // `.ext` TS/JS shadow → `/index.ext` → `.vue` fallback). A bare specifier tries
+  // workspace package resolution first (monorepo cross-package), then the
+  // tsconfig/jsconfig alias resolver. (The relative branch used to re-implement
+  // tryResolveAt's ladder behind a `join` local that shadowed joinPosix —
+  // collapsed here to the one shared joinPosix + tryResolveAt.)
   const resolveSpec = (fromAbsDir, spec) =>
-    spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : resolveAlias(spec, fromAbsDir);
+    spec.startsWith(".") ? tryResolveAt(joinPosix(fromAbsDir, spec)) : (resolveWorkspace(spec) || resolveAlias(spec, fromAbsDir));
 
   const sourceFiles = project.getSourceFiles();
   // In incremental mode only the changed files carry real content; the rest are
