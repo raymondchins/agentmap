@@ -2329,11 +2329,15 @@ async function main() {
     }
 
   // --mcp: hand off to the stdio MCP server (authored separately). Dynamic import
-  // so a missing mcp.mjs only fails when --mcp is actually requested.
+  // so a missing mcp.mjs only fails when --mcp is actually requested. Pass mcpQuery
+  // in explicitly — this branch runs inside main()'s top-level await, so agentmap.mjs
+  // is still "evaluating" and mcp.mjs can NOT import it back without deadlocking;
+  // injection sidesteps the cycle (mcp.mjs imports it itself only on a direct
+  // `node mcp.mjs` run, which is not cyclic).
   if (has("--mcp")) {
     try {
       const m = await import(new URL("./mcp.mjs", import.meta.url));
-      await m.serve();
+      await m.serve(mcpQuery);
     } catch (e) {
       console.error(`agentmap --mcp failed: ${e?.message || e}`);
       process.exit(3);
@@ -2634,11 +2638,182 @@ async function main() {
 }
 
 // ---------------------------------------------------------------------------
+// In-process query API for the MCP server. Each of the 8 query tools
+// (any/find/relates/map/hubs/features/feature/symbols) is answered here against
+// a map parsed ONCE and cached, instead of spawning `node agentmap.mjs --json …`
+// per call. The object each branch returns is BYTE-IDENTICAL to what the matching
+// main() branch feeds out() — the same construction reusing the same module-scoped
+// helpers + limit constants, so the MCP JSON never drifts from the CLI --json.
+// Returns { code, obj, stderr }: obj = the object the CLI JSON.stringifies to
+// stdout (or null for a usage error → stderr + exit 2); code = 0 ok / 1 zero-result
+// / 2 usage error; stderr = the exact usage message (code 2), else "". A build/parse
+// failure THROWS (as on the CLI) so mcp.mjs surfaces isError (crash-masking).
+// mcpEnsureFresh() memoizes ensureFresh()'s result across calls, keyed by the SAME
+// freshness signal ensureFresh uses (schema|generatedSha|dirty|dirtyFingerprint|
+// fingerprint); a key match returns the cached map, any mismatch re-runs ensureFresh.
+// ---------------------------------------------------------------------------
+let _mcpMapCache = null; // { key, data }
+function mcpFreshKey(d) {
+  return [d.schema, d.generatedSha, d.dirty, d.dirtyFingerprint ?? "", d.fingerprint ?? ""].join("|");
+}
+function mcpEnsureFresh() {
+  const data = ensureFresh();
+  const key = mcpFreshKey(data);
+  if (_mcpMapCache && _mcpMapCache.key === key) return _mcpMapCache.data;
+  _mcpMapCache = { key, data };
+  return data;
+}
+// Test/rebuild seam: drop the in-memory map cache (force a re-derive without a
+// fresh process). Optional — exported only for convenience.
+function mcpResetCache() { _mcpMapCache = null; }
+
+function mcpQuery(name, args) {
+  const a = args && typeof args === "object" ? args : {};
+  const err = (code, stderr) => ({ code, obj: null, stderr });
+  const ok = (obj, code = 0) => ({ code, obj, stderr: "" });
+  switch (name) {
+    case "any": {
+      const raw = String(a.query ?? "");
+      if (!raw) return err(2, '--any needs a query, e.g. `--any PremiumCard` or `--any "multi-modal"`');
+      const q = raw.toLowerCase();
+      const data = mcpEnsureFresh();
+      const keys = Object.keys(data.files);
+      const { key: fileKey, candidates } = resolveFile(keys, data.files, raw);
+      const symAll = [];
+      for (const [path, f] of Object.entries(data.files))
+        for (const e of f.exports)
+          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+      const symTotal = symAll.length;
+      const symObjs = rankMatches(data.files, symAll).slice(0, SYMBOL_MATCH_LIMIT);
+      const symTrunc = symTotal > symObjs.length;
+      const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
+      if (fileKey) {
+        const f = data.files[fileKey];
+        return ok({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) });
+      } else if (symObjs.length || featNames.length) {
+        return ok({ command: "any", query: raw, kind: "structure", symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) });
+      } else if (candidates && candidates.length > 1) {
+        return ok({ command: "any", query: raw, kind: "candidates", candidates });
+      } else {
+        const res = contentSearch(raw);
+        if (!res) return ok({ command: "any", query: raw, kind: "empty" }, 1);
+        const lines = res.split("\n");
+        const shown = lines.slice(0, CONTENT_LINES_LIMIT);
+        return ok({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown });
+      }
+    }
+    case "find": {
+      const raw = String(a.symbol ?? "");
+      if (!raw) return err(2, "--find needs a symbol query, e.g. `--find PremiumCard`");
+      const q = raw.toLowerCase();
+      const data = mcpEnsureFresh();
+      const all = [];
+      for (const [path, f] of Object.entries(data.files))
+        for (const e of f.exports)
+          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+      const code = all.length ? 0 : 1;
+      const ranked = rankMatches(data.files, all);
+      const matches = ranked.slice(0, SYMBOL_MATCH_LIMIT);
+      const truncated = ranked.length > matches.length;
+      return ok({ command: "find", query: raw, total: ranked.length, shown: matches.length, truncated, matches }, code);
+    }
+    case "relates": {
+      const q = String(a.path ?? "");
+      if (!q) return err(2, "--relates needs a file path/name, e.g. `--relates agentmap.mjs`");
+      const data = mcpEnsureFresh();
+      const keys = Object.keys(data.files);
+      const { key, candidates } = resolveFile(keys, data.files, q);
+      if (!key) return ok({ command: "relates", error: "no match", query: q, candidates: candidates || [] }, 1);
+      const f = data.files[key];
+      const biEdges = [];
+      for (const [p, ff] of Object.entries(data.files))
+        for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
+      const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
+      const top = Object.entries(rel).filter(([k]) => k !== key).sort((x, y) => y[1] - x[1]).slice(0, RELATED_LIMIT);
+      return ok({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
+    }
+    case "map": {
+      const focusArg = (a.focus != null && String(a.focus) !== "") ? String(a.focus) : undefined;
+      const data = mcpEnsureFresh();
+      const tkRaw = (a.tokens != null && Number.isFinite(Number(a.tokens))) ? String(Math.trunc(Number(a.tokens))) : "";
+      const tk = parseInt(tkRaw, 10);
+      const budget = Number.isFinite(tk) && tk > 0 ? tk : (focusArg ? FOCUS_BUDGET : DEFAULT_BUDGET);
+      let ranked = data.rankedSymbols || [];
+      let focusLabel = "global";
+      let focusResolved;
+      let code = 0;
+      if (focusArg) {
+        const { key } = resolveFile(Object.keys(data.files), data.files, focusArg);
+        if (key) { ranked = rankSymbols(data.files, new Set([key])); focusLabel = key; focusResolved = true; }
+        else { focusResolved = false; code = 1; }
+      }
+      if (!ranked.length)
+        ranked = Object.entries(data.files)
+          .sort((x, y) => (y[1].pagerank || 0) - (x[1].pagerank || 0))
+          .flatMap(([file, f]) => (f.exports || []).map((e) => ({ file, name: e.name, kind: e.kind, rank: f.pagerank || 0 })));
+      let used = 0;
+      const byFile = new Map();
+      for (const s of ranked) { if (!byFile.has(s.file)) byFile.set(s.file, []); byFile.get(s.file).push(s); }
+      const shownFiles = [];
+      let first = true;
+      for (const [file, syms] of byFile) {
+        const capped = syms.slice(0, SYMS_PER_FILE);
+        const lineOf = (arr) => `\n${file}:\n` + arr.map((s) => `  ${s.name} (${s.kind})`).join("\n");
+        const t = tokEst(lineOf(capped));
+        if (used + t > budget) {
+          if (first && budget > 0) {
+            for (let k = capped.length - 1; k >= 1; k--) {
+              const partial = capped.slice(0, k);
+              const pt = tokEst(lineOf(partial));
+              if (used + pt <= budget) { used += pt; shownFiles.push({ file, symbols: partial.map((s) => ({ name: s.name, kind: s.kind })) }); break; }
+            }
+            first = false;
+          }
+          continue;
+        }
+        used += t; first = false;
+        shownFiles.push({ file, symbols: capped.map((s) => ({ name: s.name, kind: s.kind })) });
+      }
+      return ok({ command: "map", focus: focusLabel, ...(focusResolved !== undefined ? { focusResolved } : {}), budget, tokens: used, files: shownFiles }, code);
+    }
+    case "hubs": {
+      const data = mcpEnsureFresh();
+      return ok({ command: "hubs", fileCount: data.fileCount, sha: data.generatedSha, hubs: data.hubs });
+    }
+    case "features": {
+      const data = mcpEnsureFresh();
+      const list = Object.entries(data.features).map(([k, v]) => [k, v.length]).sort((x, y) => y[1] - x[1]);
+      return ok({ command: "features", features: Object.fromEntries(list) });
+    }
+    case "feature": {
+      const raw = String(a.name ?? "");
+      if (!raw) return err(2, "--feature needs a name, e.g. `--feature dashboard` (run --features to list)");
+      const q = raw.toLowerCase();
+      const data = mcpEnsureFresh();
+      const nm = Object.keys(data.features).find((k) => k.toLowerCase() === q) || Object.keys(data.features).find((k) => k.toLowerCase().includes(q));
+      if (!nm) return ok({ command: "feature", error: "no match", query: raw }, 1);
+      const fl = data.features[nm], set = new Set(fl), exts = new Set();
+      for (const p of fl) for (const dep of (data.files[p]?.dependents || [])) if (!set.has(dep)) exts.add(dep);
+      return ok({ command: "feature", name: nm, files: fl, externalDependents: [...exts] });
+    }
+    case "symbols": {
+      const data = mcpEnsureFresh();
+      const snRaw = (a.n != null && Number.isFinite(Number(a.n))) ? String(Math.trunc(Number(a.n))) : "";
+      const sn = parseInt(snRaw, 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
+      const syms = (data.rankedSymbols || []).slice(0, n);
+      return ok({ command: "symbols", symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) });
+    }
+    default:
+      return err(2, `unknown tool: ${name}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Programmatic API. Importing agentmap.mjs executes NOTHING (see the guard
 // below), so these pure building blocks can be used in-process by the MCP
 // server, tests, and any future library caller without spawning a subprocess.
 // ---------------------------------------------------------------------------
-export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental };
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache };
 
 // Run the CLI only when executed directly (`node agentmap.mjs …`), never when
 // imported. Dual check (matches mcp.mjs) so it holds on Windows (backslash
