@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-04
+
 ### Added
 - **Map-health signal.** Every clean build now reports `edgeCoverage` (the share of
   repo-local-looking import sites that resolved to an in-project edge) and a `degraded`
@@ -444,7 +446,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/raymondchins/agentmap/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/raymondchins/agentmap/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/raymondchins/agentmap/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/raymondchins/agentmap/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/raymondchins/agentmap/compare/v0.7.0...v0.8.0
