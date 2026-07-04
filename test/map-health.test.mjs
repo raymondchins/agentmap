@@ -16,12 +16,14 @@ import { makeRepo, gitInit, run, runErr, cleanup } from "./helpers.mjs";
 
 const readMap = (dir) => JSON.parse(readFileSync(join(dir, ".claude/agentmap/map.json"), "utf8"));
 
-// A repo whose only cross-file imports use a `@/` alias that lives in vite.config
-// (which agentmap does NOT read) — every local-looking import misses. 13 files, so
-// fileCount>10 and coverage<0.15 both trip.
+// A repo whose only cross-file imports use a `@/` alias agentmap cannot resolve —
+// defined nowhere agentmap reads (no tsconfig paths, no STRING vite/webpack alias:
+// think a webpack *function* alias, a bundler plugin, or a bespoke resolver). `@/`
+// still counts as a repo-local import site, so every miss drives edgeCoverage → ~0.
+// 14 files, so fileCount>10 and coverage<0.15 both trip. (Deliberately NOT a plain
+// vite string alias — agentmap now resolves those, which would make this healthy.)
 function degradedRepo() {
   const files = {
-    "vite.config.js": 'export default { resolve: { alias: { "@": "/src" } } };\n',
     "src/utils/helper.js": "export function helper() { return 1; }\n",
     "src/utils/shared.js": "export function shared() { return 2; }\n",
   };
