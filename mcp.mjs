@@ -10,18 +10,32 @@
 //  Transport: JSON-RPC 2.0 over newline-delimited JSON on stdin/stdout — the
 //  simplest MCP stdio transport (one JSON object per line each way).
 //
-//  Each tool is implemented by SPAWNING the agentmap CLI in `--json` mode
-//  (`node agentmap.mjs --json <flag> <args…>`), capturing its single-object
-//  stdout, and returning it verbatim. This file depends ONLY on the documented
-//  --json CLI surface — never on agentmap.mjs internals. Node stdlib only.
+//  Each tool is answered IN-PROCESS by agentmap.mjs's mcpQuery() against a map
+//  parsed ONCE and cached — no longer by spawning `node agentmap.mjs --json …`
+//  per call (which paid a double Node spawn + whole-repo reparse every time).
+//  mcpQuery returns { code, obj, stderr } where obj is BYTE-IDENTICAL to the
+//  object the CLI's --json branch prints, so tool outputs are unchanged from the
+//  old spawn path. The isError / crash-masking contract is preserved: a build
+//  crash throws and is surfaced as isError, never as a false "no results".
 // ============================================================================
-import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const PROTOCOL_VERSION = "2024-11-05";
-// agentmap.mjs lives next to this file; run it as a subprocess for every tool.
-const AGENTMAP = fileURLToPath(new URL("./agentmap.mjs", import.meta.url));
+
+// mcpQuery lives in agentmap.mjs. Via `agentmap --mcp`, agentmap.mjs runs
+// `await import("./mcp.mjs")` from INSIDE its own top-level `await main()`, so it
+// never finishes evaluating while the server is alive — ANY `import("./agentmap.mjs")`
+// (static OR awaited-dynamic) from here would be a cyclic import of a still-
+// evaluating module and DEADLOCK. So the --mcp path INJECTS mcpQuery: main() passes
+// it to serve(mcpQuery), which stashes it in _mcpQuery. The only path that imports
+// it here is a DIRECT `node mcp.mjs` run (agentmap.mjs not the entry → fully
+// evaluates → resolves fine).
+let _mcpQuery = null;
+async function loadMcpQuery() {
+  if (!_mcpQuery) ({ mcpQuery: _mcpQuery } = await import("./agentmap.mjs"));
+  return _mcpQuery;
+}
 
 // Server version = package.json version (resolve relative to this file, not cwd).
 function pkgVersion() {
@@ -32,8 +46,11 @@ function pkgVersion() {
 }
 
 // ---------------------------------------------------------------------------
-// Tool registry. Each entry: an MCP inputSchema + a fn mapping the call's
-// args → the agentmap CLI argv (always `--json` first so stdout is one object).
+// Tool registry. Each entry is the public MCP surface (name + description +
+// inputSchema). The call args are mapped to a query result by agentmap.mjs's
+// mcpQuery(name, args) — it switches on the tool NAME and reads the same arg
+// fields these schemas declare (query / symbol / path / focus / tokens / name /
+// n), so there is no per-tool argv builder to keep in sync here anymore.
 // ---------------------------------------------------------------------------
 const str = (description) => ({ type: "string", description });
 const TOOLS = [
@@ -42,19 +59,16 @@ const TOOLS = [
     description:
       "Unified router: resolve a query against the repo map (file → symbol → feature) then fall back to a live git-grep for string/copy/data literals. Best default for 'where is X' / reuse-before-rebuild.",
     inputSchema: { type: "object", properties: { query: str("File path, symbol name, feature name, or any literal string to search for.") }, required: ["query"] },
-    argv: (a) => ["--any", String(a.query ?? "")],
   },
   {
     name: "find",
     description: "Find every exported symbol whose name matches (substring, case-insensitive). Use to locate a function/class/type before rebuilding it.",
     inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports.") }, required: ["symbol"] },
-    argv: (a) => ["--find", String(a.symbol ?? "")],
   },
   {
     name: "relates",
     description: "Blast radius for a file: its exports, imports, direct dependents, and the files most related to it by random-walk relevance. Use before editing to see who breaks.",
     inputSchema: { type: "object", properties: { path: str("File path, basename, or unique substring identifying the target file.") }, required: ["path"] },
-    argv: (a) => ["--relates", String(a.path ?? "")],
   },
   {
     name: "map",
@@ -66,69 +80,31 @@ const TOOLS = [
         tokens: { type: "integer", description: "Optional token budget for the digest (default 8192 global / 1024 focused)." },
       },
     },
-    // --map takes optional --focus and --tokens; only pass what's provided.
-    argv: (a) => {
-      const out = ["--map"];
-      if (a.focus != null && String(a.focus) !== "") out.push("--focus", String(a.focus));
-      if (a.tokens != null && Number.isFinite(Number(a.tokens))) out.push("--tokens", String(Math.trunc(Number(a.tokens))));
-      return out;
-    },
   },
   {
     name: "hubs",
     description: "List the most important files in the repo by PageRank (the hubs everything imports). Read these first to understand a codebase.",
     inputSchema: { type: "object", properties: {} },
-    argv: () => ["--hubs"],
   },
   {
     name: "features",
     description: "List every detected feature (top-level app/ route segment) with its file count.",
     inputSchema: { type: "object", properties: {} },
-    argv: () => ["--features"],
   },
   {
     name: "feature",
     description: "List all files belonging to a named feature plus its external dependents.",
     inputSchema: { type: "object", properties: { name: str("Feature name (run the 'features' tool to list them).") }, required: ["name"] },
-    argv: (a) => ["--feature", String(a.name ?? "")],
   },
   {
     name: "symbols",
     description: "Top N globally ranked symbols (Aider-style importance). Defaults to 30.",
     inputSchema: { type: "object", properties: { n: { type: "integer", description: "How many symbols to return (default 30)." } } },
-    // --symbols takes an optional positional count.
-    argv: (a) => (a.n != null && Number.isFinite(Number(a.n)) ? ["--symbols", String(Math.trunc(Number(a.n)))] : ["--symbols"]),
   },
 ];
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
-// MCP tools/list wants only the public fields (no internal argv builder).
+// MCP tools/list returns the registry entries as-is (name/description/inputSchema).
 const toolList = () => TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
-
-// Spawn `node agentmap.mjs --json <flag> <args…>` in the client's cwd, resolve
-// with stdout. Rejects (with stderr/message) only on spawn failure; a non-zero
-// exit still resolves so the dispatcher can surface stdout/stderr as isError.
-function runAgentmap(extraArgv) {
-  return new Promise((resolve) => {
-    execFile(
-      process.execPath,
-      [AGENTMAP, "--json", ...extraArgv],
-      { cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => {
-        // Classify the outcome. A numeric err.code is the child's exit status.
-        // A NON-numeric err.code (ENOENT/EACCES/ERR_CHILD_PROCESS_STDIO_MAXBUFFER
-        // are strings) or a signal kill is a spawn/system failure, not an exit
-        // code — the old `err.code === undefined` test missed all of these and
-        // mislabeled them as exit 1 ("no results").
-        let code = 0, spawnError = "";
-        if (err) {
-          if (typeof err.code === "number") code = err.code;
-          else { code = -1; spawnError = err.message || String(err.code || err.signal || "spawn failed"); }
-        }
-        resolve({ code, stdout: (stdout || "").trim(), stderr: (stderr || "").trim(), spawnError });
-      },
-    );
-  });
-}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC plumbing. Write one compact JSON object per line to stdout.
@@ -137,27 +113,38 @@ function send(obj) { process.stdout.write(JSON.stringify(obj) + "\n"); }
 const result = (id, r) => send({ jsonrpc: "2.0", id, result: r });
 const error = (id, code, message) => send({ jsonrpc: "2.0", id, error: { code, message } });
 
-// Dispatch a tools/call: build argv, run the CLI, wrap stdout as MCP content.
+// Dispatch a tools/call: run the query IN-PROCESS via mcpQuery, then wrap its
+// { code, obj, stderr } result as MCP content — preserving the EXACT contract the
+// old spawn path produced (below, "stdout" = JSON.stringify(obj), "stderr" = the
+// usage message; there is no separate child stdout/stderr stream anymore).
 async function callTool(name, rawArgs) {
   const tool = TOOL_BY_NAME.get(name);
   if (!tool) return { content: [{ type: "text", text: `unknown tool: ${name}` }], isError: true };
-  const argv = tool.argv(rawArgs && typeof rawArgs === "object" ? rawArgs : {});
-  const { code, stdout, stderr, spawnError } = await runAgentmap(argv);
-  if (spawnError) return { content: [{ type: "text", text: `failed to launch agentmap: ${spawnError}` }], isError: true };
-  // Exit ≥2 = usage error (2) or maintenance-command failure (3); <0 = spawn/
-  // signal failure. All are real failures → isError. Maintenance flags use exit 3
-  // as of the exit-code contract, but the TOOLS registry above only ever spawns
-  // query commands (any/find/relates/map/hubs/features/feature/symbols) — never a
-  // maintenance flag — so exit 3 realistically never reaches here; `code >= 2`
-  // still catches it correctly if that ever changes.
+  let res;
+  try {
+    const mcpQuery = await loadMcpQuery();
+    res = mcpQuery(name, rawArgs && typeof rawArgs === "object" ? rawArgs : {});
+  } catch (e) {
+    // A build/parse crash throws in-process (as ensureFresh()/build() do on the
+    // CLI, which there exited 1 with empty stdout + a stack on stderr). Keep the
+    // isError contract — a hard crash is never masked as a false "no results".
+    return { content: [{ type: "text", text: `agentmap failed: ${e?.message || e}` }], isError: true };
+  }
+  const { code, obj, stderr } = res;
+  const stdout = obj != null ? JSON.stringify(obj) : "";
+  // Exit ≥2 = usage error (2) or maintenance failure (3); <0 = spawn/signal
+  // failure (mcpQuery never returns <0, but keep the guard identical to the old
+  // path). All are real failures → isError. The query tools only ever produce
+  // code 0/1/2, so exit 3 realistically never reaches here; `code >= 2` still
+  // catches it if that changes.
   if (code >= 2 || code < 0) return { content: [{ type: "text", text: stderr || stdout || `agentmap exited ${code}` }], isError: true };
-  // Exit 1 is overloaded: the CLI uses it for "zero results" (now including an
-  // unresolved `--map --focus`, which still prints the global-fallback digest to
-  // stdout), but exit 1 is also Node's default code for an uncaught exception.
-  // Genuine zero-result queries ALWAYS print one JSON object to stdout in --json
-  // mode (progress goes to stderr); a crash leaves stdout empty. So exit-1-with-
-  // empty-stdout is a crash — surface it as an error, not a false "no results".
-  // An unresolved --map --focus has NON-empty stdout (the digest JSON, with
+  // Exit 1 is overloaded: the CLI uses it for "zero results" (including an
+  // unresolved `--map --focus`, which still returns the global-fallback digest
+  // object), but exit 1 is also Node's default code for an uncaught exception.
+  // Genuine zero-result queries ALWAYS return one JSON object (obj != null); a
+  // crash threw above. So an exit-1 with a null obj would be an anomaly — surface
+  // it as an error, not a false "no results" (mirrors the old empty-stdout guard).
+  // An unresolved --map --focus has a non-null obj (the digest with
   // focusResolved:false inside), so it falls through to the success path below.
   if (code === 1 && !stdout) {
     return { content: [{ type: "text", text: stderr || "agentmap failed (exit 1, no output)" }], isError: true };
@@ -198,7 +185,10 @@ async function handle(msg) {
 // (-32700) when we can, otherwise skip it. Lines are processed sequentially so
 // responses stay ordered.
 // ---------------------------------------------------------------------------
-export async function serve() {
+export async function serve(mcpQueryFn) {
+  // --mcp injects mcpQuery (avoids the cyclic import deadlock, see loadMcpQuery).
+  // A direct `node mcp.mjs` run passes no arg → callTool lazily imports it instead.
+  if (mcpQueryFn) _mcpQuery = mcpQueryFn;
   process.stdin.setEncoding("utf8");
   let buf = "";
   let chain = Promise.resolve(); // serialize handling so output order is stable
