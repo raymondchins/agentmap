@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.9.x   | Yes       |
-| < 0.9   | No        |
+| Version  | Supported |
+|----------|-----------|
+| 0.12.x   | Yes       |
+| < 0.12   | No        |
 
-Only the latest `0.9.x` release receives security fixes. Upgrade before reporting.
+Only the latest `0.12.x` release receives security fixes. Upgrade before reporting.
 
 ---
 
