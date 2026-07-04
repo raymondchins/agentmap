@@ -10,6 +10,7 @@ import {
   readGuidanceSection,
   mergeGuidanceBlock,
   installGeminiHooks,
+  installCodexHooks,
   installOpencodePlugin,
 } from "./install-helpers.mjs";
 
@@ -50,6 +51,7 @@ const PLATFORMS = {
     dest: (root) => skillPath(root, false, ".codex", "skills", "agentmap", "SKILL.md"),
     docs: (root, globalScope) =>
       globalScope ? join(root, ".codex", "AGENTS.md") : join(root, "AGENTS.md"),
+    codexHooks: true,
   },
   opencode: {
     label: "OpenCode",
@@ -177,6 +179,16 @@ function installDocsForPlatform(cfg, { root, globalScope, dryRun, guidance, merg
 function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, targets }) {
   if (cfg.hooks && !globalScope) {
     const hookTargets = installGeminiHooks(root, dryRun);
+    for (const t of hookTargets) {
+      if (dryRun) console.log(`  ${cfg.label} hooks: ${t}`);
+      else {
+        console.log(`  ${cfg.label} hooks → ${t}`);
+        targets.push(t);
+      }
+    }
+  }
+  if (cfg.codexHooks && !globalScope) {
+    const hookTargets = installCodexHooks(root, dryRun);
     for (const t of hookTargets) {
       if (dryRun) console.log(`  ${cfg.label} hooks: ${t}`);
       else {
