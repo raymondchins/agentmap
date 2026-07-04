@@ -38,6 +38,54 @@ const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for 
 // Old caches (schema 2) are ignored so the first run after upgrade rebuilds.
 const SCHEMA_VERSION = 3;
 
+// --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
+// The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
+// so the two modes never collide: the default (`.d.ts` excluded) map.json — the
+// one the post-commit hook writes and every normal query reads — stays untouched
+// and byte-identical, while --include-dts builds/reads its own cache.
+const MAP_DTS = ".claude/agentmap/map.dts.json"; // --include-dts full-build cache
+const AGENTMAPIGNORE = ".agentmapignore";        // repo-root ignore file (gitignore-ish)
+// Module-scoped backend config, (re)resolved at the start of every extractFacts()
+// so importing this module stays side-effect-free and each build() re-reads
+// .agentmapignore from disk. main() flips INCLUDE_DTS via --include-dts.
+let INCLUDE_DTS = false;
+
+// Minimal, dependency-free .agentmapignore matcher. Reads repo-root
+// `.agentmapignore` (gitignore-STYLE, a documented SUBSET — see below) and returns
+// a predicate `(relPath) => boolean` (true ⇒ ignore). Returns null when the file
+// is absent/empty so callers skip matching entirely (byte-identical to today).
+// Supported subset (kept deliberately small + predictable):
+//   • blank lines and `#` comments are skipped;
+//   • a leading `/` anchors the pattern to the repo root (else it matches at any
+//     depth — the path OR any `/`-bounded segment prefix);
+//   • a trailing `/` marks a directory prefix (matches everything under it);
+//   • `*` matches any run of non-`/` chars; no `**`, `?`, `[...]`, or negation.
+// Anything outside this subset is treated literally. Documented in README.
+function loadIgnoreMatcher() {
+  let raw;
+  try { raw = readFileSync(AGENTMAPIGNORE, "utf8"); } catch { return null; }
+  const rules = [];
+  for (let line of raw.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    const anchored = line.startsWith("/");
+    if (anchored) line = line.slice(1);
+    const dir = line.endsWith("/");
+    if (dir) line = line.slice(0, -1);
+    if (!line) continue;
+    // Escape regex metachars in the literal, then turn `*` into `[^/]*`. Anchored
+    // ⇒ `^pat`; unanchored ⇒ match the whole path OR any `/`-bounded segment
+    // prefix so a bare `dist` ignores `pkg/dist/x` too.
+    const body = line.replace(/[.+^$(){}|\[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
+    const tail = dir ? "(?:/|$)" : "$";
+    const re = anchored ? new RegExp("^" + body + tail)
+                        : new RegExp("(?:^|/)" + body + tail);
+    rules.push(re);
+  }
+  if (!rules.length) return null;
+  return (p) => rules.some((re) => re.test(p));
+}
+
 // ---------------------------------------------------------------------------
 // Tuning constants — KEEP THESE VALUES IDENTICAL (output + marketing must not
 // shift). Hoisted out of inline literals so the algorithm is self-documenting.
@@ -751,6 +799,11 @@ function makeProject(inc = null) {
 // A single pathological file is skipped + warned, never fatal (graceful degrade).
 // ---------------------------------------------------------------------------
 function extractFacts(inc = null) {
+  // Resolve backend scoping fresh per build: read .agentmapignore from disk and
+  // snapshot the --include-dts flag. Both default to "no change" (null matcher,
+  // false flag) so a repo with neither is byte-identical to pre-feature behavior.
+  const ignoreMatcher = loadIgnoreMatcher();
+  const includeDts = INCLUDE_DTS;
   const { project, vueMap, vueReal, aliasOpts, packageAliasConfigs } = makeProject(inc);
   const { SyntaxKind } = tsMorph();
   const CallExpression = SyntaxKind.CallExpression;
@@ -766,7 +819,7 @@ function extractFacts(inc = null) {
   const files = {};
   // PATH-SEGMENT exclusion (not substring) so e.g. components/.next-demo or
   // src/node_modules_helper.ts are NOT wrongly excluded.
-  const excluded = (p) => { const segs = p.split("/"); return segs.includes("node_modules") || segs.includes(".next"); };
+  const excluded = (p) => { const segs = p.split("/"); return segs.includes("node_modules") || segs.includes(".next") || (ignoreMatcher !== null && ignoreMatcher(p)); };
 
   // Map-health counters (fed into edgeCoverage / the degraded signal in
   // assemble). We only tally import sites that LOOK repo-local — relative
@@ -857,6 +910,13 @@ function extractFacts(inc = null) {
   for (const sf of sourceFiles) {
     const path = rel(sf.getFilePath());
     if (excluded(path)) continue;
+    // `.d.ts` default-exclude: skip a declaration file as its OWN map node so its
+    // (often generated, huge) symbols never pollute --find/--symbols/--hubs. It
+    // stays a live import-RESOLUTION target — an importer that resolves to it
+    // still records the edge in its own importedSymbols/imports (addEdge below
+    // checks excluded(), not membership in `files`). --include-dts restores the
+    // old behavior (the .d.ts becomes a full node again).
+    if (!includeDts && path.endsWith(".d.ts")) continue;
     if (only && !only.has(path)) continue;
     try {
     const fromDir = sf.getDirectoryPath().replace(/\\/g, "/");
@@ -1177,6 +1237,22 @@ function rankSymbols(files, focus) {
 // Serve the cached map only when provably current: same HEAD, known schema,
 // clean tree. A dirty tree REBUILDS from disk so queries reflect in-flight edits.
 function ensureFresh() {
+  // --include-dts is an opt-in restore of the old (.d.ts-included) behavior. It
+  // reads/writes its OWN cache (MAP_DTS) so the default map.json — which the
+  // post-commit hook writes and every normal query reads — is never touched or
+  // read in this mode. Kept simple: trust the dts-cache only when clean + current;
+  // any dirty/miss just rebuilds it fresh (this is a rarely-used diagnostic path).
+  if (INCLUDE_DTS) {
+    const sha = currentSha();
+    const clean = sha ? (dirtyFiles().length === 0 && dirtyConfigFiles().length === 0) : false;
+    if (existsSync(MAP_DTS)) {
+      try {
+        const c = JSON.parse(readFileSync(MAP_DTS, "utf8"));
+        if (sha && clean && c.generatedSha === sha && c.schema === SCHEMA_VERSION && c.dirty === 0) return c;
+      } catch {}
+    }
+    return build({ target: MAP_DTS });
+  }
   const sha = currentSha();
   // One porcelain parse drives the whole freshness decision: dirty SOURCE files
   // (dl) AND dirty tsconfig/jsconfig (cfgDirty). A config edit changes alias
@@ -1997,6 +2073,8 @@ Query commands:
 
 Global modifier:
   --json               emit exactly one JSON object (no prose) for the command
+  --include-dts        include .d.ts declaration files in the symbol/ranking pass
+                       (default: excluded so generated types don't flood results)
 
 Maintenance:
   --install-hooks [--dry-run]
@@ -2031,11 +2109,17 @@ async function main() {
   const wantJson = has("--json");
   const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); else prose(); };
 
+  // --include-dts is a GLOBAL modifier (like --json), valid with any query
+  // command or none: it flips the module-scoped INCLUDE_DTS so extractFacts keeps
+  // `.d.ts` files as full map nodes (the pre-0.11 behavior). Off by default so a
+  // generated declaration file's symbols don't flood --find/--symbols/--hubs.
+  if (has("--include-dts")) INCLUDE_DTS = true;
+
   // Every recognized flag (the global modifiers + maintenance flags + each
   // command + sub-flags that take a value). Anything starting with "-" that is
   // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
   const KNOWN = new Set([
-    "--json", "--print",
+    "--json", "--include-dts", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp",
     "--any", "--find", "--relates", "--map", "--focus", "--tokens",
