@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`npx skills add` compatibility.** The packaged skill moved to the
+  `skills/agentmap/SKILL.md` layout so `npx skills add raymondchins/agentmap`
+  (the vercel-labs/skills CLI + skills.sh) installs it directly; `--install-skill`
+  and all install destinations are unchanged.
+
 ## [0.12.2] - 2026-07-04
 
 ### Added
