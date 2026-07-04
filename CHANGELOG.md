@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-04
+
+### Added
+- **Outgoing call graph (`--calls <symbol>`).** The companion to `--callers`: every
+  in-project symbol a given symbol INVOKES, resolved by the TypeScript language
+  service (`getDefinitionNodes` — go-to-definition, which follows an imported /
+  re-exported binding through to the real declaration, not the import site).
+  Constructors (`new X()`) and member calls (`obj.m()`) resolve; `node_modules` and
+  TS built-ins are excluded; dynamic dispatch and higher-order indirection are
+  honestly skipped. Same lazy, out-of-band model as `--callers` (builds a Project
+  only on the query; nothing persisted) and the same `--in` disambiguation. Also the
+  `calls` MCP tool. Experimental.
+- **Transitive `--depth N` for the call graph.** `--callers` / `--calls` (and the
+  `callers` / `calls` MCP tools) accept `--depth N` (default 1, max 5) for an N-hop
+  caller/callee closure — "who transitively reaches this" / "the full dependency cone
+  of this". It BFS-traverses the same single warm Project (no extra build), with
+  cycle detection and per-level + total-node caps so a hub can't explode; each node is
+  tagged with its `depth` and a `via` parent for chain reconstruction. `--depth 1`
+  (or omitted) is byte-identical to the single-hop output.
+
 ## [0.13.0] - 2026-07-04
 
 ### Added
@@ -543,7 +563,8 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/raymondchins/agentmap/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/raymondchins/agentmap/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/raymondchins/agentmap/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/raymondchins/agentmap/compare/v0.12.1...v0.12.2

@@ -323,8 +323,20 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   files are never mis-attributed. Lazy + out-of-band (spins up the type-checker only
   on the query) so the map build + every other query stay fast; nothing persisted.
   Exposed as CLI `--callers` + the `callers` MCP tool. Experimental.
-- [ ] **Call graph, remaining** — outgoing `--calls` (what a symbol invokes) and
-  optional symbol-level PageRank / transitive `--depth`.
+- [x] **Outgoing call graph — `--calls`** — resolves the in-project symbols a symbol
+  invokes (compiler-accurate via `getDefinitionNodes`, follows imports/re-exports to
+  the real declaration; constructors + member calls resolve; dynamic/higher-order
+  honestly skipped). Same lazy model as `--callers`; CLI `--calls` + `calls` MCP tool.
+- [x] **Transitive `--depth N`** — `--callers` / `--calls` take `--depth N` (max 5)
+  for an N-hop caller/callee closure over the same warm Project (cycle-detected,
+  per-level + total-node caps; `depth 1` byte-identical to single-hop). CLI flag +
+  `depth` MCP arg; nodes tagged `depth` + `via`.
+- [ ] **Symbol-level PageRank** — DEFERRED. A full symbol call graph needs
+  `findReferences` over EVERY symbol (2–3 orders of magnitude more work than the
+  file-import PageRank), which can't ride the fast build path and can't be cached
+  without going stale on the first edit. Revisit only with an incremental,
+  edit-surviving symbol-reference index. File-level PageRank already ranks
+  `--find` / `--callers` results well.
 - [ ] **Monorepo/framework intelligence** — first-class pnpm/turborepo/nx (per-package
   maps, cross-package edges), React server/client boundaries, tRPC routers, Prisma
   schema links, barrel-file flattening. Add a CI-buildable, compressed,

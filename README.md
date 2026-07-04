@@ -484,6 +484,42 @@ repo) *only* when invoked — the map build and every other query never pay that
 nothing is persisted. Accurate on statically-resolvable calls; dynamic dispatch, reflection,
 and string-keyed access are beyond any static tool. Also available as the `callers` MCP tool.
 
+### `--calls <sym>` — outgoing call graph (experimental)
+
+The companion to `--callers`: which in-project symbols a symbol **invokes**. Each call and
+`new X()` site inside its body is resolved by the type checker (`getDefinitionNodes`), which
+follows an imported / re-exported binding through to the real declaration — so a same-named
+local elsewhere is never confused for the imported one. `node_modules` and TypeScript
+built-ins (`console.log`, `Array.map`, …) are excluded; dynamic dispatch, computed member
+access, and higher-order callees are honestly skipped.
+
+```
+$ node agentmap.mjs --calls extractFacts
+extractFacts calls  [agentmap.mjs]: 15 in-project targets
+  agentmap.mjs:756 → makeProject (FunctionDeclaration)
+  agentmap.mjs:944 → rel (VariableDeclaration)
+  agentmap.mjs:952 → excluded (VariableDeclaration)
+  …
+```
+
+Same lazy, out-of-band model as `--callers` (builds a Project only on the query, nothing
+persisted). Also the `calls` MCP tool.
+
+**Going transitive — `--depth N`.** Both `--callers` and `--calls` accept `--depth N`
+(default 1, max 5) for an N-hop closure: `--callers foo --depth 3` is the transitive
+blast radius ("everything that reaches `foo`, up to 3 hops"); `--calls foo --depth 3` is
+the dependency cone ("everything `foo` pulls in"). It BFS-traverses the same single warm
+Project — no extra build — with cycle detection and node caps so a hub can't explode; each
+result is tagged with its `depth` and a `via` parent. `--depth 1` is the default single-hop
+query.
+
+```
+$ node agentmap.mjs --callers leaf --depth 2
+callers of leaf  [src/chain.ts]: 2 callers within depth 2
+  src/chain.ts:2 → mid [depth 1]
+  src/chain.ts:3 → top [depth 2]
+```
+
 ### `--feature <name>` — files that make up a feature
 
 Resolves a Next.js `app/`-router feature to its file set, plus the external files that
@@ -666,8 +702,9 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
   cached map's edges come from static `import` / re-export declarations and the named
   symbols crossing them — `--relates` answers the file-level question ("who imports this
   module"). Symbol-level, compiler-accurate call-site resolution is available on demand via
-  `--callers` (experimental) — a lazy, out-of-band query that spins up the type-checker only
-  when invoked and is never folded into the fast map build.
+  `--callers` (who calls a symbol) and `--calls` (what a symbol invokes) — both experimental,
+  lazy, out-of-band queries that spin up the type-checker only when invoked and are never
+  folded into the fast map build.
 - **Alias & workspace resolution.** Resolves `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/
   `webpack` `resolve.alias` (string entries, parsed from the AST — the config is **never
   executed**), and pnpm/npm/yarn workspace cross-package imports (`@org/pkg` → its source).
