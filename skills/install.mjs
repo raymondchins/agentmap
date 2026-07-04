@@ -15,7 +15,9 @@ import {
 } from "./install-helpers.mjs";
 
 const SKILLS_DIR = dirname(fileURLToPath(import.meta.url));
-const SKILL_MD = join(SKILLS_DIR, "SKILL.md");
+// Packaged skill lives at skills/agentmap/SKILL.md (the skills/<name>/SKILL.md
+// layout `npx skills add raymondchins/agentmap` + skills.sh expect).
+const SKILL_MD = join(SKILLS_DIR, "agentmap", "SKILL.md");
 const CURSOR_RULE = join(SKILLS_DIR, "cursor-rule.mdc");
 
 /** @param {string} root @param {boolean} _globalScope */
