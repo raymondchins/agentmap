@@ -66,6 +66,11 @@ const TOOLS = [
     inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports.") }, required: ["symbol"] },
   },
   {
+    name: "search",
+    description: "Rank symbols by BM25 lexical relevance for a VAGUE natural-language query (e.g. 'where's the auth retry logic', 'the function that dedupes symbols') — where exact `find`/`any` name matching fails. Tokenizes symbol names + path segments + feature + kind, scored by BM25 and fused with file PageRank. Best when you don't know the exact symbol name.",
+    inputSchema: { type: "object", properties: { query: str("Natural-language / keyword query. Stopwords are dropped; multi-word is fine.") }, required: ["query"] },
+  },
+  {
     name: "relates",
     description: "Blast radius for a file: its exports, imports, direct dependents, and the files most related to it by random-walk relevance. Use before editing to see who breaks.",
     inputSchema: { type: "object", properties: { path: str("File path, basename, or unique substring identifying the target file.") }, required: ["path"] },

@@ -324,6 +324,33 @@ Then Cursor exposes the 8 query tools (`any`, `find`, `relates`, `map`, `hubs`,
 `features`, `feature`, `symbols`). Run `agentmap --doctor` any time to see what's wired
 vs missing.
 
+### Uninstall
+
+agentmap only writes files into your repo/home — remove them to fully uninstall. `agentmap
+--doctor` lists every path it wrote, and every docs merge lives inside an
+`<!-- agentmap:begin/end -->` (or `# agentmap:begin/end`) fence, so deleting just that block
+leaves the rest of your `AGENTS.md` / `GEMINI.md` intact.
+
+| Platform | Remove |
+|----------|--------|
+| Claude Code | `.claude/skills/agentmap/` + the agentmap `PreToolUse` block in `.claude/settings.json` |
+| Cursor | `.cursor/rules/agentmap.mdc` + the `agentmap` entry in `.cursor/mcp.json` |
+| Codex | `.codex/skills/agentmap/`, the `# agentmap:begin/end` block in `.codex/config.toml`, `.codex/hooks/agentmap-codex-nudge.mjs`, and the fenced block in `AGENTS.md` |
+| OpenCode | `.opencode/skills/agentmap/`, `.opencode/plugins/agentmap-nudge.js`, the `AGENTS.md` block |
+| Gemini | `.gemini/skills/agentmap/`, `.gemini/hooks/agentmap-nudge.mjs`, the `BeforeTool` hook in `.gemini/settings.json`, the `GEMINI.md` block |
+| All | map cache `rm -rf .claude/agentmap/`; npm devDep `npm rm @raymondchins/agentmap`; the agentmap block in `.git/hooks/post-commit` |
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| `features (0)` | `--features` only detects Next.js `app/` routes; a TanStack `src/routes/` repo legitimately shows 0. Use `--map` / `--symbols` instead. |
+| Empty or wrong map | Usually no `tsconfig.json` / resolvable aliases in the target repo, so no edges resolved — run `agentmap --doctor` and check `edgeCoverage` in `--json`. |
+| Stale-looking results | By design the map rebuilds from disk on a dirty tree / SHA mismatch. Force a rebuild by just running `agentmap`. |
+| Codex/Gemini nudge never fires | Codex's gate is opt-in — set `[features] hooks = true` in `.codex/config.toml` (`AGENTMAP_CODEX_GATE=0` disables it). Gemini needs the `BeforeTool` hook that `--install-skill` writes. |
+| Installed the wrong `agentmap` | This is **`@raymondchins/agentmap`** (npm scope) — not the unrelated unscoped `agentmap` packages. |
+| Cursor MCP tools missing | `--mcp` doesn't auto-wire Cursor; add the copy-paste `.cursor/mcp.json` from the matrix above and restart Cursor. |
+
 ---
 
 ## Quickstart
@@ -437,6 +464,25 @@ find "Message": 55 match
   app/(chat)/actions.ts → generateTitleFromUserMessage (FunctionDeclaration)
   …
 ```
+
+### `--search <q>` — BM25 lexical search for vague queries
+
+When you don't know the exact symbol name — the query an agent actually types — `--search`
+ranks symbols by **BM25 lexical relevance** over split-identifier tokens (the symbol name,
+its file's path segments, feature, and kind), fused with file PageRank so a strong hit in an
+important file wins ties. No embeddings, no vector DB; the index is built into `map.json`.
+The same ranker is wired into `--any` as a rung that fires **only** when exact file/symbol
+matching found nothing, so exact routing is unchanged.
+
+```
+$ node agentmap.mjs --search "auth retry logic"
+search "auth retry logic": 3 match
+  src/authRetry.ts → retryWithBackoff (FunctionDeclaration)  [6.83]
+  …
+```
+
+Stopwords (`the`, `that`, `of`, …) are dropped, so `--search "the function that dedupes
+symbols"` works. Also available as the `search` MCP tool.
 
 ### `--relates <path>` — blast radius + transitive relevance
 
@@ -670,6 +716,23 @@ for piping into other tools. Also includes a top-level `fileCount`.
 ```
 $ node agentmap.mjs --print | jq '.hubs[0]'
 "lib/utils.ts (deg 52, pr 0.105171)"
+```
+
+### `--export <mermaid|dot>` — visualize the import graph
+
+Serializes the file import graph (nodes = files, edges = imports, top-N by PageRank, with
+three light style tiers) as **Graphviz DOT** or **Mermaid** — paste straight into
+[mermaid.live](https://mermaid.live), a GitHub README mermaid block, or `dot -Tsvg`.
+`--focus <path>` scopes to a file's 1-hop neighborhood. It reads the cached map only (no
+ts-morph Project), and prints graph text to stdout (so it isn't combined with `--json`).
+
+```
+$ node agentmap.mjs --export mermaid --focus lib/auth.ts
+%% agentmap import graph — 154 files, sha a1b2c3d, focus lib/auth.ts
+flowchart TD
+  classDef hub fill:#d9d9d9,stroke:#333,stroke-width:2px;
+  n0["lib/auth.ts"]:::hub
+  …
 ```
 
 ### Global flags

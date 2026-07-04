@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-04
+
+### Added
+- **Community-health files + onboarding docs.** GitHub issue forms (bug report +
+  scope-gated feature request) with a `config.yml` routing questions to the README,
+  a PR template that mirrors the one-file / one-dep / freshness / byte-identical
+  invariants, a CONTRIBUTING "Submitting a PR" section, and README **Uninstall**
+  (per-platform removal) + **Troubleshooting** tables.
+- **React Server/Client boundary tags.** Each file now carries an optional
+  `rsc: 'client' | 'server'` fact, read compiler-accurately from the directive
+  prologue (`'use client'` / `'use server'`) and surfaced in `--relates` (prose +
+  JSON, CLI + MCP). Additive + discovery-only — never touches PageRank / edges /
+  features, and the key is ABSENT (not null) for files with no directive, so
+  `map.json` is byte-identical for non-Next repos.
+- **Hybrid lexical retrieval — `--search <query>` + a BM25 rung in `--any`.** Answers
+  VAGUE natural-language queries an agent actually types ("where's the auth retry
+  logic", "the function that dedupes symbols") that exact `--find` / `--any` miss. A
+  pure-JS BM25 index (one doc per symbol: split-identifier name + path segments +
+  feature + kind — no embeddings, no vector DB) is built into `map.json` and fused
+  with file PageRank so a strong hit in an important file wins ties. `--search` is
+  the explicit entry point; inside `--any` the same ranker slots in as a rung that
+  fires ONLY when exact matching found nothing, so every existing `--any` result
+  stays byte-identical. Also the `search` MCP tool.
+- **`--export mermaid | dot` — visualize the import graph.** Serializes the file
+  import graph (nodes = files, edges = imports, top-N by PageRank, 3 style tiers) as
+  Graphviz DOT or Mermaid — paste into mermaid.live / a GitHub README / `dot -Tsvg`.
+  `--focus <path>` scopes to a file's 1-hop neighborhood. Reads the cached map only
+  (no ts-morph Project), so the fast path is untouched; not wired into `--json` (the
+  graph text *is* the output).
+- Map `SCHEMA_VERSION` bumped 4 → 5 (adds the per-file `rsc` fact + the top-level
+  `lexical` index); caches rebuild once on upgrade.
+
 ## [0.13.1] - 2026-07-04
 
 ### Added
@@ -563,7 +595,8 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/raymondchins/agentmap/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/raymondchins/agentmap/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/raymondchins/agentmap/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/raymondchins/agentmap/compare/v0.12.2...v0.12.3
