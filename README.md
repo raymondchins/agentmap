@@ -167,9 +167,9 @@ like `ps aux | grep node` — so it's high-signal, not nagging.
 
 **Fires on:** `import`/`require`/`export`/`from '...'` patterns, JSX component tags
 (`<Hero`, `<ProviderCard`), explicit intent words (`where is`, `who imports`, `reuse`,
-`existing component`), and — in the Bash branch — bare multi-hump PascalCase identifiers
-(`ProviderCard`, `TopProviders`) that almost always mean "where is this symbol / who uses
-it". The Bash branch only fires when the searcher is the *primary* command (at the start,
+`existing component`), and — in both the `Grep` tool and the Bash branch — bare multi-hump
+PascalCase identifiers (`ProviderCard`, `TopProviders`) that almost always mean "where is
+this symbol / who uses it". The Bash branch additionally only fires when the searcher is the *primary* command (at the start,
 or after `;`/`&&`); piped log-filters stay silent.
 
 `--install-hooks` writes both matchers into `.claude/settings.json` for you (merge-safe —
