@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "agentmap",
+  "description": "Single-plugin marketplace for agentmap — the queryable, PageRank-ranked ts-morph repo map for TS/JS coding agents.",
+  "owner": {
+    "name": "Raymond Surya Chin",
+    "url": "https://github.com/raymondchins"
+  },
+  "plugins": [
+    {
+      "name": "agentmap",
+      "source": ".",
+      "description": "The repo map your coding agent is forced to use — a queryable, PageRank-ranked ts-morph import/symbol map for TS/JS repos. Bundles the PreToolUse grep nudge, the navigation skill, and a stdio MCP server exposing 8 query tools.",
+      "author": {
+        "name": "Raymond Surya Chin"
+      },
+      "homepage": "https://github.com/raymondchins/agentmap#readme",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["agentmap", "repo-map", "ts-morph", "pagerank", "code-graph", "context"]
+    }
+  ]
+}
