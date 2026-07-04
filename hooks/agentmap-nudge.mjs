@@ -87,7 +87,8 @@ process.stdin.on("end", () => {
         !!pattern &&
         (DEP_RE.test(pattern) ||
           (COMPONENT_TAG_RE.test(pattern) && !GENERIC_DENYLIST.test(pattern)) ||
-          INTENT_RE.test(pattern));
+          INTENT_RE.test(pattern) ||
+          SYMBOL_RE.test(pattern));
     } else if (tool === "Bash") {
       const cmd = String(ti.command || "");
       // Only when grep/rg/ag is the PRIMARY command (start, or after ; / && — NOT
@@ -113,7 +114,7 @@ process.stdin.on("end", () => {
     }
 
     if (fire) {
-      const AM = "node node_modules/@raymondchins/agentmap/agentmap.mjs";
+      const AM = "npx @raymondchins/agentmap";
       const msg =
         "This looks like a dependency / component / who-imports / reuse / where-is-symbol " +
         "search. Use agentmap FIRST — it's faster than serial grep. Easiest: " +
