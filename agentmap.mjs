@@ -35,8 +35,10 @@ const MAP_DIRTY = ".claude/agentmap/map.dirty.json"; // dirty-tree build cache, 
 const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for incremental rebuild (Batch 3 Tier 2)
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
-// Old caches (schema 2) are ignored so the first run after upgrade rebuilds.
-const SCHEMA_VERSION = 3;
+// Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
+// persisted for --find/--any discovery. Old caches (which lack `locals`) rebuild
+// on upgrade so a private helper becomes findable without waiting for the next commit.
+const SCHEMA_VERSION = 4;
 
 // --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
 // The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
@@ -49,6 +51,12 @@ const AGENTMAPIGNORE = ".agentmapignore";        // repo-root ignore file (gitig
 // so importing this module stays side-effect-free and each build() re-reads
 // .agentmapignore from disk. main() flips INCLUDE_DTS via --include-dts.
 let INCLUDE_DTS = false;
+// Non-exported TOP-LEVEL declarations (module-scope function/class/interface/type/
+// enum/const) are always indexed into each file's `locals` at build time and
+// surfaced ONLY by --find / --any — they are NEVER ranked (rankSymbols / --map /
+// --symbols / --hubs read only `exports`), so the focused digest stays byte-identical.
+// --no-locals flips this OFF as a query-time filter that hides them from --find/--any.
+let INCLUDE_LOCALS = true;
 
 // Minimal, dependency-free .agentmapignore matcher. Reads repo-root
 // `.agentmapignore` (gitignore-STYLE, a documented SUBSET — see below) and returns
@@ -912,6 +920,7 @@ function makeProject(inc = null) {
 //
 // Returns { [relPath]: {
 //   exports:         [{ name, kind }],
+//   locals:          [{ name, kind }],                  // non-exported top-level decls — discovery-only (--find/--any), NOT ranked
 //   imports:         [targetPath…],                    // = Object.keys(importedSymbols)
 //   importedSymbols: { [targetPath]: [names…] },        // "default"/"*" still literal
 //   defaultExportName: string | null,                   // resolved default-export name
@@ -1086,6 +1095,32 @@ function extractFacts(inc = null) {
       if (name === "default") defaultExportName = resolved;
       return { name: resolved, kind: d[0]?.getKindName?.() ?? "?" };
     });
+    // Non-exported TOP-LEVEL declarations → `locals`, so --find/--any can surface a
+    // private helper for reuse-before-rebuild. These NEVER enter rankSymbols/--map/
+    // --hubs (assemble reads only `exports`), so the ranked digest is unaffected.
+    // ts-morph's direct top-level getters (and getVariableStatements) return
+    // module-scope decls only — they don't descend into function bodies — giving
+    // the top-level-only guarantee for free; the exportedNames dedupe skips anything
+    // getExportedDeclarations() already covers.
+    const exportedNames = new Set(exports.map((e) => e.name));
+    const locals = [];
+    const seenLocal = new Set();
+    const pushLocal = (decl) => {
+      const nm = decl.getName?.();
+      if (!nm || exportedNames.has(nm) || seenLocal.has(nm)) return;
+      if (decl.isExported?.() || decl.hasExportKeyword?.() || decl.isDefaultExport?.()) return;
+      seenLocal.add(nm);
+      locals.push({ name: nm, kind: decl.getKindName?.() ?? "?" });
+    };
+    for (const d of sf.getFunctions()) pushLocal(d);
+    for (const d of sf.getClasses()) pushLocal(d);
+    for (const d of sf.getInterfaces()) pushLocal(d);
+    for (const d of sf.getTypeAliases()) pushLocal(d);
+    for (const d of sf.getEnums()) pushLocal(d);
+    for (const vs of sf.getVariableStatements()) {
+      if (vs.hasExportKeyword?.()) continue; // `export const …` already in getExportedDeclarations()
+      for (const d of vs.getDeclarations()) pushLocal(d);
+    }
     // Dependency edges from static imports + re-export barrels, with the set
     // of named symbols crossing each edge (used for edge weights + the ident
     // graph). importedSymbols[targetPath] = [names...].
@@ -1149,7 +1184,7 @@ function extractFacts(inc = null) {
       if (tp) addEdge(tp, ["*"]);
     }
     const imports = Object.keys(importedSymbols);
-    files[path] = { exports, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom] };
+    files[path] = { exports, locals, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom] };
     } catch (e) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
@@ -2220,8 +2255,11 @@ Usage: agentmap [command] [--json]
 
 Query commands:
   --any <q>            route a query: file → symbol → feature → live git-grep
-  --find <sym>         find exported symbols by (sub)name
+  --find <sym>         find symbols by (sub)name (exports + non-exported top-level)
   --relates <path>     a file's exports/imports/dependents + related files
+  --callers <sym> [--in <path>]
+                       compiler-accurate call sites that invoke a symbol
+                       (experimental; a deep query — warms the TS type-checker)
   --map [--focus <p>] [--tokens <n>]
                        token-budgeted ranked digest (--focus personalizes)
   --symbols [n]        top-n Aider-style ranked symbols (default 30)
@@ -2235,6 +2273,8 @@ Global modifier:
   --json               emit exactly one JSON object (no prose) for the command
   --include-dts        include .d.ts declaration files in the symbol/ranking pass
                        (default: excluded so generated types don't flood results)
+  --no-locals          hide non-exported top-level declarations from --find/--any
+                       (default: shown; they never affect --map/--hubs ranking)
 
 Maintenance:
   --install-hooks [--dry-run]
@@ -2274,15 +2314,20 @@ async function main() {
   // `.d.ts` files as full map nodes (the pre-0.11 behavior). Off by default so a
   // generated declaration file's symbols don't flood --find/--symbols/--hubs.
   if (has("--include-dts")) INCLUDE_DTS = true;
+  // --no-locals: query-time filter that hides non-exported top-level declarations
+  // (each file's `locals`) from --find/--any. `locals` are still BUILT (the cache
+  // always carries them), so this only suppresses them at read time — never a
+  // separate build, and it can never affect --map/--symbols/--hubs (they ignore locals).
+  if (has("--no-locals")) INCLUDE_LOCALS = false;
 
   // Every recognized flag (the global modifiers + maintenance flags + each
   // command + sub-flags that take a value). Anything starting with "-" that is
   // NOT in this set is an unknown flag → usage error (exit 2), not a silent build.
   const KNOWN = new Set([
-    "--json", "--include-dts", "--print",
+    "--json", "--include-dts", "--no-locals", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp",
-    "--any", "--find", "--relates", "--map", "--focus", "--tokens",
+    "--any", "--find", "--relates", "--callers", "--in", "--map", "--focus", "--tokens",
     "--symbols", "--feature", "--features", "--hubs",
   ]);
 
@@ -2290,7 +2335,7 @@ async function main() {
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--callers", "--in", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2325,7 +2370,7 @@ async function main() {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
     "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
-    "--any": [], "--find": [], "--relates": [], "--map": ["--focus", "--tokens"],
+    "--any": [], "--find": [], "--relates": [], "--callers": ["--in"], "--map": ["--focus", "--tokens"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
@@ -2419,9 +2464,12 @@ async function main() {
       // structured symbol/feature hits (reused by both prose + JSON shapes),
       // ranked by PageRank and capped so a broad query can't dump thousands.
       const symAll = [];
-      for (const [path, f] of Object.entries(data.files))
+      for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
           if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+        if (INCLUDE_LOCALS) for (const e of (f.locals || []))
+          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind, local: true });
+      }
       const symTotal = symAll.length;
       const symObjs = rankMatches(data.files, symAll).slice(0, SYMBOL_MATCH_LIMIT);
       const symTrunc = symTotal > symObjs.length;
@@ -2471,9 +2519,12 @@ async function main() {
       const q = raw.toLowerCase();
       const data = ensureFresh();
       const all = [];
-      for (const [path, f] of Object.entries(data.files))
+      for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
           if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+        if (INCLUDE_LOCALS) for (const e of (f.locals || []))
+          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
+      }
       if (!all.length) process.exitCode = 1;
       const ranked = rankMatches(data.files, all);
       const matches = ranked.slice(0, SYMBOL_MATCH_LIMIT);
@@ -2512,6 +2563,28 @@ async function main() {
           for (const [k, r] of top) console.log(`  ${k} (${r.toFixed(4)})`);
         });
       }
+    }
+  } else if (has("--callers")) {
+    const raw = arg("--callers");
+    if (!raw) { console.error("--callers needs a symbol, e.g. `--callers extractFacts`"); process.exitCode = 2; }
+    else {
+      const r = callGraph(raw, { inFilter: arg("--in") || "" });
+      const { _code, ...obj } = r;
+      if (_code) process.exitCode = _code;
+      out(obj, () => {
+        if (obj.error === "ambiguous") {
+          console.log(`callers: "${raw}" is defined in ${obj.candidates.length} files — disambiguate with --in <path>:`);
+          for (const k of obj.candidates) console.log(`  ${k}`);
+        } else if (obj.error === "no match") {
+          console.log(`callers: no symbol named "${raw}" in the map (exact match; try --find "${raw}")`);
+        } else if (obj.error === "degraded") {
+          console.log(`callers: ${raw} (${obj.file}) — ${obj.reason}`);
+        } else {
+          const foot = obj.truncated ? ` (showing top ${obj.shown} of ${obj.total} by pagerank — narrow with --in)` : "";
+          console.log(`callers of ${raw}  [${obj.file}]: ${obj.total} call site${obj.total === 1 ? "" : "s"}${foot}`);
+          for (const c of obj.callers) console.log(`  ${c.file}:${c.line} → ${c.caller}`);
+        }
+      });
     }
   } else if (has("--map")) {
     // Token-budgeted ranked digest (Aider's killer feature). --focus <path>
@@ -2683,6 +2756,103 @@ function mcpEnsureFresh() {
 // fresh process). Optional — exported only for convenience.
 function mcpResetCache() { _mcpMapCache = null; }
 
+// --- Compiler-accurate call graph (--callers) -------------------------------
+// LAZY, out-of-band, symbol-level blast radius: "who CALLS this symbol?",
+// resolved by the TS language service (ts-morph findReferencesAsNodes), NOT by
+// tree-sitter name-matching. This is the ONLY query that builds a ts-morph
+// Project outside build()/extractFacts(): Phase A resolves the symbol NAME → its
+// defining file from the CACHED map (cheap — no Project, no type-checker); only a
+// clean single-owner resolution proceeds to Phase B, which spins up the full
+// Project + type-checker (seconds on a big repo) and walks references. Nothing is
+// persisted — references go stale on any edit, so we recompute per call. The fast
+// path (build/--map/--find/--relates/--hubs) never constructs a Project, so it is
+// provably untouched. Returns a plain object; `_code` is the exit code (stripped
+// by both callers before it reaches the user).
+function callGraph(symbolName, { inFilter = "" } = {}) {
+  const data = ensureFresh();
+  // Phase A — NAME → defining file(s), from the cached map. EXACT name (not the
+  // substring match --find uses): a call graph must bind to one symbol precisely.
+  // A file that only RE-EXPORTS the name (barrel) is not a definer — exclude it
+  // via f.reExports so a re-exported symbol doesn't read as "ambiguous".
+  // Separate EXPORTED definitions from same-named private locals. A file that only
+  // RE-EXPORTS the name (barrel) is not a definer (f.reExports). Exported/shared
+  // definitions take PRECEDENCE: a same-named private local in ANOTHER file is a
+  // DIFFERENT symbol and must NOT make an exported symbol read as "ambiguous"
+  // (private names like parse/format/handler collide constantly). --in narrows
+  // across BOTH pools so a private local stays reachable when you name its file.
+  const exportOwners = [];
+  const localOwners = [];
+  for (const [path, f] of Object.entries(data.files)) {
+    const reExported = (f.reExports || []).includes(symbolName);
+    if (f.exports.some((e) => e.name === symbolName) && !reExported) exportOwners.push(path);
+    else if ((f.locals || []).some((e) => e.name === symbolName)) localOwners.push(path);
+  }
+  const owners = inFilter
+    ? [...exportOwners, ...localOwners].filter((p) => p.includes(inFilter))
+    : (exportOwners.length ? exportOwners : localOwners);
+  if (!owners.length) return { command: "callers", query: symbolName, error: "no match", candidates: [], _code: 1 };
+  if (owners.length > 1) return { command: "callers", query: symbolName, error: "ambiguous", candidates: owners, _code: 1 };
+  const fileKey = owners[0];
+  // Phase B — LAZY full Project (inc=null ⇒ language service live; NEVER the
+  // incremental branch, which loads other files as empty stubs and would hide
+  // cross-file callers). tsMorph() is the ~105ms init, fired only here.
+  const { SyntaxKind } = tsMorph();
+  const { project, vueMap } = makeProject();
+  const cwd = process.cwd().replace(/\\/g, "/");
+  const rel = (p) => { const abs = p.replace(/\\/g, "/"); return (vueMap[abs] || abs).replace(cwd + "/", ""); };
+  const sf = project.getSourceFile(`${cwd}/${fileKey}`);
+  if (!sf) return { command: "callers", query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "source not in project", total: 0, shown: 0, truncated: false, callers: [], _code: 1 };
+  // Relocate the declaration node(s). Exported: getExportedDeclarations() (the
+  // same API that built f.exports) — get() returns an ARRAY (overloads/merged), so
+  // union references across all. Non-exported: mirror the f.locals top-level getters.
+  let decls = sf.getExportedDeclarations().get(symbolName) || [];
+  if (!decls.length) {
+    const top = [
+      ...sf.getFunctions(), ...sf.getClasses(), ...sf.getInterfaces(),
+      ...sf.getTypeAliases(), ...sf.getEnums(),
+      ...sf.getVariableStatements().flatMap((v) => v.getDeclarations()),
+    ];
+    decls = top.filter((d) => d.getName?.() === symbolName);
+  }
+  if (!decls.length) return { command: "callers", query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "declaration not locatable", total: 0, shown: 0, truncated: false, callers: [], _code: 1 };
+  // Keep ONLY true call sites: a reference identifier whose parent (two-hop for
+  // `ns.foo()` member/namespace calls) is a CallExpression AND is its CALLEE, not
+  // an argument. This is the compiler-accuracy line — a type-position mention, a
+  // re-export, a bare value reference, or a same-named local in another file binds
+  // to a DIFFERENT symbol and never reaches here.
+  const seen = new Set();
+  const sites = [];
+  for (const decl of decls) {
+    let refs;
+    try { refs = decl.findReferencesAsNodes(); } catch { continue; }
+    for (const id of refs) {
+      let call = id.getParentIfKind(SyntaxKind.CallExpression);
+      const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
+      if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
+      if (!call || call.getExpression() !== (pa ?? id)) continue;
+      const file = rel(id.getSourceFile().getFilePath());
+      const line = id.getStartLineNumber();
+      const dedupe = `${file}:${line}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
+      const caller = enc?.getName?.() || enc?.getParentIfKind?.(SyntaxKind.VariableDeclaration)?.getName?.() || "<module>";
+      sites.push({ file, line, caller });
+    }
+  }
+  // Rank by the CALLING file's PageRank so important callers survive the cap (same
+  // instinct as --find), tie-broken by file then line for stable output.
+  sites.sort((x, y) =>
+    ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+    || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+  const shown = sites.slice(0, SYMBOL_MATCH_LIMIT);
+  return {
+    command: "callers", query: symbolName, symbol: symbolName, file: fileKey,
+    total: sites.length, shown: shown.length, truncated: sites.length > shown.length,
+    callers: shown, _code: sites.length ? 0 : 1,
+  };
+}
+
 function mcpQuery(name, args) {
   const a = args && typeof args === "object" ? args : {};
   const err = (code, stderr) => ({ code, obj: null, stderr });
@@ -2696,9 +2866,12 @@ function mcpQuery(name, args) {
       const keys = Object.keys(data.files);
       const { key: fileKey, candidates } = resolveFile(keys, data.files, raw);
       const symAll = [];
-      for (const [path, f] of Object.entries(data.files))
+      for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
           if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+        if (INCLUDE_LOCALS) for (const e of (f.locals || []))
+          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind, local: true });
+      }
       const symTotal = symAll.length;
       const symObjs = rankMatches(data.files, symAll).slice(0, SYMBOL_MATCH_LIMIT);
       const symTrunc = symTotal > symObjs.length;
@@ -2724,9 +2897,12 @@ function mcpQuery(name, args) {
       const q = raw.toLowerCase();
       const data = mcpEnsureFresh();
       const all = [];
-      for (const [path, f] of Object.entries(data.files))
+      for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
           if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+        if (INCLUDE_LOCALS) for (const e of (f.locals || []))
+          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
+      }
       const code = all.length ? 0 : 1;
       const ranked = rankMatches(data.files, all);
       const matches = ranked.slice(0, SYMBOL_MATCH_LIMIT);
@@ -2747,6 +2923,13 @@ function mcpQuery(name, args) {
       const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
       const top = Object.entries(rel).filter(([k]) => k !== key).sort((x, y) => y[1] - x[1]).slice(0, RELATED_LIMIT);
       return ok({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
+    }
+    case "callers": {
+      const raw = String(a.symbol ?? "");
+      if (!raw) return err(2, "callers needs a symbol, e.g. `{ symbol: \"extractFacts\" }`");
+      const r = callGraph(raw, { inFilter: String(a.in ?? "") });
+      const { _code = 0, ...obj } = r;
+      return ok(obj, _code);
     }
     case "map": {
       const focusArg = (a.focus != null && String(a.focus) !== "") ? String(a.focus) : undefined;

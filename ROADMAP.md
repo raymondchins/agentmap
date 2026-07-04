@@ -306,17 +306,25 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   longer crash or fabricate a hit. *(correctness/medium)*
 
 ### Resolution gaps beyond tsconfig (uncovered — needed for monorepo depth)
-- [ ] `package.json` `"imports"` subpath maps (`#internal/*`) — currently only
-  matched against tsconfig aliases.
+- [x] `package.json` `"imports"` subpath maps (`#internal/*`) — resolve to source
+  (JSON-parsed, never executed) alongside tsconfig / vite / workspace resolution.
 - [x] `vite.config` / webpack `resolve.alias` (zero support today).
 - [x] Workspace cross-package resolution (`import '@org/pkg'` → `packages/pkg/src`
   via pnpm/npm workspaces).
 
 ### The depth features (competitive bets #1 and #4)
-- [ ] **Compiler-accurate call graph** — use ts-morph's language-service reference
-  finding to add call-site edges + symbol-level blast radius. Market head-to-head
-  vs tree-sitter noise ("the only repo map whose TS call graph comes from the
-  actual compiler"). Accept build cost via lazy per-file reference resolution.
+- [x] **Non-exported symbol indexing** — `--find` / `--any` (+ MCP) surface
+  non-exported top-level declarations as discovery-only `locals`; never ranked, so
+  `--map` / `--symbols` / `--hubs` stay byte-identical. `--no-locals` opts out.
+  (schema 4). A precursor to the call-graph + BM25 bets below.
+- [x] **Compiler-accurate call graph — `--callers`** — ts-morph language-service
+  reference finding resolves who CALLS a symbol (compiler-accurate, not tree-sitter
+  name-matching): type-position mentions, re-exports, and same-named locals in other
+  files are never mis-attributed. Lazy + out-of-band (spins up the type-checker only
+  on the query) so the map build + every other query stay fast; nothing persisted.
+  Exposed as CLI `--callers` + the `callers` MCP tool. Experimental.
+- [ ] **Call graph, remaining** — outgoing `--calls` (what a symbol invokes) and
+  optional symbol-level PageRank / transitive `--depth`.
 - [ ] **Monorepo/framework intelligence** — first-class pnpm/turborepo/nx (per-package
   maps, cross-package edges), React server/client boundaries, tRPC routers, Prisma
   schema links, barrel-file flattening. Add a CI-buildable, compressed,

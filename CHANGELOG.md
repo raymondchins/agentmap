@@ -5,6 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-04
+
+### Added
+- **Non-exported top-level symbols are now findable.** `--find` / `--any` (and their
+  MCP tools) surface non-exported module-scope declarations — function, class,
+  interface, type, enum, and top-level `const` — not just exports, so
+  reuse-before-rebuild works for a private helper too. They are **discovery-only**:
+  `rankSymbols` / `--map` / `--symbols` / `--hubs` never read them, so the focused
+  ranked digest stays byte-identical (a local can never enter `rankedSymbols` or trip
+  the definer-rarity penalty). Only module-scope declarations are indexed — nested
+  body-locals are not. Each local hit carries `local: true`; `--no-locals` hides them
+  at query time. Schema bumped 3 → 4, so old caches rebuild once on upgrade.
+- **Compiler-accurate call graph (`--callers <symbol>`).** Symbol-level blast
+  radius — "who calls this function?" — resolved by the TypeScript language service
+  (ts-morph `findReferencesAsNodes`), NOT tree-sitter name-matching: a type-position
+  mention, a re-export, a bare value reference, or a same-named private local in
+  another file is never mis-attributed. Also exposed as the `callers` MCP tool. A
+  deliberate DEEP query — it lazily spins up the TS type-checker (seconds on a large
+  repo) only when invoked, so the map build and every other query stay fast and
+  nothing is persisted to `map.json`. `--in <path>` disambiguates a name defined in
+  multiple files (exported definitions take precedence over same-named private
+  locals); results are ranked by caller-file PageRank and capped. Experimental.
+
 ## [0.12.3] - 2026-07-04
 
 ### Added
@@ -520,7 +543,8 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/raymondchins/agentmap/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/raymondchins/agentmap/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/raymondchins/agentmap/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/raymondchins/agentmap/compare/v0.12.0...v0.12.1
