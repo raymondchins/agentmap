@@ -673,6 +673,18 @@ function extractFacts(inc = null) {
   // src/node_modules_helper.ts are NOT wrongly excluded.
   const excluded = (p) => { const segs = p.split("/"); return segs.includes("node_modules") || segs.includes(".next"); };
 
+  // Map-health counters (fed into edgeCoverage / the degraded signal in
+  // assemble). We only tally import sites that LOOK repo-local — relative
+  // (`./`, `../`) or an alias sigil (`@/`, `~/`, `~`, `#`) that's never a valid
+  // bare package name — so React/Next/etc. node_modules imports don't drag the
+  // coverage down on a perfectly healthy repo. A local-looking site is "resolved"
+  // when it lands a non-excluded in-project edge; when a whole repo's aliases live
+  // only in vite.config/webpack (which we don't read) they all miss → coverage
+  // collapses toward 0, which is the honest signal we surface.
+  let localSites = 0, resolvedSites = 0;
+  const ALIAS_SIGIL = /^(@[\\/]|~[\\/]|~$|#)/;
+  const expectedLocal = (spec) => spec.startsWith(".") || ALIAS_SIGIL.test(spec);
+
   // Resolve a relative module specifier (from the importing file's dir) to an
   // in-project source file key. Tries the bare path, then each extension, then
   // /index.*. Returns the rel key or null. Powers side-effect (6b) + dynamic
@@ -778,13 +790,18 @@ function extractFacts(inc = null) {
     };
     for (const imp of sf.getImportDeclarations()) {
       if (imp.isTypeOnly()) continue; // type-only modules must not inflate runtime PageRank
+      // Map-health: a repo-local-looking specifier is one edgeCoverage counts.
+      const local = expectedLocal(imp.getModuleSpecifierValue());
+      if (local) localSites++;
       const t = imp.getModuleSpecifierSourceFile();
       if (t) {
         // skip individual type-only named specifiers (`import { type X }`)
         const names = imp.getNamedImports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
         if (imp.getDefaultImport()) names.push("default"); // resolved to the real name in a post-pass below
         if (imp.getNamespaceImport()) names.push("*");
-        addEdge(rel(t.getFilePath()), names.length ? names : ["*"]);
+        const tp = rel(t.getFilePath());
+        if (local && !excluded(tp)) resolvedSites++; // landed a non-excluded in-project edge
+        addEdge(tp, names.length ? names : ["*"]);
       } else {
         // 6b: side-effect or alias import — ts-morph may not resolve when cwd
         // tsconfig lacks package paths; resolveSpec uses nearest tsconfig paths.
@@ -794,6 +811,7 @@ function extractFacts(inc = null) {
           const names = imp.getNamedImports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
           if (imp.getDefaultImport()) names.push("default");
           if (imp.getNamespaceImport()) names.push("*");
+          if (local && !excluded(tp)) resolvedSites++; // resolved via nearest tsconfig alias
           addEdge(tp, names.length ? names : ["*"]);
         }
       }
@@ -833,6 +851,12 @@ function extractFacts(inc = null) {
       process.stderr.write(`# agentmap: skipped ${path} (parse error: ${e?.message ?? e})\n`);
     }
   }
+  // Stash map-health counters on a NON-ENUMERABLE property so assemble() can read
+  // them without them ever reaching map.json (JSON.stringify / for-in / Object.*
+  // and structuredClone all skip non-enumerable props — verified byte-safe). Only
+  // on a full parse: an incremental run parses just the changed files, so its
+  // counts would be partial and are recomputed as null downstream instead.
+  if (!inc) Object.defineProperty(files, "__edgeStats", { value: { localSites, resolvedSites }, enumerable: false, configurable: true });
   return files;
 }
 
@@ -904,9 +928,25 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   // `files` shape (map.json) stays byte-identical.
   for (const p of nodes) { delete files[p].defaultExportName; delete files[p].reExportsFrom; }
 
+  // Map health: fraction of repo-local-looking import sites that resolved to an
+  // in-project edge. Reported for the CLEAN full build only (target === MAP): a
+  // dirty rebuild (map.dirty.json, either tier) is modify-only on an already-mapped
+  // repo, and — critically — the Tier-2 incremental path parses only the changed
+  // files, so it carries no whole-repo __edgeStats. Gating on target keeps the full
+  // and incremental dirty builds BYTE-IDENTICAL (both → null), the invariant the
+  // incremental suite asserts. __edgeStats rides in on a full parse (non-enumerable,
+  // so it never reached JSON). No local sites at all (0) → null, not 0/0.
+  const es = target === MAP ? files.__edgeStats : null;
+  const edgeCoverage = es && es.localSites > 0 ? +(es.resolvedSites / es.localSites).toFixed(4) : null;
+  // Degraded = a non-trivial repo where almost no local imports resolved — the
+  // "154 files, 3 edges" garbage-framed-as-success case. High bar (fileCount>10 &&
+  // coverage<0.15) so a normal healthy repo (coverage near 1) never trips it.
+  const degraded = edgeCoverage !== null && nodes.length > 10 && edgeCoverage < 0.15;
+
   const sha = currentSha();
   const out = {
     schema: SCHEMA_VERSION, generatedSha: sha, dirty: dirtyCount(), fileCount: nodes.length,
+    edgeCoverage, degraded,
     // fingerprint lets non-git repos (sha === "") trust the cache across runs.
     fingerprint: sha ? undefined : sourceFingerprint(),
     hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), files,
@@ -931,6 +971,17 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
     } catch {}
   }
   process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms\n`);
+  // Map-health signal — clean full build only (target === MAP), so a dirty query's
+  // map.dirty.json rebuild never repeats it. One honest line when the map is empty
+  // or almost nothing connected, so a stranger doesn't read "built 0 files" / a
+  // flat map as success and uninstall.
+  if (target === MAP) {
+    if (nodes.length === 0) {
+      process.stderr.write("⚠ 0 source files found (repo not git-tracked? non-standard dir layout?)\n");
+    } else if (degraded) {
+      process.stderr.write(`⚠ ${nodes.length} files, ${fileEdges.length} import edge${fileEdges.length === 1 ? "" : "s"} resolved — most imports unresolved. Aliases from vite.config/webpack aren't read yet; mirror them into tsconfig paths, or file an issue.\n`);
+    }
+  }
   return out;
 }
 
@@ -2253,7 +2304,7 @@ async function main() {
     // {command:"build", ...} JSON object.
     const built = build();
     const topHub = built.hubs[0] || null;
-    out({ command: "build", fileCount: built.fileCount, features: Object.fromEntries(Object.entries(built.features).map(([k, v]) => [k, v.length])), topHub }, () => {
+    out({ command: "build", fileCount: built.fileCount, features: Object.fromEntries(Object.entries(built.features).map(([k, v]) => [k, v.length])), topHub, edgeCoverage: built.edgeCoverage, degraded: built.degraded }, () => {
       console.log(`agentmap: ${built.fileCount} files | ${Object.keys(built.features).length} features | top hub: ${topHub || "—"}`);
     });
   }
