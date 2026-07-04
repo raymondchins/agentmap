@@ -419,8 +419,9 @@ See [The `--any` router](#the---any-router) above. Default first move for any
 
 ### `--find <q>` — reuse-before-rebuild symbol search
 
-Find every exported symbol whose name contains the query. Use it before writing a new util
-or component to check what already exists.
+Find every symbol whose name contains the query — exported symbols **plus** non-exported
+top-level declarations. Use it before writing a new util or component to check what already
+exists (a private helper counts as reusable too).
 
 ```
 $ node agentmap.mjs --find Message
@@ -459,6 +460,29 @@ related (random-walk relevance):
   app/(chat)/api/chat/route.ts (0.0218)
   …
 ```
+
+### `--callers <sym>` — compiler-accurate call graph (experimental)
+
+Who actually **calls** a symbol, resolved by the TypeScript language service (`ts-morph`
+`findReferencesAsNodes`) — not tree-sitter name-matching. This is symbol-level blast radius:
+a type-position mention (`typeof foo`), a re-export, a bare value reference (`const x = foo`),
+or a same-named private local in another file is a *different* symbol and is never
+mis-attributed. `--in <path>` disambiguates a name defined in more than one file (exported
+definitions win over same-named private locals); results are ranked by caller-file PageRank
+and capped.
+
+```
+$ node agentmap.mjs --callers getMessageByErrorCode
+callers of getMessageByErrorCode  [lib/errors.ts]: 3 call sites
+  app/(chat)/api/chat/route.ts:88 → POST
+  lib/db/queries.ts:142 → saveMessage
+  components/chat/message.tsx:57 → PureMessage
+```
+
+A deliberate **deep query**: it lazily spins up the TS type-checker (a few seconds on a large
+repo) *only* when invoked — the map build and every other query never pay that cost, and
+nothing is persisted. Accurate on statically-resolvable calls; dynamic dispatch, reflection,
+and string-keyed access are beyond any static tool. Also available as the `callers` MCP tool.
 
 ### `--feature <name>` — files that make up a feature
 
@@ -638,10 +662,12 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
   `.js/.jsx/.mjs/.cjs` and the `<script>` blocks of `.vue` single-file components
   (best-effort). No Python, Go, Rust, etc. — if your repo isn't TypeScript/JavaScript, use a
   tree-sitter-based tool instead. Support for other languages is a possible future direction.
-- **File-level import graph, not a full reference graph.** Edges come from static
-  `import` / re-export declarations and the named symbols crossing them. It does **not**
-  do call-site or full reference resolution — `--relates` tells you which files import a
-  module, not every line that calls a given function.
+- **The persisted map is a file-level import graph; the call graph is opt-in.** The
+  cached map's edges come from static `import` / re-export declarations and the named
+  symbols crossing them — `--relates` answers the file-level question ("who imports this
+  module"). Symbol-level, compiler-accurate call-site resolution is available on demand via
+  `--callers` (experimental) — a lazy, out-of-band query that spins up the type-checker only
+  when invoked and is never folded into the fast map build.
 - **Alias & workspace resolution.** Resolves `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/
   `webpack` `resolve.alias` (string entries, parsed from the AST — the config is **never
   executed**), and pnpm/npm/yarn workspace cross-package imports (`@org/pkg` → its source).

@@ -62,13 +62,19 @@ const TOOLS = [
   },
   {
     name: "find",
-    description: "Find every exported symbol whose name matches (substring, case-insensitive). Use to locate a function/class/type before rebuilding it.",
+    description: "Find every symbol whose name matches (substring, case-insensitive) — exported symbols plus non-exported top-level declarations. Use to locate a function/class/type before rebuilding it.",
     inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports.") }, required: ["symbol"] },
   },
   {
     name: "relates",
     description: "Blast radius for a file: its exports, imports, direct dependents, and the files most related to it by random-walk relevance. Use before editing to see who breaks.",
     inputSchema: { type: "object", properties: { path: str("File path, basename, or unique substring identifying the target file.") }, required: ["path"] },
+  },
+  {
+    name: "callers",
+    description:
+      "Compiler-accurate call graph: every call site that INVOKES a symbol, resolved by the TypeScript language service (not tree-sitter name-matching) — so a type-position mention, a re-export, or a same-named local in another file is never mis-attributed. Symbol-level blast radius: 'who breaks if I change this function'. A deliberate DEEP query — the first call warms the TS type-checker (seconds on a large repo); lazy + out-of-band so the normal map stays fast. Experimental.",
+    inputSchema: { type: "object", properties: { symbol: str("Symbol name to find callers of (exact match)."), in: str("Optional defining-file path substring to disambiguate a name defined in more than one file.") }, required: ["symbol"] },
   },
   {
     name: "map",
