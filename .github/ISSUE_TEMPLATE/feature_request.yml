@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an improvement within agentmap's TS/JS-first, one-dependency scope
+labels: [enhancement]
+body:
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check (see CONTRIBUTING.md)
+      options:
+        - label: "This does NOT add a runtime dependency (ts-morph is the only one)."
+          required: true
+        - label: "This is NOT a new language backend (Python/Go/etc.)."
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: "What can't you do today? What query or workflow falls short?"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: "Sketch the command / output. Example: `agentmap --foo <x>` → …"
+    validations:
+      required: true

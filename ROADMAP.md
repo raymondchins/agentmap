@@ -341,9 +341,11 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   maps, cross-package edges), React server/client boundaries, tRPC routers, Prisma
   schema links, barrel-file flattening. Add a CI-buildable, compressed,
   team-shareable map artifact.
-- [ ] **Hybrid lexical retrieval without embeddings** (bet #5) — a pure-JS BM25/FTS
-  stage fused with the PageRank symbol graph for vague NL queries; real tokenizer
-  budgets (tiktoken-style) replacing chars/4. Keeps the no-vector-DB positioning.
+- [x] **Hybrid lexical retrieval without embeddings** (bet #5) — pure-JS BM25 over
+  split-identifier tokens (name + path + feature + kind), fused with file PageRank,
+  built into `map.json`. `--search <q>` + a rung in `--any` (fires only on exact-miss,
+  so exact routing stays byte-identical) + `search` MCP tool. No vector DB.
+  (Follow-up: tiktoken-style token budgets replacing chars/4.)
 
 ### User-configurable scoping (predictable first GitHub issue)
 - [x] **`.agentmapignore` / config** — skip-list is hardcoded to
@@ -440,8 +442,9 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   not SHA — a hardening gap the SECURITY.md advertises.
 - [ ] Consider a neutral `.agentmap/` cache path (currently `.claude/agentmap/`
   even for Gemini/Codex/Cursor users) with back-compat.
-- [ ] `--export dot|mermaid` graph export (the data exists in `map.json`) — cheap
-  ask + marketing demo surface.
+- [x] `--export dot|mermaid` — file import graph → Graphviz DOT / Mermaid, top-N by
+  pagerank, 3 style tiers, `--focus` scopes to a neighborhood; reads the cached map
+  (no ts-morph Project). (Call-graph closure export = future v2.)
 
 ---
 

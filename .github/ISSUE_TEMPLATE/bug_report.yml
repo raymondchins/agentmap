@@ -1,0 +1,48 @@
+name: Bug report
+description: agentmap returned wrong/stale results, crashed, or a query misbehaved
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: agentmap version
+      description: "Output of: npx @raymondchins/agentmap --version"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: "node --version (must be >=18)"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where did you run it?
+      options:
+        - CLI direct
+        - Claude Code
+        - Cursor
+        - Codex
+        - OpenCode
+        - Gemini
+        - MCP
+  - type: textarea
+    id: repro
+    attributes:
+      label: Command + repro
+      description: "The exact agentmap command, and (if shareable) a minimal repo / tsconfig shape that reproduces it."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "agentmap --doctor --json output (optional)"
+      render: json

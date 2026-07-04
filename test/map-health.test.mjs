@@ -100,8 +100,8 @@ test("healthy repo: no warning, degraded:false, high edgeCoverage, existing fiel
   const { edgeCoverage, degraded, ...rest } = m;
   assert.deepEqual(
     Object.keys(rest),
-    ["schema", "generatedSha", "dirty", "fileCount", "hubs", "features", "rankedSymbols", "files"],
-    "pre-existing top-level keys must be unchanged when the two new keys are removed",
+    ["schema", "generatedSha", "dirty", "fileCount", "hubs", "features", "rankedSymbols", "lexical", "files"],
+    "pre-existing top-level keys must be unchanged when the two new keys are removed (plus the additive `lexical` index)",
   );
   cleanup(dir);
 });

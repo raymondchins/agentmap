@@ -38,7 +38,7 @@ const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for 
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
 // persisted for --find/--any discovery. Old caches (which lack `locals`) rebuild
 // on upgrade so a private helper becomes findable without waiting for the next commit.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 // --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
 // The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
@@ -123,8 +123,14 @@ const SYMBOL_MATCH_LIMIT = 50;   // max --find/--any symbol matches shown (ranke
 const DEPTH_CAP = 5;             // hard ceiling on --callers/--calls --depth (transitive call graph)
 const CLOSURE_FRONTIER_CAP = 200; // per-level frontier cap for --depth traversal (hub-explosion guard)
 const CLOSURE_TOTAL_CAP = 500;   // global emitted-node cap across all --depth levels
+const BM25_K1 = 1.2;             // BM25 term-frequency saturation (classic default)
+const BM25_B = 0.75;            // BM25 length normalization (classic default)
+const PR_WEIGHT = 0.5;          // PageRank fusion strength: finalScore = bm25 * (1 + PR_WEIGHT*normPR)
+const LEXICAL_DOC_LIMIT = 5000; // max symbol-docs indexed into map.json (monorepo bloat guard)
+const LEXICAL_STOPWORDS = new Set(["the", "a", "an", "that", "which", "is", "of", "for", "to", "where", "in", "and", "or"]);
 const RELATED_LIMIT = 10;        // # of related files shown by --relates
 const SYMS_PER_FILE = 8;         // per-file symbol cap in the --map digest
+const EXPORT_NODE_CAP = 60;      // max nodes in --export dot/mermaid (top-N by pagerank) so a big repo stays readable
 const DEFAULT_SYMBOLS = 30;      // default count for --symbols with no n
 const MAXBUF = 64 * 1024 * 1024; // child_process maxBuffer — avoid ENOBUFS on big git output
 
@@ -259,6 +265,50 @@ const rankMatches = (files, matches) =>
     (files[b.file]?.pagerank ?? 0) - (files[a.file]?.pagerank ?? 0)
     || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
+// Split an identifier / path segment into lowercased subtokens on camelCase,
+// snake_, kebab-, and digit boundaries. `rankMatches`→[rank,matches];
+// `authRetry`→[auth,retry]; `src/lib/http2Client`→[src,lib,http,client]. The
+// SINGLE tokenizer used by BOTH the lexical corpus and the query, so they can
+// never drift.
+function splitIdent(s) {
+  return String(s)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")    // camelCase boundary
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2") // HTTPClient → HTTP Client
+    .split(/[^a-zA-Z0-9]+|(?<=[a-zA-Z])(?=[0-9])|(?<=[0-9])(?=[a-zA-Z])/)
+    .map((t) => t.toLowerCase())
+    .filter(Boolean);
+}
+
+// BM25 lexical retrieval over the persisted per-symbol index (`data.lexical`),
+// fused with file PageRank so a strong hit in an important file wins ties. Answers
+// vague NL queries ("where's the auth retry logic") that exact --find/--any miss.
+// Pure + dependency-free. Returns { matches:[{file,name,kind,score}], total }.
+function bm25Search(lexical, files, rawQuery, { limit = SYMBOL_MATCH_LIMIT } = {}) {
+  if (!lexical || !lexical.docs || !lexical.docs.length) return { matches: [], total: 0 };
+  const qToks = splitIdent(rawQuery).filter((t) => !LEXICAL_STOPWORDS.has(t));
+  if (!qToks.length) return { matches: [], total: 0 };
+  const { N, avgdl, df, docs } = lexical;
+  let maxPr = 0;
+  for (const p in files) maxPr = Math.max(maxPr, files[p].pagerank || 0);
+  const scored = [];
+  for (const d of docs) {
+    let s = 0;
+    for (const t of qToks) {
+      const tf = d.tf[t];
+      if (!tf) continue;
+      const n = df[t] || 0;
+      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+      s += idf * (tf * (BM25_K1 + 1)) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * (d.len / (avgdl || 1))));
+    }
+    if (s <= 0) continue;
+    const normPr = maxPr ? (files[d.file]?.pagerank || 0) / maxPr : 0;
+    scored.push({ file: d.file, name: d.name, kind: d.kind, score: +(s * (1 + PR_WEIGHT * normPr)).toFixed(6) });
+  }
+  scored.sort((a, b) => b.score - a.score
+    || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { matches: scored.slice(0, limit), total: scored.length };
+}
+
 // Best-effort source fingerprint for NON-git repos (sha == ""). Hash of sorted
 // "path:mtimeMs:size" for source files so the cache can be trusted between runs
 // without a full reparse. Skips node_modules/.git/.next. Any error ⇒ "" (caller
@@ -388,6 +438,23 @@ function featureOf(path) {
   for (const p of m[1].split("/").slice(0, -1)) {
     if (p.startsWith("(") || p.startsWith("[") || p.startsWith("@")) continue;
     return p;
+  }
+  return null;
+}
+
+// React Server/Client boundary — read the directive PROLOGUE (compiler-accurate,
+// not a text grep): the leading string-literal ExpressionStatements. Returns
+// 'client' for `'use client'`, 'server' for `'use server'`, else null. Tolerates
+// other prologue directives (`'use strict'`) and stops at the first non-directive
+// statement. `SyntaxKind` is passed in so this stays a pure module-scope helper.
+function rscBoundary(sf, SyntaxKind) {
+  for (const st of sf.getStatements()) {
+    if (st.getKind() !== SyntaxKind.ExpressionStatement) break; // prologue ended
+    const e = st.getExpression();
+    if (e.getKind() !== SyntaxKind.StringLiteral) break;
+    const v = e.getLiteralText();
+    if (v === "use client") return "client";
+    if (v === "use server") return "server";
   }
   return null;
 }
@@ -928,6 +995,7 @@ function makeProject(inc = null) {
 //   importedSymbols: { [targetPath]: [names…] },        // "default"/"*" still literal
 //   defaultExportName: string | null,                   // resolved default-export name
 //   reExports:       [names…],                          // pass-through re-exports (barrels)
+//   rsc:             'client' | 'server',                // React Server/Client boundary directive — absent if none
 // } }
 // A single pathological file is skipped + warned, never fatal (graceful degrade).
 // ---------------------------------------------------------------------------
@@ -1187,7 +1255,8 @@ function extractFacts(inc = null) {
       if (tp) addEdge(tp, ["*"]);
     }
     const imports = Object.keys(importedSymbols);
-    files[path] = { exports, locals, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom] };
+    const rsc = rscBoundary(sf, SyntaxKind);
+    files[path] = { exports, locals, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom], ...(rsc ? { rsc } : {}) };
     } catch (e) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
@@ -1260,6 +1329,31 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   // --- Symbol ranking (Aider-style): identifier graph from named imports.
   const rankedSymbols = rankSymbols(files, null);
 
+  // Lexical (BM25) index: one doc per symbol, token bag = split(name) + split(path
+  // minus ext) + feature + kind. Pure term-frequency counting — no ts-morph, no
+  // type-checker, O(tokens) — capped so a giant monorepo can't bloat map.json.
+  // Powers --search + the --any lexical rung. Additive; rides build()/dirty/
+  // incremental alike (shared assemble). SCHEMA_VERSION was bumped to 5 for it.
+  const lexDocs = [];
+  const df = Object.create(null);
+  for (const [p, f] of Object.entries(files)) {
+    if (lexDocs.length >= LEXICAL_DOC_LIMIT) break;
+    const pathToks = splitIdent(p.replace(CODE_EXT_RE, "").replace(/\.vue$/, ""));
+    const feat = featureOf(p);
+    const featToks = feat ? splitIdent(feat) : [];
+    for (const e of [...(f.exports || []), ...(f.locals || [])]) {
+      if (lexDocs.length >= LEXICAL_DOC_LIMIT) break;
+      const kind = (e.kind || "").replace(/Declaration$/, "").toLowerCase();
+      const toks = [...splitIdent(e.name), ...pathToks, ...featToks, kind].filter(Boolean);
+      const tf = Object.create(null);
+      for (const t of toks) tf[t] = (tf[t] || 0) + 1;
+      for (const t of Object.keys(tf)) df[t] = (df[t] || 0) + 1;
+      lexDocs.push({ file: p, name: e.name, kind: e.kind, tf, len: toks.length });
+    }
+  }
+  const avgdl = lexDocs.length ? lexDocs.reduce((s, d) => s + d.len, 0) / lexDocs.length : 0;
+  const lexical = { N: lexDocs.length, avgdl: +avgdl.toFixed(4), df, docs: lexDocs };
+
   // hubs: now PageRank-ranked (raw dependent count shown alongside).
   const hubs = nodes
     .map((p) => [p, files[p].pagerank, files[p].dependents.length])
@@ -1293,7 +1387,7 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
     edgeCoverage, degraded,
     // fingerprint lets non-git repos (sha === "") trust the cache across runs.
     fingerprint: sha ? undefined : sourceFingerprint(),
-    hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), files,
+    hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), lexical, files,
   };
   // `extra` (dirty-map cache key etc.) is merged for non-default targets only;
   // a default clean build passes extra=null so map.json stays byte-identical.
@@ -1623,6 +1717,47 @@ function fileBlock(key, f) {
   console.log(`exports (${f.exports.length}): ${f.exports.map((e) => `${e.name}(${e.kind})`).join(", ") || "—"}`);
   console.log(`imports (${f.imports.length}): ${f.imports.join(", ") || "—"}`);
   console.log(`dependents (${f.dependents.length}): ${f.dependents.join(", ") || "—"}`);
+  if (f.rsc) console.log(`boundary: ${f.rsc === "client" ? "'use client' (client component)" : "'use server' (server module/actions)"}`);
+}
+
+// --- Graph serializers for `--export` (pure, read the cached map only — no
+// ts-morph Project, so the fast path is untouched). Emit the FILE import graph
+// (nodes=files, edges=imports) as Graphviz DOT or Mermaid. Nodes bucket into 3
+// PageRank tiers for light styling; Mermaid uses sanitized n0,n1,… ids (its ids
+// can't hold slashes/dots) with the real path in the label, DOT quotes the path.
+function _tier(pr, max) { if (max <= 0) return "leaf"; const r = pr / max; return r >= 0.5 ? "hub" : r >= 0.15 ? "mid" : "leaf"; }
+function toDot(nodes, edges, meta) {
+  const max = Math.max(0, ...nodes.map((n) => n.pagerank));
+  const L = [
+    `// agentmap import graph — ${meta.fileCount} files, sha ${meta.sha}${meta.focus ? `, focus ${meta.focus}` : ""}${meta.capped ? `, top ${meta.shown} by pagerank` : ""}`,
+    "digraph agentmap {",
+    "  rankdir=LR;",
+    '  node [shape=box, style="rounded,filled", fillcolor="#f5f5f5", fontname="sans-serif"];',
+  ];
+  for (const n of nodes) {
+    const t = _tier(n.pagerank, max);
+    const st = t === "hub" ? ', fillcolor="#d9d9d9", penwidth=2' : t === "mid" ? ', fillcolor="#ececec"' : "";
+    L.push(`  ${JSON.stringify(n.path)} [label=${JSON.stringify(n.path)}${st}];`);
+  }
+  for (const e of edges) L.push(`  ${JSON.stringify(e.from)} -> ${JSON.stringify(e.to)};`);
+  L.push("}");
+  return L.join("\n");
+}
+function toMermaid(nodes, edges, meta) {
+  const max = Math.max(0, ...nodes.map((n) => n.pagerank));
+  const id = new Map();
+  nodes.forEach((n, i) => id.set(n.path, `n${i}`));
+  const esc = (s) => s.replace(/"/g, "&quot;");
+  const L = [
+    `%% agentmap import graph — ${meta.fileCount} files, sha ${meta.sha}${meta.focus ? `, focus ${meta.focus}` : ""}${meta.capped ? `, top ${meta.shown} by pagerank` : ""}`,
+    "flowchart TD",
+    "  classDef hub fill:#d9d9d9,stroke:#333,stroke-width:2px;",
+    "  classDef mid fill:#ececec;",
+    "  classDef leaf fill:#f8f8f8;",
+  ];
+  for (const n of nodes) L.push(`  ${id.get(n.path)}["${esc(n.path)}"]:::${_tier(n.pagerank, max)}`);
+  for (const e of edges) L.push(`  ${id.get(e.from)} --> ${id.get(e.to)}`);
+  return L.join("\n");
 }
 
 // Strip // line comments and /* */ block comments from a JSONC string WITHOUT
@@ -2259,6 +2394,7 @@ Usage: agentmap [command] [--json]
 Query commands:
   --any <q>            route a query: file → symbol → feature → live git-grep
   --find <sym>         find symbols by (sub)name (exports + non-exported top-level)
+  --search <q>         rank symbols by BM25 lexical relevance (vague NL queries)
   --relates <path>     a file's exports/imports/dependents + related files
   --callers <sym> [--in <path>] [--depth N]
                        compiler-accurate call sites that invoke a symbol
@@ -2273,6 +2409,9 @@ Query commands:
   --features           list all features (route segments) by size
   --hubs               top files by PageRank importance
   --print              dump the full cached map as JSON
+  --export <mermaid|dot> [--focus <p>]
+                       print the file import graph as Mermaid / Graphviz DOT
+                       (nodes=files, edges=imports, top-N by pagerank; --focus scopes)
   (no flags)           build the map + print a one-line summary
 
 Global modifier:
@@ -2333,7 +2472,7 @@ async function main() {
     "--json", "--include-dts", "--no-locals", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp",
-    "--any", "--find", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--focus", "--tokens",
+    "--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--export", "--focus", "--tokens",
     "--symbols", "--feature", "--features", "--hubs",
   ]);
 
@@ -2341,7 +2480,7 @@ async function main() {
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--callers", "--calls", "--in", "--depth", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2376,12 +2515,17 @@ async function main() {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
     "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
-    "--any": [], "--find": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"],
+    "--any": [], "--find": [], "--search": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
   if (presentCommands.length > 1) {
     console.error(`conflicting commands: ${presentCommands.join(", ")} — pass exactly one.\ntry \`agentmap --help\` for the list of commands.`);
+    process.exit(2);
+  }
+  // --export owns stdout (it prints graph text); --json is a competing output contract.
+  if (has("--export") && has("--json")) {
+    console.error("--export writes graph text to stdout; it is not compatible with --json.\ntry `agentmap --help`.");
     process.exit(2);
   }
   // sub-flag → its declared parent command(s). A sub-flag shared by two commands
@@ -2504,19 +2648,44 @@ async function main() {
           for (const k of candidates) console.log(`  ${k}`);
         });
       } else {
-        const res = contentSearch(raw);
-        if (!res) {
-          process.exitCode = 1;
-          out({ command: "any", query: raw, kind: "empty" }, () => console.log(`[content] 0 match for "${raw}" (git grep, tracked + untracked)`));
-        } else {
-          const lines = res.split("\n");
-          const shown = lines.slice(0, CONTENT_LINES_LIMIT);
-          out({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown }, () => {
-            console.log(`[content] ${lines.length} line${lines.length > 1 ? "s" : ""}${lines.length > CONTENT_LINES_LIMIT ? ` (showing ${CONTENT_LINES_LIMIT})` : ""}:`);
-            console.log(shown.join("\n"));
+        // Lexical (BM25) rung — fires ONLY when exact file/symbol/feature matching
+        // found nothing, so every existing --any assertion stays byte-identical. If
+        // BM25 is also empty, fall through to the git-grep content search as before.
+        const lex = bm25Search(data.lexical, data.files, raw);
+        if (lex.matches.length) {
+          const trunc = lex.total > lex.matches.length;
+          out({ command: "any", query: raw, kind: "lexical", matches: lex.matches, total: lex.total, shown: lex.matches.length, truncated: trunc }, () => {
+            console.log(`[lexical] ${lex.total} match for "${raw}"${trunc ? ` (showing top ${lex.matches.length} by relevance)` : ""}:`);
+            console.log(lex.matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})  [${m.score}]`).join("\n"));
           });
+        } else {
+          const res = contentSearch(raw);
+          if (!res) {
+            process.exitCode = 1;
+            out({ command: "any", query: raw, kind: "empty" }, () => console.log(`[content] 0 match for "${raw}" (git grep, tracked + untracked)`));
+          } else {
+            const lines = res.split("\n");
+            const shown = lines.slice(0, CONTENT_LINES_LIMIT);
+            out({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown }, () => {
+              console.log(`[content] ${lines.length} line${lines.length > 1 ? "s" : ""}${lines.length > CONTENT_LINES_LIMIT ? ` (showing ${CONTENT_LINES_LIMIT})` : ""}:`);
+              console.log(shown.join("\n"));
+            });
+          }
         }
       }
+    }
+  } else if (has("--search")) {
+    const raw = arg("--search");
+    if (!raw) { console.error('--search needs a query, e.g. `--search "auth retry logic"`'); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      const lex = bm25Search(data.lexical, data.files, raw);
+      if (!lex.matches.length) process.exitCode = 1;
+      const trunc = lex.total > lex.matches.length;
+      out({ command: "search", query: raw, total: lex.total, shown: lex.matches.length, truncated: trunc, matches: lex.matches }, () => {
+        console.log(`search "${raw}": ${lex.total} match${trunc ? ` (showing top ${lex.matches.length} by relevance)` : ""}`);
+        if (lex.matches.length) console.log(lex.matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})  [${m.score}]`).join("\n"));
+      });
     }
   } else if (has("--find")) {
     const raw = arg("--find");
@@ -2562,7 +2731,7 @@ async function main() {
           for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
         const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
         const top = Object.entries(rel).filter(([k]) => k !== key).sort((a, b) => b[1] - a[1]).slice(0, RELATED_LIMIT);
-        out({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
+        out({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
           console.log(`relates: ${key}  (pr ${f.pagerank ?? "—"})`);
           fileBlock(key, f);
           console.log(`related (random-walk relevance):`);
@@ -2701,6 +2870,37 @@ async function main() {
           console.log(`\n${file}:\n` + symbols.map((s) => `  ${s.name} (${s.kind})`).join("\n"));
         console.log(`\n# ~${used} tokens (${shownFiles.length} files shown)`);
       });
+    }
+  } else if (has("--export")) {
+    const fmt = arg("--export");
+    if (fmt !== "mermaid" && fmt !== "dot") { console.error("--export needs a format: `--export mermaid` or `--export dot`"); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      const focusArg = arg("--focus");
+      if (has("--focus") && !focusArg) { console.error("--focus needs a file path/name, e.g. `--export dot --focus agentmap.mjs`"); process.exitCode = 2; }
+      else {
+        let keep = Object.keys(data.files);
+        let focusLabel = null;
+        if (focusArg) {
+          const { key } = resolveFile(keep, data.files, focusArg);
+          if (!key) { console.error(`# warning: --focus "${focusArg}" matched no file — exporting the full graph`); process.exitCode = 1; }
+          else {
+            focusLabel = key;
+            const f = data.files[key];
+            const nb = new Set([key, ...f.imports.filter((p) => data.files[p]), ...f.dependents]);
+            keep = keep.filter((k) => nb.has(k));
+          }
+        }
+        // rank-cap: top-N files by PageRank, then keep only edges whose endpoints both survived.
+        keep.sort((a, b) => (data.files[b].pagerank || 0) - (data.files[a].pagerank || 0));
+        const kept = keep.slice(0, EXPORT_NODE_CAP);
+        const keptSet = new Set(kept);
+        const nodes = kept.map((p) => ({ path: p, pagerank: data.files[p].pagerank || 0 }));
+        const edges = [];
+        for (const p of kept) for (const t of data.files[p].imports) if (keptSet.has(t)) edges.push({ from: p, to: t });
+        const meta = { fileCount: data.fileCount, sha: data.generatedSha, shown: kept.length, focus: focusLabel, capped: keep.length > kept.length };
+        console.log(fmt === "dot" ? toDot(nodes, edges, meta) : toMermaid(nodes, edges, meta));
+      }
     }
   } else if (has("--symbols")) {
     const data = ensureFresh();
@@ -3092,12 +3292,21 @@ function mcpQuery(name, args) {
       } else if (candidates && candidates.length > 1) {
         return ok({ command: "any", query: raw, kind: "candidates", candidates });
       } else {
+        const lex = bm25Search(data.lexical, data.files, raw);
+        if (lex.matches.length) return ok({ command: "any", query: raw, kind: "lexical", matches: lex.matches, total: lex.total, shown: lex.matches.length, truncated: lex.total > lex.matches.length });
         const res = contentSearch(raw);
         if (!res) return ok({ command: "any", query: raw, kind: "empty" }, 1);
         const lines = res.split("\n");
         const shown = lines.slice(0, CONTENT_LINES_LIMIT);
         return ok({ command: "any", query: raw, kind: "content", total: lines.length, lines: shown });
       }
+    }
+    case "search": {
+      const raw = String(a.query ?? "");
+      if (!raw) return err(2, 'search needs a query, e.g. `{ query: "auth retry logic" }`');
+      const data = mcpEnsureFresh();
+      const lex = bm25Search(data.lexical, data.files, raw);
+      return ok({ command: "search", query: raw, total: lex.total, shown: lex.matches.length, truncated: lex.total > lex.matches.length, matches: lex.matches }, lex.matches.length ? 0 : 1);
     }
     case "find": {
       const raw = String(a.symbol ?? "");
@@ -3130,7 +3339,7 @@ function mcpQuery(name, args) {
         for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
       const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
       const top = Object.entries(rel).filter(([k]) => k !== key).sort((x, y) => y[1] - x[1]).slice(0, RELATED_LIMIT);
-      return ok({ command: "relates", file: key, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
+      return ok({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
     }
     case "callers": {
       const raw = String(a.symbol ?? "");
@@ -3227,7 +3436,7 @@ function mcpQuery(name, args) {
 // below), so these pure building blocks can be used in-process by the MCP
 // server, tests, and any future library caller without spawning a subprocess.
 // ---------------------------------------------------------------------------
-export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache };
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache, bm25Search, splitIdent };
 
 // Run the CLI only when executed directly (`node agentmap.mjs …`), never when
 // imported. Dual check (matches mcp.mjs) so it holds on Windows (backslash

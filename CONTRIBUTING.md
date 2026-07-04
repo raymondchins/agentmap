@@ -109,3 +109,14 @@ When you touch caching, building, or the schema:
 - Determinism matters: ranking must not depend on a PRNG or unstable iteration
   order. PageRank uses a fixed node order and converges by tolerance.
 - Prefer small, commented, hand-rolled helpers over pulling in a dependency.
+
+## Submitting a PR
+
+1. For anything non-trivial, open (or link) an issue describing the change first.
+2. Branch, make the change, run `node --test test/` — all green on Node 18+.
+3. Tests are dependency-free black-box drivers over throwaway git repos (see
+   `test/helpers.mjs`). New behavior needs a test in that style.
+4. Keep the diff minimal and the output byte-identical for existing commands —
+   unless the change *is* the output (then call it out).
+5. Fill in the PR checklist. Maintainers may decline in-scope-but-bloating
+   changes — smaller is the bias.

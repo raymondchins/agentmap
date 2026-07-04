@@ -43,7 +43,7 @@ function tree(dir) {
   return out.sort();
 }
 
-const SCHEMA = 4; // keep in sync with SCHEMA_VERSION in agentmap.mjs
+const SCHEMA = 5; // keep in sync with SCHEMA_VERSION in agentmap.mjs
 
 // ----------------------------------------------------------------------------
 
