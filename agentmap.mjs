@@ -565,6 +565,40 @@ function bundlerAliasToPaths(entries) {
   return paths;
 }
 
+// Normalize a package.json Node "imports" map (self-referencing internal subpath
+// specifiers — keys ALWAYS start with `#`, e.g. `#lib/util`, `#internal/*`) → the
+// same `paths` shape tsconfig uses, keyed against baseUrl = the package's own dir
+// (where its package.json lives; "imports" targets are package-dir-relative). A
+// value may be a plain string OR a conditions object ({ import, default, node, … });
+// impLeaf() pulls the ESM/source target out — prefer `import`, then `default`, then
+// any string leaf (same order discoverWorkspacePackages uses for "exports"). "imports"
+// targets point at the EMITTED file (`./dist/x.js`, `./src/x.js`); to reach SOURCE we
+// emit an extensionless TWIN first (drop a trailing code ext) so tryResolveAt's
+// extension ladder lands the `.ts`/`.tsx` source, with the raw target kept as a
+// fallback. Non-`#` keys, non-string leaves, and function/URL conditions are skipped
+// (never executed). Returns { "#foo": [...], "#foo/*": [...], … } or {} when empty.
+function packageImportsToPaths(imports) {
+  if (!imports || typeof imports !== "object" || Array.isArray(imports)) return {};
+  const impLeaf = (c) => {
+    if (typeof c === "string") return c;
+    if (c && typeof c === "object") { for (const k of ["import", "default"]) if (typeof c[k] === "string") return c[k]; for (const k in c) if (typeof c[k] === "string") return c[k]; }
+    return null;
+  };
+  // strip a leading ./ (package-dir-relative anyway) + a trailing code ext for the
+  // source-preferred extensionless twin. Keeps a `*` intact (`src/x/*.js`→`src/x/*`).
+  const stripExt = (t) => t.replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/, "");
+  const paths = {};
+  for (const key of Object.keys(imports)) {
+    if (typeof key !== "string" || !key.startsWith("#")) continue; // "imports" keys are always #-prefixed
+    const leaf = impLeaf(imports[key]);
+    if (typeof leaf !== "string" || !leaf) continue;
+    const raw = leaf.replace(/^\.\//, "");
+    const bare = stripExt(raw);
+    paths[key] = bare === raw ? [raw] : [bare, raw]; // source-preferred (extensionless) first
+  }
+  return paths;
+}
+
 // Collect package-level alias configs from tsconfig/jsconfig files in the repo.
 // Deepest-dir-first sort so nearestAliasConfig can pick the longest prefix match.
 function discoverPackageAliasConfigs(rootAbs, listed) {
@@ -606,6 +640,27 @@ function discoverPackageAliasConfigs(rootAbs, listed) {
     const sameDirTs = configs.find((c) => c.dir === cfgDir && c.baseUrl === cfgDir);
     if (sameDirTs) sameDirTs.paths = { ...vitePaths, ...sameDirTs.paths }; // tsconfig keys win
     else configs.push({ dir: cfgDir, baseUrl: cfgDir, paths: vitePaths });
+  }
+  // package.json Node "imports" maps (self-referencing `#internal/*` subpaths). Read
+  // WITHOUT executing the package.json (JSON.parse only). Normalized to the tsconfig
+  // `paths` shape with baseUrl = the package's own dir ("imports" targets are always
+  // package-dir-relative). `#`-keyed, so they never collide with `@/`/`~/` tsconfig or
+  // vite aliases; a `#`-prefixed specifier already routes to resolveAlias (it's non-
+  // relative and no workspace name starts with `#`), so this needs no resolver change.
+  // Merge into an aligned same-dir config (baseUrl === pkgDir — the common `baseUrl:"."`
+  // / no-baseUrl case) so nearestAliasConfig's one-config-per-dir pick still sees the
+  // imports keys; otherwise append a standalone config anchored at the package dir.
+  const pkgFiles = listed.length ? listed.filter((f) => /(^|\/)package\.json$/.test(f) && !f.split("/").includes("node_modules")) : [];
+  for (const rel of pkgFiles) {
+    const full = join(root, rel);
+    if (!existsSync(full)) continue;
+    let pkg; try { pkg = JSON.parse(readFileSync(full, "utf8")); } catch { continue; }
+    const impPaths = packageImportsToPaths(pkg && pkg.imports);
+    if (!Object.keys(impPaths).length) continue;
+    const cfgDir = join(root, dirname(rel)).replace(/\\/g, "/");
+    const sameDir = configs.find((c) => c.dir === cfgDir && c.baseUrl === cfgDir);
+    if (sameDir) sameDir.paths = { ...impPaths, ...sameDir.paths }; // existing (tsconfig/vite) keys win on the impossible collision
+    else configs.push({ dir: cfgDir, baseUrl: cfgDir, paths: impPaths });
   }
   configs.sort((a, b) => b.dir.length - a.dir.length);
   return configs;
@@ -917,7 +972,9 @@ function extractFacts(inc = null) {
   // #3 fix + monorepo: tsconfig/jsconfig baseUrl+paths alias resolution ("@/x",
   // "#/x", "~/x") for side-effect/dynamic/require edges AND static imports when
   // ts-morph can't resolve (cwd tsconfig lacks package paths). Per importing
-  // file, use the nearest discovered tsconfig paths.
+  // file, use the nearest discovered config's paths. Node package.json "imports"
+  // maps (`#internal/*`) are normalized into this SAME paths shape upstream
+  // (discoverPackageAliasConfigs), so a `#`-prefixed specifier resolves here too.
   const ROOTABS = process.cwd().replace(/\\/g, "/");
   const resolveAlias = (spec, fromAbsDir) => {
     const cfg = nearestAliasConfig(fromAbsDir, packageAliasConfigs, ROOTABS, aliasOpts);
