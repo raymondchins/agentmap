@@ -5,3 +5,6 @@ node_modules/
 .DS_Store
 graphify-out/
 tmp/
+
+# mcp-publisher CLI binary (downloaded for registry publish, not source)
+mcp-publisher
