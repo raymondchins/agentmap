@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-07-04
+
 ### Added
 - **`npx skills add` compatibility.** The packaged skill moved to the
   `skills/agentmap/SKILL.md` layout so `npx skills add raymondchins/agentmap`
@@ -518,7 +520,8 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/raymondchins/agentmap/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/raymondchins/agentmap/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/raymondchins/agentmap/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/raymondchins/agentmap/compare/v0.11.0...v0.12.0
