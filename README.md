@@ -4,15 +4,19 @@
 
 # agentmap
 
-**The repo map your coding agent is _forced_ to use — ~98% fewer context tokens to understand your TS/JS codebase.**
+**The TS/JS-accurate repo map for your coding agent — a compiler-grade `ts-morph` import/symbol graph that answers "where is it / what breaks / does this already exist" in ~98% fewer context tokens.**
 
 Your AI coding agent re-learns your codebase every session — opening files and grepping to find
 what connects to what, burning tokens before it writes a line. agentmap gives it a **queryable,
 ranked code-relationship map for TypeScript/JavaScript repos** instead — a `ts-morph` import/symbol
-graph ranked by personalized PageRank. Ask it to *"add a field"* or *"fix the login bug"* and it
+graph (the real TypeScript compiler, so aliases, `vite`/`webpack` `resolve.alias`, package.json
+`#imports` subpaths, and workspace cross-package imports all resolve) ranked by personalized
+PageRank. Ask it to *"add a field"* or *"fix the login bug"* and it
 finds the right files, their imports, and what already exists in
 **~98% fewer context tokens on average** (up to **~99.9% per task**; figures are chars/4 estimates applied equally to both sides) — kept current by a post-commit
 auto-refresh and actually used via a `PreToolUse(Grep)` hook.
+
+> **agentmap's wedge in one line:** it's the **TS/JS-*accurate*** repo map — a real TypeScript-compiler graph, not a tree-sitter approximation — with a published, honest [accuracy eval](./EVAL.md) to back it. That precision is the point; the auto-refresh/nudge wiring below is convenience, not the moat.
 
 [![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
 [![CI](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg)](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml)
@@ -26,9 +30,10 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 > reads your code, writes a cache under `.claude/agentmap/`, and never phones home (there is
 > not a single `fetch`/`http` call in the source). Your code is never sent anywhere.
 >
-> ⚠️ **Name collision — always use the scoped name.** `npx agentmap` (unscoped) runs an
-> **unrelated** package by a different author. This project is **`@raymondchins/agentmap`** —
-> use the scoped name in every install and command.
+> ⚠️ **Always install the scoped name: `@raymondchins/agentmap`.** `npx agentmap`
+> (unscoped) runs an **unrelated** package by a different author — this project is
+> **`@raymondchins/agentmap`**, and the scoped name is required in every install and command.
+> [`npmjs.com/package/@raymondchins/agentmap`](https://www.npmjs.com/package/@raymondchins/agentmap)
 
 ---
 
@@ -93,38 +98,60 @@ hit −313%; we leave it in). Numbers measure **context-token volume**, not answ
 
 ## Why it's different
 
-Most "repo context" tools are a photocopy: they dump your repository (or a slice of it) into
-the prompt once and walk away. The copy goes stale the moment you edit a file, and nothing
-makes the agent actually read it.
+Many "repo context" tools are a photocopy: they dump your repository (or a slice of it) into
+the prompt once and walk away — the copy goes stale the moment you edit a file, and nothing
+makes the agent actually read it. agentmap is queryable and ranked instead: the agent
+interrogates it flag-by-flag rather than swallowing a dump.
 
-agentmap is the opposite — a **queryable, ranked, self-refreshing** map the agent interrogates
-flag-by-flag, that **rebuilds itself on every commit**, and that a `PreToolUse` hook steers the
-agent toward *before* it falls back to serial grep.
+But the real reason to reach for agentmap is **accuracy**. It's built on `ts-morph` — the actual
+TypeScript compiler — so its import graph resolves the things a text/tree-sitter scanner guesses
+at: `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/`webpack` `resolve.alias`, package.json Node
+`#imports` subpaths, and pnpm/npm/yarn workspace cross-package imports. It reports an
+`edgeCoverage` map-health signal and warns loudly when a repo's imports mostly *don't* resolve,
+so a broken map is never framed as success — and a separate [`EVAL.md`](./EVAL.md) scores
+retrieval accuracy against live ground truth. That compiler-grade precision on TS/JS is the wedge.
+
+The self-refreshing side — a post-commit rebuild plus a `PreToolUse` hook that steers the agent
+to the map before it serial-greps — is genuinely useful, but it isn't unique: **CodeGraph**
+([colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), ~57k★) ships a native
+OS-event file watcher (FSEvents/inotify) with debounced auto-sync and an installer that
+auto-configures eight agent CLIs. agentmap's honest edge over the multi-language graph tools is
+narrower and sharper: **TS/JS resolution the others approximate, with a published accuracy eval.**
 
 | | **agentmap** | Aider repo map | RepoMapper | Repomix | code2prompt |
 | --- | --- | --- | --- | --- | --- |
 | **Ranking algorithm** | Personalized PageRank (file + symbol graphs) | PageRank (graph ranking) | Importance heuristics | None (file order) | None (file order) |
 | **Languages** | TS/JS + Vue SFC (via ts-morph) | Many (tree-sitter) | Many (tree-sitter) | Language-agnostic (text) | Language-agnostic (text) |
 | **Token-budget output** | Yes — `--map [--tokens N]` ranked digest | Yes (built into Aider's context) | Partial | Yes (size caps) | Yes (templates/caps) |
-| **Agent-loop integration** | **Yes — post-commit auto-refresh + PreToolUse hook** | In-process (Aider only) | No | No | No |
+| **TS/JS resolution depth** | **Compiler-grade — `tsconfig` paths + `vite`/`webpack` alias + `#imports` + workspaces (ts-morph)** | Basename/regex heuristics | Basename/regex heuristics | N/A (text) | N/A (text) |
+| **Retrieval-accuracy eval** | **Yes — published [`EVAL.md`](./EVAL.md) vs live ground truth** | No | No | No | No |
+| **Agent-loop wiring** | Yes — post-commit auto-refresh + PreToolUse hook | In-process (Aider only) | No | No | No |
 | **Dependencies** | `ts-morph` only | Python + tree-sitter stack | Python + tree-sitter | Node | Rust binary |
 | **Install** | `npx @raymondchins/agentmap` | `pip install aider-chat` | `pip install` | `npx`/global | `cargo`/binary |
 
 What that table is **not** claiming: agentmap is TS/JS-only (the others are multi-language),
 and it's a **file-level import graph**, not a full call-site/reference resolver (see
 [Scope & limitations](#scope--limitations)). The differentiators are narrow and honest:
-**(1)** the `--any` router, and **(2)** the agent-loop wiring. Everything else is table stakes.
+**(1)** compiler-grade TS/JS resolution (aliases, `vite`/`webpack`, `#imports`, workspaces) with a
+published accuracy eval, and **(2)** the `--any` router. The agent-loop wiring is real and
+convenient but **not** unique — [CodeGraph](https://github.com/colbymchenry/codegraph) and others
+auto-sync and auto-configure agent CLIs too; we don't claim it as a moat.
 
 ---
 
-## The agent loop (the actual point)
+## The agent loop (staying current, staying used)
 
-Here's the quiet failure of every other repo-map tool: it builds a beautiful map, and then the
+A common failure of repo-map tools: they build a beautiful map, and then the
 agent forgets it exists and greps anyway. A map the agent doesn't open is just dead weight.
 
 agentmap closes that loop. Two hooks (in [`./hooks/`](./hooks/)) do the work: the map
 **refreshes itself after every commit**, and the agent gets **nudged to query it before it
 serial-greps**. You wire it once — then it stays current on its own, and stays used.
+
+> This wiring is table stakes, not the moat — [CodeGraph](https://github.com/colbymchenry/codegraph)
+> and other tools also auto-sync (via native OS file watchers) and auto-configure agent CLIs.
+> agentmap ships it because it's genuinely useful; the actual point of agentmap is the
+> **compiler-grade TS/JS accuracy** the map is built on.
 
 ### 1. Auto-refresh on commit
 

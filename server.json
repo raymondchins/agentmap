@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.raymondchins/agentmap",
+  "description": "The repo map your coding agent is forced to use — a queryable, PageRank-ranked ts-morph import/symbol map for TS/JS repos, exposed as a stdio MCP server with 8 query tools (any/find/relates/map/hubs/features/feature/symbols).",
+  "repository": {
+    "url": "https://github.com/raymondchins/agentmap",
+    "source": "github"
+  },
+  "version": "0.12.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@raymondchins/agentmap",
+      "version": "0.12.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--mcp"
+        }
+      ]
+    }
+  ]
+}
