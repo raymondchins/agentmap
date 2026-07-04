@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "agentmap",
   "displayName": "agentmap",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "The repo map your coding agent is forced to use — a queryable, PageRank-ranked ts-morph import/symbol map for TS/JS repos. Bundles the PreToolUse grep nudge, the navigation skill, and a stdio MCP server exposing 8 query tools.",
   "author": {
     "name": "Raymond Surya Chin"
