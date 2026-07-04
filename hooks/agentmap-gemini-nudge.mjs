@@ -53,14 +53,10 @@ process.stdin.on("end", () => {
         "Dependency / blast-radius / reuse search detected. Prefer agentmap first: " +
         "`npx @raymondchins/agentmap --any <query>` (file → symbol → feature → git-grep), " +
         "`--relates <path>`, `--find <symbol>`. Rebuild with `npx @raymondchins/agentmap` if stale.";
-      process.stdout.write(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "BeforeTool",
-            additionalContext: msg,
-          },
-        }),
-      );
+      // Gemini CLI BeforeTool supports a top-level `systemMessage` (surfaced to
+      // the model), but NOT `hookSpecificOutput.additionalContext` (parsed &
+      // dropped on BeforeTool). Emit `systemMessage` so the nudge reaches the model.
+      process.stdout.write(JSON.stringify({ systemMessage: msg }));
     } else {
       process.stdout.write("{}");
     }
