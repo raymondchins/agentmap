@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const SKILLS_DIR = dirname(fileURLToPath(import.meta.url));
 export const GUIDANCE = join(SKILLS_DIR, "guidance.md");
 const GEMINI_NUDGE_SRC = join(SKILLS_DIR, "..", "hooks", "agentmap-gemini-nudge.mjs");
+const CODEX_NUDGE_SRC = join(SKILLS_DIR, "..", "hooks", "agentmap-codex-nudge.mjs");
 const OPENCODE_PLUGIN_SRC = join(SKILLS_DIR, "opencode-agentmap-nudge.js");
 
 export const MARK_BEGIN = "<!-- agentmap:begin -->";
@@ -103,6 +104,75 @@ export function installGeminiHooks(root, dryRun) {
     });
     atomicWrite(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   }
+  return targets;
+}
+
+/**
+ * Codex CLI PreToolUse gate. Writes the hook script into .codex/hooks/ and
+ * registers it in .codex/config.toml via an inline [[hooks.PreToolUse]] table,
+ * plus sets `[features] hooks = true` (off by default — hooks are silent
+ * without it). Project-scope only (root === cwd). Idempotent: re-running does
+ * not duplicate the PreToolUse block or the features flag. We APPEND a fenced
+ * agentmap block to config.toml rather than parse/serialize TOML (no dep, and
+ * TOML supports repeated [[hooks.PreToolUse]] array-of-tables so appending is
+ * valid even if the user already has other PreToolUse hooks).
+ *
+ * NOTE: `[features] hooks = true` is appended only if no `hooks =` under
+ * [features] already exists; if the user has `[features]` with other keys we
+ * still append our own minimal `[features]\nhooks = true` fenced block — TOML
+ * merges duplicate top-level tables key-by-key, and a later `hooks = true`
+ * wins, which is the intent (enable). If they explicitly set `hooks = false`
+ * we do NOT flip it (respect an intentional opt-out) — we warn instead.
+ *
+ * @returns {string[]} relative paths touched
+ */
+export function installCodexHooks(root, dryRun) {
+  if (root !== process.cwd()) return [];
+  const hookRel = ".codex/hooks/agentmap-codex-nudge.mjs";
+  const hookDest = join(root, hookRel);
+  const configRel = ".codex/config.toml";
+  const configDest = join(root, configRel);
+  const targets = [hookRel, configRel];
+
+  const CODEX_BEGIN = "# agentmap:begin";
+  const CODEX_END = "# agentmap:end";
+  // $CODEX_PROJECT_DIR is Codex's project-root env var (parallels
+  // $GEMINI_PROJECT_DIR); falls back cleanly since config.toml is loaded from
+  // the project .codex/ layer.
+  const HOOK_CMD =
+    'node "$CODEX_PROJECT_DIR/.codex/hooks/agentmap-codex-nudge.mjs"';
+  const block =
+    `${CODEX_BEGIN}\n` +
+    `[features]\n` +
+    `hooks = true\n\n` +
+    `[[hooks.PreToolUse]]\n` +
+    `matcher = "^Bash$"\n\n` +
+    `[[hooks.PreToolUse.hooks]]\n` +
+    `type = "command"\n` +
+    `command = '${HOOK_CMD}'\n` +
+    `timeout = 5000\n` +
+    `statusMessage = "agentmap: checking search command"\n` +
+    `${CODEX_END}\n`;
+
+  if (dryRun) return targets;
+  if (!existsSync(CODEX_NUDGE_SRC)) throw new Error(`packaged hook missing: ${CODEX_NUDGE_SRC}`);
+  mkdirSync(dirname(hookDest), { recursive: true });
+  writeFileSync(hookDest, readFileSync(CODEX_NUDGE_SRC, "utf8"));
+
+  const existing = existsSync(configDest) ? readFileSync(configDest, "utf8") : "";
+  const re = /# agentmap:begin[\s\S]*?# agentmap:end/;
+  let next;
+  if (re.test(existing)) {
+    next = existing.replace(re, block.trimEnd());
+  } else if (!existing.trim()) {
+    next = block;
+  } else {
+    next = `${existing.trimEnd()}\n\n${block}`;
+  }
+  if (/\[features\][\s\S]*?hooks\s*=\s*false/.test(existing)) {
+    console.log("  WARN Codex hooks: [features] hooks = false is set in .codex/config.toml — leaving it; the agentmap gate stays inactive until you enable hooks.");
+  }
+  atomicWrite(configDest, next);
   return targets;
 }
 
