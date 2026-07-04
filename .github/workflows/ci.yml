@@ -6,6 +6,11 @@ on:
   push:
   pull_request:
 
+# Least privilege by default: jobs get a read-only GITHUB_TOKEN. The codeql job
+# re-declares the extra scopes it needs (security-events: write), overriding this.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (node ${{ matrix.node-version }})
