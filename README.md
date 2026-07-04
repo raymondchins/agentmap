@@ -296,7 +296,7 @@ skill/rule the agent may or may not consult). Honest matrix:
 | **Gemini CLI** | `--install-skill --platform gemini` | **live hook** — `.gemini/settings.json` nudge | fires on the `AfterTool`/`systemMessage` path (the earlier `BeforeTool` + `additionalContext` combo was silently dropped — fixed in #4) |
 | **OpenCode** | `--install-skill --platform opencode` | **log-only** — `.opencode/plugins/agentmap-nudge.js` writes to the log, does not inject context | plugin can't steer the model; relies on the `AGENTS.md` block being read |
 | **Cursor** | `--install-skill --platform cursor` + `.cursor/mcp.json` (below) | **MCP + docs** — `alwaysApply` rule + the MCP server | Cursor's own hooks aren't wired; the rule is advisory |
-| **Codex CLI** | `--install-skill --platform codex` | **docs-only** — `AGENTS.md` block | no PreToolUse enforcement (a hard grep `deny` needs an allow-fallback — tracked in Batch 4) |
+| **Codex CLI** | `--install-skill --platform codex` | **live gate** — `.codex/config.toml` PreToolUse hook | denies only high-confidence structural greps; allow-fallback for logs/pipes/non-TS-JS; `AGENTMAP_CODEX_GATE=0` bypasses; needs a trusted dir + Codex hooks-GA |
 | **Copilot CLI** | `--install-skill --platform copilot` | **docs-only** — `.copilot/skills/` | same as Codex — no live hook yet |
 
 **Cursor MCP — copy-paste `.cursor/mcp.json`** (Cursor's `--mcp` wiring is a documented
