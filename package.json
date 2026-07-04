@@ -1,6 +1,6 @@
 {
   "name": "@raymondchins/agentmap",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "mcpName": "io.github.raymondchins/agentmap",
   "publishConfig": {
     "access": "public"

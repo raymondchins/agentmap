@@ -5,6 +5,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-04
+
+### Added
+- **package.json `"imports"` subpath resolution.** Self-referencing internal
+  specifiers (`import x from '#lib/util'` / `#internal/*`) now resolve to their
+  source (JSON-parsed, never executed), completing the alias story alongside
+  tsconfig / vite / workspace resolution. A repo without an `"imports"` field is
+  byte-identical (verified A/B on a frozen 519-file corpus).
+
+### Performance
+- **In-process MCP server.** The 8 MCP tools now answer in-process against a map
+  parsed once (invalidated by the same freshness key the CLI uses) instead of
+  spawning a fresh `node agentmap.mjs` per call — the per-call double-Node-spawn +
+  whole-repo reparse that was the entire experience for Cursor / Cline /
+  Claude-Desktop users (MCP is their only integration). Tool outputs are
+  byte-identical to the old spawn path (all 8 tools across 17 query/edge combos;
+  `agentmap --mcp` verified end-to-end, no cyclic-import deadlock); the CLI path
+  is untouched. Warm query ~93ms spawn -> ~22ms in-process.
+
+### Security
+Fixes from a full security audit — which also confirmed a genuinely solid
+posture: **zero** committed secrets across full history, `npm audit` clean, and
+the config readers (vite/webpack/tsconfig/package.json) are AST/JSON-parse only
+and **never execute** untrusted repo config.
+- **ReDoS in the `.agentmapignore` matcher (real DoS, fixed).** A line of
+  consecutive `*` compiled to adjacent `[^/]*` groups (catastrophic
+  backtracking) — a `*`x50 line hung the per-path matcher ~80s, freezing
+  `build()`, the post-commit auto-refresh hook, and the MCP server. Runs of `*`
+  are now collapsed before translating (this glob subset has no `**` semantics)
+  and a line-length cap is applied; a poisoned ignore file builds in <1.5s. +test.
+- **Supply-chain hardening.** All 9 GitHub Actions are pinned to full commit
+  SHAs (notably the third-party `gitleaks-action` in the `NPM_TOKEN` publish
+  path); a `dependabot.yml` (npm + github-actions) keeps the pins current.
+- **MCP untrusted-content fence.** The `--any` content fallback returns raw
+  git-grep repository bytes; the MCP server now appends an explicit
+  untrusted-data marker (a second content block, so `content[0]` stays
+  byte-identical to the CLI) so a planted "ignore previous instructions" in an
+  ordinary file reads as DATA, not a command.
+- **`--install-hooks` no longer silently clobbers an existing `post-commit`
+  hook** — a user's own hook is backed up to `post-commit.pre-agentmap` with a
+  warning before agentmap's hook is written.
+- **SECURITY.md** supported-version line updated `0.9.x` -> `0.12.x`.
+
 ## [0.12.0] - 2026-07-04
 
 ### Added
@@ -446,7 +489,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/raymondchins/agentmap/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/raymondchins/agentmap/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/raymondchins/agentmap/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/raymondchins/agentmap/compare/v0.9.0...v0.10.0
