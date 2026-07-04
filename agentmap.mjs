@@ -442,6 +442,81 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
   } catch { return null; }
 }
 
+// vite.config / webpack config file names we probe for a `resolve.alias` literal.
+const VITE_CONFIG_RE = /(^|\/)(vite|vitest|webpack)\.config\.(js|ts|mjs|cjs)$/;
+// Extract STRING→STRING `resolve.alias` object-literal entries from a bundler config
+// WITHOUT executing it (untrusted repo code). ts-morph parses the file to an AST and
+// we read only string-literal keys/values off the `alias` object literal — no eval,
+// no import, no require of the config. Function/regex/URL-idiom aliases are skipped
+// (deferred). The common Vite idiom `'@': path.resolve(__dirname, 'src')` is handled
+// by taking the LAST string-literal argument of a path.resolve()/join() call. Returns
+// { find: replacement, … } (raw, dir-relative) or null when nothing usable is found.
+function readBundlerAliasEntries(cfgPath) {
+  let text; try { text = readFileSync(cfgPath, "utf8"); } catch { return null; }
+  let SyntaxKind, Project;
+  try { ({ SyntaxKind, Project } = tsMorph()); } catch { return null; }
+  let sf;
+  // Parse in an in-memory FS so the config file is never added to the real project.
+  try {
+    const p = new Project({ useInMemoryFileSystem: true, skipFileDependencyResolution: true });
+    sf = p.createSourceFile("bundler.config.ts", text, { overwrite: true });
+  } catch { return null; }
+  const strLit = (node) => {
+    const k = node?.getKind?.();
+    if (k === SyntaxKind.StringLiteral || k === SyntaxKind.NoSubstitutionTemplateLiteral) {
+      try { return node.getLiteralText(); } catch { return null; }
+    }
+    return null;
+  };
+  // last string-literal ARG of a path.resolve/join(__dirname, X) style call.
+  const callTail = (call) => {
+    let args; try { args = call.getArguments(); } catch { return null; }
+    let last = null;
+    for (const a of args) { const s = strLit(a); if (s !== null) last = s; }
+    return last;
+  };
+  const out = {};
+  let props; try { props = sf.getDescendantsOfKind(SyntaxKind.PropertyAssignment); } catch { return null; }
+  for (const p of props) {
+    let name; try { name = p.getName(); } catch { continue; }
+    // getName() keeps quotes for string-literal keys; accept both quoted + bare `alias`.
+    if (name !== "alias" && name !== "'alias'" && name !== '"alias"' && name !== "`alias`") continue;
+    let init; try { init = p.getInitializer(); } catch { continue; }
+    // object-literal form only; the array `[{ find, replacement }]` form is deferred.
+    if (!init || init.getKind() !== SyntaxKind.ObjectLiteralExpression) continue;
+    for (const entry of init.getProperties()) {
+      if (entry.getKind() !== SyntaxKind.PropertyAssignment) continue; // skip spreads/methods
+      let rawKey; try { rawKey = entry.getName(); } catch { continue; }
+      const key = rawKey.replace(/^['"`]|['"`]$/g, ""); // strip surrounding quotes
+      if (!key) continue;
+      let val; try { val = entry.getInitializer(); } catch { continue; }
+      if (!val) continue;
+      let target = strLit(val);
+      if (target === null && val.getKind() === SyntaxKind.CallExpression) target = callTail(val);
+      if (target === null) continue; // function/regex/URL alias → defer (never execute)
+      out[key] = target;
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// Normalize raw bundler alias entries → the same `paths` shape tsconfig uses, keyed
+// dir-relative so it resolves against baseUrl = the config's own dir. A vite alias is
+// PREFIX-based (`@/foo` → `<repl>/foo`) and also matches the BARE find (`@` → `<repl>`),
+// so each entry emits BOTH an exact `find` and a wildcard `find/*` — resolveAlias's
+// exact-beats-wildcard precedence then does the right thing. `__dirname`-relative
+// targets like `./src/components` collapse via the shared joinPosix in resolveAlias.
+function bundlerAliasToPaths(entries) {
+  const paths = {};
+  for (const [find, repl] of Object.entries(entries)) {
+    if (!find || repl == null) continue;
+    const target = repl.replace(/^\.\//, ""); // drop a leading ./ (baseUrl-relative anyway)
+    paths[find] = [target];
+    paths[`${find}/*`] = [`${target}/*`];
+  }
+  return paths;
+}
+
 // Collect package-level alias configs from tsconfig/jsconfig files in the repo.
 // Deepest-dir-first sort so nearestAliasConfig can pick the longest prefix match.
 function discoverPackageAliasConfigs(rootAbs, listed) {
@@ -463,6 +538,26 @@ function discoverPackageAliasConfigs(rootAbs, listed) {
       baseUrl: opts.baseUrl || cfgDir,
       paths: opts.paths || {},
     });
+  }
+  // Bundler (vite/webpack) resolve.alias configs. Read WITHOUT executing the config
+  // (readBundlerAliasEntries parses the AST only). Normalized to the tsconfig `paths`
+  // shape with baseUrl = the config's own dir. tsconfig WINS on conflict: when a
+  // tsconfig config already exists at the SAME dir AND is anchored to that dir
+  // (baseUrl === cfgDir, the `baseUrl: "."` default), vite paths merge UNDER it
+  // ({ ...vite, ...tsconfig }); otherwise the vite entry is appended separately AFTER
+  // the tsconfig one so the tsconfig still wins the nearest-config pick.
+  const cfgFiles = listed.length ? listed.filter((f) => VITE_CONFIG_RE.test(f)) : [];
+  for (const rel of cfgFiles) {
+    const full = join(root, rel);
+    if (!existsSync(full)) continue;
+    const entries = readBundlerAliasEntries(full);
+    if (!entries) continue;
+    const vitePaths = bundlerAliasToPaths(entries);
+    if (!Object.keys(vitePaths).length) continue;
+    const cfgDir = join(root, dirname(rel)).replace(/\\/g, "/");
+    const sameDirTs = configs.find((c) => c.dir === cfgDir && c.baseUrl === cfgDir);
+    if (sameDirTs) sameDirTs.paths = { ...vitePaths, ...sameDirTs.paths }; // tsconfig keys win
+    else configs.push({ dir: cfgDir, baseUrl: cfgDir, paths: vitePaths });
   }
   configs.sort((a, b) => b.dir.length - a.dir.length);
   return configs;
