@@ -5,7 +5,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "The repo map your coding agent is forced to use — estimated ~98% fewer context tokens (up to ~99.9% per task, chars/4 estimate) to understand a TS/JS codebase. A queryable, ranked ts-morph code-relationship map: PageRank hubs, Aider-style symbol ranking, a token-budgeted digest, and a single --any router (file → symbol → feature → live git-grep), wired into the agent loop via post-commit auto-refresh and a PreToolUse hook.",
+  "description": "The TS/JS-accurate repo map for coding agents — a compiler-grade ts-morph import/symbol graph (resolves tsconfig paths, vite/webpack alias, #imports subpaths, workspaces) that answers where-is / what-breaks / does-this-exist in ~98% fewer context tokens (up to ~99.9% per task, chars/4 estimate). Ranked, queryable, honestly eval'd: PageRank hubs, Aider-style symbol ranking, token-budgeted digest, and a single --any router (file → symbol → feature → live git-grep), with post-commit auto-refresh + a PreToolUse hook.",
   "type": "module",
   "bin": {
     "agentmap": "agentmap.mjs"
@@ -17,6 +17,7 @@
     "hooks",
     "skills",
     ".claude-plugin",
+    "server.json",
     "NOTICE"
   ],
   "scripts": {
@@ -35,6 +36,8 @@
     "repo-map",
     "repomap",
     "code-map",
+    "codebase-map",
+    "repository-map",
     "ts-morph",
     "typescript",
     "javascript",
@@ -42,7 +45,16 @@
     "static-analysis",
     "ast",
     "code-graph",
+    "knowledge-graph",
     "dependency-graph",
+    "import-graph",
+    "code-intelligence",
+    "context-engineering",
+    "token-efficiency",
+    "mcp",
+    "claude-code",
+    "cursor",
+    "codex",
     "ai-agent",
     "coding-agent",
     "llm",
