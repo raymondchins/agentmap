@@ -120,6 +120,9 @@ const HUBS_LIMIT = 15;           // # of hubs persisted/printed
 const RANKED_SYMBOLS_LIMIT = 80; // # of ranked symbols persisted
 const CONTENT_LINES_LIMIT = 40;  // # of git-grep lines shown in the --any content fallback
 const SYMBOL_MATCH_LIMIT = 50;   // max --find/--any symbol matches shown (ranked by PageRank), else token blowup
+const DEPTH_CAP = 5;             // hard ceiling on --callers/--calls --depth (transitive call graph)
+const CLOSURE_FRONTIER_CAP = 200; // per-level frontier cap for --depth traversal (hub-explosion guard)
+const CLOSURE_TOTAL_CAP = 500;   // global emitted-node cap across all --depth levels
 const RELATED_LIMIT = 10;        // # of related files shown by --relates
 const SYMS_PER_FILE = 8;         // per-file symbol cap in the --map digest
 const DEFAULT_SYMBOLS = 30;      // default count for --symbols with no n
@@ -2257,9 +2260,12 @@ Query commands:
   --any <q>            route a query: file → symbol → feature → live git-grep
   --find <sym>         find symbols by (sub)name (exports + non-exported top-level)
   --relates <path>     a file's exports/imports/dependents + related files
-  --callers <sym> [--in <path>]
+  --callers <sym> [--in <path>] [--depth N]
                        compiler-accurate call sites that invoke a symbol
-                       (experimental; a deep query — warms the TS type-checker)
+                       (experimental; --depth N = transitive N-hop closure, max 5)
+  --calls <sym> [--in <path>] [--depth N]
+                       compiler-accurate in-project symbols a symbol invokes
+                       (outgoing; experimental; --depth for transitive; dynamic not resolved)
   --map [--focus <p>] [--tokens <n>]
                        token-budgeted ranked digest (--focus personalizes)
   --symbols [n]        top-n Aider-style ranked symbols (default 30)
@@ -2327,7 +2333,7 @@ async function main() {
     "--json", "--include-dts", "--no-locals", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp",
-    "--any", "--find", "--relates", "--callers", "--in", "--map", "--focus", "--tokens",
+    "--any", "--find", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--focus", "--tokens",
     "--symbols", "--feature", "--features", "--hubs",
   ]);
 
@@ -2335,7 +2341,7 @@ async function main() {
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--callers", "--in", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--relates", "--callers", "--calls", "--in", "--depth", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2370,7 +2376,7 @@ async function main() {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
     "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
-    "--any": [], "--find": [], "--relates": [], "--callers": ["--in"], "--map": ["--focus", "--tokens"],
+    "--any": [], "--find": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
@@ -2568,7 +2574,7 @@ async function main() {
     const raw = arg("--callers");
     if (!raw) { console.error("--callers needs a symbol, e.g. `--callers extractFacts`"); process.exitCode = 2; }
     else {
-      const r = callGraph(raw, { inFilter: arg("--in") || "" });
+      const r = callGraph(raw, { inFilter: arg("--in") || "", depth: parseInt(arg("--depth") || "1", 10) });
       const { _code, ...obj } = r;
       if (_code) process.exitCode = _code;
       out(obj, () => {
@@ -2580,9 +2586,36 @@ async function main() {
         } else if (obj.error === "degraded") {
           console.log(`callers: ${raw} (${obj.file}) — ${obj.reason}`);
         } else {
-          const foot = obj.truncated ? ` (showing top ${obj.shown} of ${obj.total} by pagerank — narrow with --in)` : "";
-          console.log(`callers of ${raw}  [${obj.file}]: ${obj.total} call site${obj.total === 1 ? "" : "s"}${foot}`);
-          for (const c of obj.callers) console.log(`  ${c.file}:${c.line} → ${c.caller}`);
+          const foot = obj.truncated
+            ? (obj.depth > 1 ? ` (truncated at the ${obj.total}-node cap — narrow with --in or lower --depth)` : ` (showing top ${obj.shown} of ${obj.total} by pagerank — narrow with --in)`)
+            : "";
+          const unit = obj.depth > 1 ? `caller${obj.total === 1 ? "" : "s"} within depth ${obj.depth}` : `call site${obj.total === 1 ? "" : "s"}`;
+          console.log(`callers of ${raw}  [${obj.file}]: ${obj.total} ${unit}${foot}`);
+          for (const c of obj.callers) console.log(`  ${c.file}:${c.line} → ${c.caller}${c.depth > 1 ? ` [depth ${c.depth}]` : ""}`);
+        }
+      });
+    }
+  } else if (has("--calls")) {
+    const raw = arg("--calls");
+    if (!raw) { console.error("--calls needs a symbol, e.g. `--calls extractFacts`"); process.exitCode = 2; }
+    else {
+      const r = callGraph(raw, { inFilter: arg("--in") || "", direction: "calls", depth: parseInt(arg("--depth") || "1", 10) });
+      const { _code, ...obj } = r;
+      if (_code) process.exitCode = _code;
+      out(obj, () => {
+        if (obj.error === "ambiguous") {
+          console.log(`calls: "${raw}" is defined in ${obj.candidates.length} files — disambiguate with --in <path>:`);
+          for (const k of obj.candidates) console.log(`  ${k}`);
+        } else if (obj.error === "no match") {
+          console.log(`calls: no symbol named "${raw}" in the map (exact match; try --find "${raw}")`);
+        } else if (obj.error === "degraded") {
+          console.log(`calls: ${raw} (${obj.file}) — ${obj.reason}`);
+        } else {
+          const foot = obj.truncated
+            ? (obj.depth > 1 ? ` (truncated at the ${obj.total}-node cap — narrow with --in or lower --depth)` : ` (showing top ${obj.shown} of ${obj.total} by pagerank — narrow with --in)`)
+            : "";
+          console.log(`${raw} calls  [${obj.file}]: ${obj.total} in-project target${obj.total === 1 ? "" : "s"}${obj.depth > 1 ? ` within depth ${obj.depth}` : ""}${foot}`);
+          for (const c of obj.calls) console.log(`  ${c.file}:${c.line} → ${c.name} (${c.kind})${c.depth > 1 ? ` [depth ${c.depth}]` : ""}`);
         }
       });
     }
@@ -2768,7 +2801,11 @@ function mcpResetCache() { _mcpMapCache = null; }
 // path (build/--map/--find/--relates/--hubs) never constructs a Project, so it is
 // provably untouched. Returns a plain object; `_code` is the exit code (stripped
 // by both callers before it reaches the user).
-function callGraph(symbolName, { inFilter = "" } = {}) {
+function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1 } = {}) {
+  // --depth N (default 1) makes the query TRANSITIVE. depth 1 is byte-identical to
+  // the single-hop path below (guarded `if (maxDepth > 1)`); depth ≥2 runs a capped
+  // BFS over the SAME warm Project (no extra build, still lazy).
+  const maxDepth = Math.min(Math.max(1, Math.trunc(Number(depth)) || 1), DEPTH_CAP);
   const data = ensureFresh();
   // Phase A — NAME → defining file(s), from the cached map. EXACT name (not the
   // substring match --find uses): a call graph must bind to one symbol precisely.
@@ -2790,8 +2827,8 @@ function callGraph(symbolName, { inFilter = "" } = {}) {
   const owners = inFilter
     ? [...exportOwners, ...localOwners].filter((p) => p.includes(inFilter))
     : (exportOwners.length ? exportOwners : localOwners);
-  if (!owners.length) return { command: "callers", query: symbolName, error: "no match", candidates: [], _code: 1 };
-  if (owners.length > 1) return { command: "callers", query: symbolName, error: "ambiguous", candidates: owners, _code: 1 };
+  if (!owners.length) return { command: direction, query: symbolName, error: "no match", candidates: [], _code: 1 };
+  if (owners.length > 1) return { command: direction, query: symbolName, error: "ambiguous", candidates: owners, _code: 1 };
   const fileKey = owners[0];
   // Phase B — LAZY full Project (inc=null ⇒ language service live; NEVER the
   // incremental branch, which loads other files as empty stubs and would hide
@@ -2801,7 +2838,7 @@ function callGraph(symbolName, { inFilter = "" } = {}) {
   const cwd = process.cwd().replace(/\\/g, "/");
   const rel = (p) => { const abs = p.replace(/\\/g, "/"); return (vueMap[abs] || abs).replace(cwd + "/", ""); };
   const sf = project.getSourceFile(`${cwd}/${fileKey}`);
-  if (!sf) return { command: "callers", query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "source not in project", total: 0, shown: 0, truncated: false, callers: [], _code: 1 };
+  if (!sf) return { command: direction, query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "source not in project", total: 0, shown: 0, truncated: false, callers: [], calls: [], _code: 1 };
   // Relocate the declaration node(s). Exported: getExportedDeclarations() (the
   // same API that built f.exports) — get() returns an ARRAY (overloads/merged), so
   // union references across all. Non-exported: mirror the f.locals top-level getters.
@@ -2814,12 +2851,183 @@ function callGraph(symbolName, { inFilter = "" } = {}) {
     ];
     decls = top.filter((d) => d.getName?.() === symbolName);
   }
-  if (!decls.length) return { command: "callers", query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "declaration not locatable", total: 0, shown: 0, truncated: false, callers: [], _code: 1 };
+  if (!decls.length) return { command: direction, query: symbolName, symbol: symbolName, file: fileKey, error: "degraded", reason: "declaration not locatable", total: 0, shown: 0, truncated: false, callers: [], calls: [], _code: 1 };
+  // OUTGOING (--calls): walk the resolved declaration's OWN body for call/construct
+  // sites, then resolve each callee to its target declaration via the TS language
+  // service. getDefinitionNodes() is "go to definition" — it follows an imported
+  // binding THROUGH to the real in-project declaration (getSymbol() would stop at
+  // the ImportSpecifier in the caller file). Keep only in-project targets; a
+  // computed member (`map[k]()`), higher-order param (`cb()`), or otherwise
+  // statically-unresolvable callee is skipped — the honest dynamic-dispatch limit.
+  if (direction === "calls") {
+    if (maxDepth > 1) {
+      // Transitive OUTGOING BFS: each resolved target is itself a declaration node
+      // (getDefinitionNodes) whose body we re-walk one hop deeper. `visited` (target
+      // identity) is both the row-dedup and the cycle guard — a symbol reached once
+      // is never re-expanded, so mutual/self recursion terminates; shallowest depth
+      // wins (BFS). Frontier + total caps bound a hub's combinatorial blowup.
+      const idOf = (d) => `${rel(d.getSourceFile().getFilePath().replace(/\\/g, "/"))}:${d.getName?.() ?? symbolName}:${d.getStartLineNumber?.() ?? 0}`;
+      const visited = new Set(decls.map(idOf));
+      const out = [];
+      let frontier = decls.map((d) => ({ node: d, key: null }));
+      let hop = 0, capped = false;
+      while (frontier.length && hop < maxDepth && !capped) {
+        hop++;
+        const next = [];
+        for (const fr of frontier) {
+          const callSites = [
+            ...fr.node.getDescendantsOfKind(SyntaxKind.CallExpression),
+            ...fr.node.getDescendantsOfKind(SyntaxKind.NewExpression),
+          ];
+          for (const site of callSites) {
+            const callee = site.getExpression();
+            let idNode = null;
+            if (callee.getKind() === SyntaxKind.Identifier) idNode = callee;
+            else if (callee.getKind() === SyntaxKind.PropertyAccessExpression) idNode = callee.getNameNode();
+            if (!idNode) continue;
+            let targets;
+            try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
+            for (const d of targets) {
+              const tsf = d.getSourceFile();
+              if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue;
+              const relKey = rel(tsf.getFilePath().replace(/\\/g, "/"));
+              if (!data.files[relKey]) continue;
+              const kind = d.getKindName();
+              if (/^(Parameter|BindingElement)$/.test(kind)) continue;
+              const name = d.getName?.() ?? d.getSymbol()?.getName?.() ?? "?";
+              const line = d.getStartLineNumber?.() ?? 0;
+              const idKey = `${relKey}:${name}:${line}`;
+              if (visited.has(idKey)) continue;
+              visited.add(idKey);
+              out.push({ file: relKey, line, name, kind, depth: hop, via: fr.key });
+              if (out.length >= CLOSURE_TOTAL_CAP) { capped = true; break; }
+              next.push({ node: d, key: idKey, pr: data.files[relKey]?.pagerank ?? 0 });
+            }
+            if (capped) break;
+          }
+          if (capped) break;
+        }
+        next.sort((a, b) => b.pr - a.pr);
+        frontier = next.slice(0, CLOSURE_FRONTIER_CAP);
+      }
+      out.sort((x, y) => (x.depth - y.depth)
+        || ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : (x.name < y.name ? -1 : x.name > y.name ? 1 : 0)));
+      return {
+        command: "calls", query: symbolName, symbol: symbolName, file: fileKey, depth: maxDepth,
+        total: out.length, shown: out.length, truncated: capped, calls: out, _code: out.length ? 0 : 1,
+      };
+    }
+    const seenCall = new Set();
+    const out = [];
+    for (const decl of decls) {
+      const callSites = [
+        ...decl.getDescendantsOfKind(SyntaxKind.CallExpression),
+        ...decl.getDescendantsOfKind(SyntaxKind.NewExpression),
+      ];
+      for (const site of callSites) {
+        const callee = site.getExpression();
+        let idNode = null;
+        if (callee.getKind() === SyntaxKind.Identifier) idNode = callee;
+        else if (callee.getKind() === SyntaxKind.PropertyAccessExpression) idNode = callee.getNameNode();
+        if (!idNode) continue; // computed / parenthesized / dynamic — unresolvable
+        let targets;
+        try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
+        for (const d of targets) {
+          const tsf = d.getSourceFile();
+          if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue; // dep pkgs + TS builtins
+          const relKey = rel(tsf.getFilePath().replace(/\\/g, "/"));
+          if (!data.files[relKey]) continue; // authoritative in-project gate (same set --map/--relates trust)
+          const kind = d.getKindName();
+          if (/^(Parameter|BindingElement)$/.test(kind)) continue; // higher-order binding — statically unknowable
+          const name = d.getName?.() ?? d.getSymbol()?.getName?.() ?? "?";
+          const line = d.getStartLineNumber?.() ?? 0;
+          const key = `${relKey}:${name}:${line}`;
+          if (seenCall.has(key)) continue;
+          seenCall.add(key);
+          out.push({ file: relKey, line, name, kind });
+        }
+      }
+    }
+    out.sort((x, y) =>
+      ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+      || (x.file < y.file ? -1 : x.file > y.file ? 1 : (x.name < y.name ? -1 : x.name > y.name ? 1 : 0)));
+    const shownCalls = out.slice(0, SYMBOL_MATCH_LIMIT);
+    return {
+      command: "calls", query: symbolName, symbol: symbolName, file: fileKey,
+      total: out.length, shown: shownCalls.length, truncated: out.length > shownCalls.length,
+      calls: shownCalls, _code: out.length ? 0 : 1,
+    };
+  }
   // Keep ONLY true call sites: a reference identifier whose parent (two-hop for
   // `ns.foo()` member/namespace calls) is a CallExpression AND is its CALLEE, not
   // an argument. This is the compiler-accuracy line — a type-position mention, a
   // re-export, a bare value reference, or a same-named local in another file binds
   // to a DIFFERENT symbol and never reaches here.
+  if (maxDepth > 1) {
+    // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
+    // node for the ENCLOSING symbol of each call site. `enclosing()` returns that
+    // node (a FunctionDeclaration/Method/Class directly; the VariableDeclaration
+    // name node for an arrow-const; null for a module-level or anonymous caller =
+    // a leaf). Rows dedup by call SITE; expansion dedups by enclosing SYMBOL (the
+    // cycle guard) — two separate concerns. Frontier + total caps bound hubs.
+    const enclosing = (id) => {
+      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
+      if (!enc) return { name: "<module>", node: null };
+      const k = enc.getKindName();
+      let node = enc, name = enc.getName?.();
+      if (k === "Constructor") { const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration); node = cls ?? null; name = cls?.getName?.() ?? name; }
+      else if (/ArrowFunction|FunctionExpression/.test(k)) {
+        const vd = enc.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+        if (vd && vd.getInitializer?.() === enc && vd.getNameNode?.().getKind?.() === SyntaxKind.Identifier) { node = vd.getNameNode(); name = vd.getName(); }
+        else node = null;
+      }
+      if (!name) { name = "<module>"; node = null; }
+      return { name, node };
+    };
+    const seedKey = (d) => `${rel(d.getSourceFile().getFilePath().replace(/\\/g, "/"))}:${d.getName?.() ?? symbolName}:${d.getStartLineNumber?.() ?? 0}`;
+    const visitedSym = new Set(decls.map(seedKey)); // enclosing-symbol expansion dedup (cycle guard)
+    const seenSite = new Set();                     // global row dedup by call site
+    const out = [];
+    let frontier = decls.map((d) => ({ node: d, key: null }));
+    let hop = 0, capped = false;
+    while (frontier.length && hop < maxDepth && !capped) {
+      hop++;
+      const next = [];
+      for (const fr of frontier) {
+        let refs;
+        try { refs = fr.node.findReferencesAsNodes(); } catch { continue; }
+        for (const id of refs) {
+          let call = id.getParentIfKind(SyntaxKind.CallExpression);
+          const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
+          if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
+          if (!call || call.getExpression() !== (pa ?? id)) continue;
+          const file = rel(id.getSourceFile().getFilePath());
+          const line = id.getStartLineNumber();
+          const siteKey = `${file}:${line}`;
+          if (seenSite.has(siteKey)) continue;
+          seenSite.add(siteKey);
+          const { name: caller, node: recurseNode } = enclosing(id);
+          out.push({ file, line, caller, depth: hop, via: fr.key });
+          if (out.length >= CLOSURE_TOTAL_CAP) { capped = true; break; }
+          if (recurseNode) {
+            const symKey = `${file}:${caller}:${recurseNode.getStartLineNumber?.() ?? line}`;
+            if (!visitedSym.has(symKey)) { visitedSym.add(symKey); next.push({ node: recurseNode, key: symKey, pr: data.files[file]?.pagerank ?? 0 }); }
+          }
+        }
+        if (capped) break;
+      }
+      next.sort((a, b) => b.pr - a.pr);
+      frontier = next.slice(0, CLOSURE_FRONTIER_CAP);
+    }
+    out.sort((x, y) => (x.depth - y.depth)
+      || ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+      || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+    return {
+      command: "callers", query: symbolName, symbol: symbolName, file: fileKey, depth: maxDepth,
+      total: out.length, shown: out.length, truncated: capped, callers: out, _code: out.length ? 0 : 1,
+    };
+  }
   const seen = new Set();
   const sites = [];
   for (const decl of decls) {
@@ -2927,7 +3135,14 @@ function mcpQuery(name, args) {
     case "callers": {
       const raw = String(a.symbol ?? "");
       if (!raw) return err(2, "callers needs a symbol, e.g. `{ symbol: \"extractFacts\" }`");
-      const r = callGraph(raw, { inFilter: String(a.in ?? "") });
+      const r = callGraph(raw, { inFilter: String(a.in ?? ""), depth: Number(a.depth ?? 1) });
+      const { _code = 0, ...obj } = r;
+      return ok(obj, _code);
+    }
+    case "calls": {
+      const raw = String(a.symbol ?? "");
+      if (!raw) return err(2, "calls needs a symbol, e.g. `{ symbol: \"extractFacts\" }`");
+      const r = callGraph(raw, { inFilter: String(a.in ?? ""), direction: "calls", depth: Number(a.depth ?? 1) });
       const { _code = 0, ...obj } = r;
       return ok(obj, _code);
     }

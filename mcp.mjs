@@ -74,7 +74,13 @@ const TOOLS = [
     name: "callers",
     description:
       "Compiler-accurate call graph: every call site that INVOKES a symbol, resolved by the TypeScript language service (not tree-sitter name-matching) — so a type-position mention, a re-export, or a same-named local in another file is never mis-attributed. Symbol-level blast radius: 'who breaks if I change this function'. A deliberate DEEP query — the first call warms the TS type-checker (seconds on a large repo); lazy + out-of-band so the normal map stays fast. Experimental.",
-    inputSchema: { type: "object", properties: { symbol: str("Symbol name to find callers of (exact match)."), in: str("Optional defining-file path substring to disambiguate a name defined in more than one file.") }, required: ["symbol"] },
+    inputSchema: { type: "object", properties: { symbol: str("Symbol name to find callers of (exact match)."), in: str("Optional defining-file path substring to disambiguate a name defined in more than one file."), depth: { type: "integer", description: "Transitive closure depth (default 1 = direct callers; max 5). >1 follows enclosing symbols outward." } }, required: ["symbol"] },
+  },
+  {
+    name: "calls",
+    description:
+      "Compiler-accurate OUTGOING call graph: every in-project symbol that a given symbol INVOKES, resolved by the TypeScript language service (not tree-sitter name-matching) — callee resolution follows real bindings (imports/re-exports) through to the actual declaration. Answers 'what does this function call / depend on'. node_modules and TS built-ins are excluded; dynamic dispatch and higher-order indirection are not resolved. A deliberate DEEP query — the first call warms the TS type-checker (seconds on a large repo); lazy + out-of-band so the normal map stays fast. Experimental.",
+    inputSchema: { type: "object", properties: { symbol: str("Symbol name whose outgoing calls to resolve (exact match)."), in: str("Optional defining-file path substring to disambiguate a name defined in more than one file."), depth: { type: "integer", description: "Transitive closure depth (default 1 = direct callees; max 5). >1 follows resolved targets deeper." } }, required: ["symbol"] },
   },
   {
     name: "map",
