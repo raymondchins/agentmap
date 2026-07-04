@@ -229,7 +229,14 @@ agent is steered to it the moment it reaches for a dependency-shaped grep or Bas
 npx @raymondchins/agentmap --install-skill
 ```
 
-Copies packaged **SKILL.md** files and a **Cursor rule** (`.cursor/rules/agentmap.mdc`,
+…or grab just the skill (no agentmap flags) via the [`skills`](https://github.com/vercel-labs/skills)
+CLI — agentmap ships the `skills/agentmap/SKILL.md` layout it expects:
+
+```bash
+npx skills add raymondchins/agentmap
+```
+
+`--install-skill` copies packaged **SKILL.md** files and a **Cursor rule** (`.cursor/rules/agentmap.mdc`,
 `alwaysApply: true`) into the current repo or global agent directories. Paths follow
 each platform's official skill-directory conventions. Options:
 
