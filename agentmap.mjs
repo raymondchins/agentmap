@@ -73,6 +73,13 @@ function loadIgnoreMatcher() {
     const dir = line.endsWith("/");
     if (dir) line = line.slice(0, -1);
     if (!line) continue;
+    // ReDoS guard: this glob subset has NO `**` semantics, so a run of `*` means
+    // the same as one `*`. Collapse runs BEFORE translating — otherwise adjacent
+    // `[^/]*[^/]*…` groups backtrack catastrophically (a `*`×50 line hung the
+    // matcher ~80s, freezing build + the post-commit hook + the MCP server). Also
+    // skip a pathologically long pattern outright.
+    if (line.length > 512) continue;
+    line = line.replace(/\*{2,}/g, "*");
     // Escape regex metachars in the literal, then turn `*` into `[^/]*`. Anchored
     // ⇒ `^pat`; unanchored ⇒ match the whole path OR any `/`-bounded segment
     // prefix so a bare `dist` ignores `pkg/dist/x` too.
@@ -1714,8 +1721,17 @@ function installHooks({ dryRun = false } = {}) {
   // Normal path: announce the plan, then write.
   console.log(`agentmap --install-hooks: writing ${targets.length} file(s): ${targets.join(", ")}`);
 
-  // 1) post-commit hook → .git/hooks
+  // 1) post-commit hook → .git/hooks. Don't silently clobber a user's OWN
+  // (non-agentmap) post-commit hook — back it up first so their work is
+  // recoverable (agentmap's hook replaces it and does not chain an existing one).
   mkdirSync(hooksDir, { recursive: true });
+  if (existsSync(dest)) {
+    const cur = readFileSync(dest, "utf8");
+    if (!cur.includes(POST_COMMIT_MARKER)) {
+      writeFileSync(`${dest}.pre-agentmap`, cur, { mode: 0o755 });
+      console.error(`# warning: backed up your existing post-commit hook → ${dest}.pre-agentmap (agentmap's hook replaces it and does not chain it; re-add your logic if needed)`);
+    }
+  }
   writeFileSync(dest, readFileSync(src, "utf8"), { mode: 0o755 });
   chmodSync(dest, 0o755); // explicit: writeFileSync mode is masked by umask
 

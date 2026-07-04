@@ -1,0 +1,17 @@
+# Keep CI/publish GitHub Actions (SHA-pinned) and the npm toolchain current.
+# Actions are pinned to commit SHAs for supply-chain safety; dependabot bumps
+# the SHA + the `# vN` comment together when a new release ships.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
