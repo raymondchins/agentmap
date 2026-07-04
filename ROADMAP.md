@@ -230,13 +230,13 @@ with the name). Near-zero code; sequence *after* Batches 1–3 so what gets
 discovered is trustworthy and fast.
 
 ### Distribution (from the agent-ecosystem research)
-- [ ] **Claude Code plugin + marketplace** — add `.claude-plugin/plugin.json`
+- [x] **Claude Code plugin + marketplace** — add `.claude-plugin/plugin.json`
   bundling the PreToolUse nudge hook (via `${CLAUDE_PLUGIN_ROOT}`), SKILL.md, and
   the stdio MCP server; add `.claude-plugin/marketplace.json` so
   `/plugin marketplace add raymondchins/agentmap` works; submit to
   `anthropics/claude-plugins-official`. (Plugins can't install git hooks — keep a
   SessionStart hook or `--install-hooks` for the post-commit refresh.)
-- [ ] **Official MCP Registry listing** — add `mcpName: "io.github.raymondchins/agentmap"`
+- [x] **Official MCP Registry listing** — add `mcpName: "io.github.raymondchins/agentmap"`
   to `package.json`, run `mcp-publisher init && login github && publish`. Low
   effort (package already on npm); feeds Smithery/mcp.so/PulseMCP.
 - [ ] **`npx skills add` compatibility** — align repo layout so
@@ -266,7 +266,7 @@ discovered is trustworthy and fast.
   (verified: zero `fetch`/`http` in `agentmap.mjs`/`mcp.mjs`) and the name-collision
   note (`npx agentmap` unscoped is an unrelated package; always use the scoped
   `@raymondchins/agentmap`). Landed in the intro blockquote.
-- [ ] **Fix the Gemini nudge (functional bug, do here or Batch B)** —
+- [x] **Fix the Gemini nudge (functional bug, do here or Batch B)** —
   `hooks/agentmap-gemini-nudge.mjs:59`: BeforeTool doesn't support
   `additionalContext`, so the nudge is silently dropped. Move to AfterTool
   `additionalContext` or BeforeTool `systemMessage`; update
@@ -308,8 +308,8 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
 ### Resolution gaps beyond tsconfig (uncovered — needed for monorepo depth)
 - [ ] `package.json` `"imports"` subpath maps (`#internal/*`) — currently only
   matched against tsconfig aliases.
-- [ ] `vite.config` / webpack `resolve.alias` (zero support today).
-- [ ] Workspace cross-package resolution (`import '@org/pkg'` → `packages/pkg/src`
+- [x] `vite.config` / webpack `resolve.alias` (zero support today).
+- [x] Workspace cross-package resolution (`import '@org/pkg'` → `packages/pkg/src`
   via pnpm/npm workspaces).
 
 ### The depth features (competitive bets #1 and #4)
@@ -326,7 +326,7 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   budgets (tiktoken-style) replacing chars/4. Keeps the no-vector-DB positioning.
 
 ### User-configurable scoping (predictable first GitHub issue)
-- [ ] **`.agentmapignore` / config** — skip-list is hardcoded to
+- [x] **`.agentmapignore` / config** — skip-list is hardcoded to
   `node_modules/.git/.next` (`agentmap.mjs:124,413,435,487`); no exclude/include
   globs, no extra-extension hook. `SRC_EXT` (`:113`) also indexes `.d.ts` generated
   declarations. Add a config file / `package.json` key / `--exclude` globs.
@@ -374,7 +374,7 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   *(tests/low)*
 
 ### Correctness / integrations
-- [ ] **Claude nudge npx path** — `hooks/agentmap-nudge.mjs:116` tells the agent to
+- [x] **Claude nudge npx path** — `hooks/agentmap-nudge.mjs:116` tells the agent to
   run a `node_modules/...` path that doesn't exist for npx/global installs.
   Recommend `npx @raymondchins/agentmap --any` (as the Gemini nudge does). *(medium)*
 - [ ] **Windows global Gemini path** — `skills/install.mjs:75` writes to

@@ -5,7 +5,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Map-health signal.** Every clean build now reports `edgeCoverage` (the share of
+  repo-local-looking import sites that resolved to an in-project edge) and a `degraded`
+  flag in `map.json` and the `--json` build output, and prints one honest stderr line
+  when the map is empty (`0 source files found …`) or degraded (`N files, K import
+  edges resolved — most imports unresolved …`). Turns a silently broken/empty map — the
+  moment a new user assumes the tool doesn't work and uninstalls — into a clear, fixable
+  signal. Healthy repos (coverage ~1) never trip it.
+- **vite / vitest / webpack `resolve.alias` resolution.** A repo that aliases `@/` only
+  in `vite.config` (the default `npm create vite` shape, not `tsconfig`) previously
+  produced a fully inert map — zero resolved edges. The alias object is now read from the
+  config's AST **without executing the config** and merged with `tsconfig` `paths`
+  (tsconfig wins on conflict; function/regex aliases are deferred).
+- **Workspace cross-package resolution (pnpm/npm/yarn).** `import '@org/pkg'` and its
+  subpaths now resolve to the target package's source across package boundaries, so
+  blast-radius and hub ranking no longer silently break at the monorepo package wall.
+- **`.agentmapignore`.** A repo-root ignore file (gitignore-style subset: anchored `/`,
+  dir `/`, `*` globs, `#` comments) excludes extra paths beyond the built-in
+  `node_modules`/`.git`/`.next` skip list.
+- **Claude Code plugin + marketplace + MCP Registry name.** `.claude-plugin/{plugin,
+  marketplace}.json` make `/plugin marketplace add raymondchins/agentmap` +
+  `/plugin install agentmap@agentmap` bundle the skill, the PreToolUse nudge, and the
+  stdio MCP server in one auto-updating install (validated with `claude plugin validate
+  --strict`). `mcpName` added to `package.json` for the MCP Registry. README gains an
+  honest per-platform onboarding matrix (live-hook vs MCP vs docs-only) and a copy-paste
+  `.cursor/mcp.json`.
+
+### Changed
+- **`.d.ts` files are excluded from the symbol ranking by default.** A generated
+  declaration file (supabase/prisma/protobuf types, `next-env.d.ts`) no longer floods
+  `--find`/`--symbols`/`--hubs` or hijacks the top hub. `.d.ts` files remain live
+  import-resolution targets (edges to them are preserved); `--include-dts` restores the
+  old behavior via a separate cache (`map.dts.json`), so the default `map.json` is
+  untouched. **This changes the map for any repo with `.d.ts` files.**
+
 ### Fixed
+- **PreToolUse nudge now fires on a bare-symbol `Grep`.** `{Grep, pattern:"ProviderCard"}`
+  — the single most common structural search on Claude Code — previously never nudged,
+  because the bare-PascalCase rule was gated to the Bash branch only. The emitted command
+  is also now `npx @raymondchins/agentmap` instead of a `node node_modules/…` path that
+  ENOENTs on npx/global installs (the README's headline install), which had taught the
+  agent the tool was broken and driven a permanent grep fallback.
+- **Gemini nudge now actually injects.** It emitted `hookSpecificOutput.additionalContext`
+  on a `BeforeTool` event, which Gemini CLI silently drops — so `--install-skill` wired
+  it and `--doctor` reported it installed, but it never reached the model. Now emits a
+  top-level `systemMessage` (a BeforeTool-supported, model-visible field).
 - **Correctness quick-wins (Batch 5).** Six independent resolution/robustness bugs,
   each found + confirmed with a repro and covered by a regression test:
   - **tsconfig `extends` origin** — inherited `baseUrl`/`paths` now resolve against
