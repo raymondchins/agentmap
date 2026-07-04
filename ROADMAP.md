@@ -242,7 +242,7 @@ discovered is trustworthy and fast.
 - [ ] **`npx skills add` compatibility** — align repo layout so
   `npx skills add raymondchins/agentmap` works (already ships SKILL.md); gets on
   the skills.sh leaderboard, distributes across Claude/Cursor/Codex at once.
-- [ ] **Codex CLI PreToolUse hook** — biggest enforcement gap; extend
+- [x] **Codex CLI PreToolUse hook** — biggest enforcement gap; extend
   `--install-hooks` to write a `hooks.json`/`config.toml` PreToolUse matcher
   returning `permissionDecision: deny` + reason (do NOT use `additionalContext` —
   Codex fails open on it). **Guard:** a hard `deny` on grep must carry an

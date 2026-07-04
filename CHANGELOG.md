@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Codex CLI PreToolUse gate.** `--install-skill --platform codex` now installs a
+  real PreToolUse hook (`.codex/config.toml` + a copied `agentmap-codex-nudge.mjs`),
+  not just docs — Codex moves from docs-only to live enforcement. It denies only the
+  narrow, high-confidence structural-search case (bare-symbol / dependency / component
+  grep) with a reason steering to agentmap, and allows everything else (piped
+  log-filters, data-file operands, non-structural sweeps); `AGENTMAP_CODEX_GATE=0`
+  bypasses. (Codex only honors deny/allow on PreToolUse — an `ask` / `additionalContext`
+  fails open, so a soft nudge can't work there.)
+- **MCP Registry-ready.** A repo-root `server.json` (schema 2025-12-11, name = the
+  existing `mcpName` `io.github.raymondchins/agentmap`) lets `mcp-publisher publish`
+  list agentmap in the official MCP Registry.
+
+### Changed
+- **Honest competitive positioning.** The README no longer implies the agent-loop
+  wiring (post-commit refresh + `PreToolUse` nudge) is unmatched — it isn't. Reframed
+  around agentmap's real, defensible wedge: compiler-grade `ts-morph` TS/JS accuracy
+  (tsconfig/vite/webpack aliases, `#imports`, workspaces all resolve) backed by a
+  published accuracy eval. Tagline → "The TS/JS-accurate repo map"; the name-collision
+  note is strengthened up top; `package.json` description + keywords broadened.
+
 ## [0.12.1] - 2026-07-04
 
 ### Added
