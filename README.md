@@ -320,8 +320,8 @@ dead-end otherwise; drop this at your repo root):
 }
 ```
 
-Then Cursor exposes the 8 query tools (`any`, `find`, `relates`, `map`, `hubs`,
-`features`, `feature`, `symbols`). Run `agentmap --doctor` any time to see what's wired
+Then Cursor exposes the 11 query tools (`any`, `find`, `relates`, `map`, `hubs`,
+`features`, `feature`, `symbols`, `search`, `callers`, `calls`). Run `agentmap --doctor` any time to see what's wired
 vs missing.
 
 ### Uninstall
@@ -506,6 +506,11 @@ related (random-walk relevance):
   app/(chat)/api/chat/route.ts (0.0218)
   …
 ```
+
+For a file carrying a React Server Components directive prologue, the output adds one more
+line — `boundary: 'use client' (client component)` or `boundary: 'use server' (server module/actions)`
+(`rsc: 'client' | 'server'` in `--json`) — right after `dependents`. This is additive and
+optional: repos with no `'use client'`/`'use server'` directives never see the line.
 
 ### `--callers <sym>` — compiler-accurate call graph (experimental)
 
@@ -742,12 +747,14 @@ flowchart TD
 | `--help` / `-h` | Print a usage block listing every flag and exit 0. |
 | `--version` / `-v` | Print the version from `package.json` and exit 0. |
 | `--json` | **Global modifier.** When present, every command prints exactly one JSON object to stdout (no prose). Shapes vary per command: `--json --hubs` → `{command,fileCount,sha,hubs:[string]}`, `--json --find X` → `{command,query,matches:[{file,name,kind}]}`, `--json --relates X` → `{command,file,pagerank,exports,imports,dependents,related}`, `--json --any X` → `{command,query,kind,…payload}`, etc. Bare `--json` (no query flag) → `{command:"build",fileCount,features,topHub}`. |
+| `--no-locals` | Hide non-exported top-level declarations from `--find`/`--any` results (shown by default). Never affects `--map`/`--symbols`/`--hubs` ranking. |
+| `--include-dts` | Include `.d.ts` declaration files in the symbol/ranking pass (excluded by default so generated types don't flood `--find`/`--symbols`/`--hubs`). |
 | `--install-hooks` `[--dry-run]` | Copy `hooks/post-commit` into `.git/hooks/` (chmod 0755), ensure `.claude/agentmap/` is in `.gitignore`, and auto-wire the Claude Code `PreToolUse(Grep)` nudge into `.claude/settings.json` (merge-safe + idempotent). `--dry-run` previews without writing. Exit 0 on success, stderr + exit 3 on failure. |
 | `--hook-status` | Report whether the post-commit hook, PreToolUse nudge, and `.gitignore` entry are installed (no writes). |
 | `--doctor` | Read-only harness health report: git/Claude hook wiring, installed skills + Cursor rule freshness vs `package.json` version, MCP config entries for OpenCode/Antigravity, and map-cache presence/freshness hints. Always exits 0; suggests fix commands (`agentmap --install-hooks`, `--install-skill`, `--setup-mcp`, `agentmap`) but never runs them. Combine with `--json` for a structured report. |
 | `--install-skill` | Install skills + always-on docs/hooks per platform (`--platform claude\|cursor\|codex\|opencode\|gemini\|antigravity\|copilot\|agents\|all`, default `all`; `--project` default, or `--global`; `--dry-run` preview). |
 | `--setup-mcp` `[--dry-run]` | Configure agentmap as an MCP server for OpenCode and the Antigravity IDE (merge-safe). `--dry-run` previews without writing. |
-| `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can query the map. Exposes 8 query tools — `any`, `find`, `relates`, `map`, `hubs`, `features`, `feature`, `symbols`. |
+| `--mcp` | Start agentmap as a **stdio MCP server** so non-Claude-Code agents (Cursor, Cline, any MCP client) can query the map. Exposes 11 query tools — `any`, `find`, `relates`, `map`, `hubs`, `features`, `feature`, `symbols`, `search`, `callers`, `calls`. |
 
 **Exit-code contract:** `0` = success / match / help / version; `1` = query returned zero results (`--any`, `--find`, `--relates`, `--feature` with no match, or `--map --focus` that resolves to no file — the global digest still prints, with `focusResolved:false` in `--json`); `2` = usage error (missing required arg, unknown flag, two commands at once, or a sub-flag without its parent command); `3` = maintenance command failed (`--install-hooks`, `--install-skill`, `--setup-mcp`, `--hook-status`, `--mcp`). Any token starting with `-` that matches no known flag prints an error to stderr and exits 2.
 
@@ -767,7 +774,9 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
   module"). Symbol-level, compiler-accurate call-site resolution is available on demand via
   `--callers` (who calls a symbol) and `--calls` (what a symbol invokes) — both experimental,
   lazy, out-of-band queries that spin up the type-checker only when invoked and are never
-  folded into the fast map build.
+  folded into the fast map build. The file-level graph additionally records a React Server
+  Components client/server boundary tag (from `'use client'`/`'use server'` directive
+  prologues) where present.
 - **Alias & workspace resolution.** Resolves `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/
   `webpack` `resolve.alias` (string entries, parsed from the AST — the config is **never
   executed**), and pnpm/npm/yarn workspace cross-package imports (`@org/pkg` → its source).
