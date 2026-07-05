@@ -4,10 +4,10 @@
 
 | Version  | Supported |
 |----------|-----------|
-| 0.12.x   | Yes       |
-| < 0.12   | No        |
+| 0.14.x   | Yes       |
+| < 0.14   | No        |
 
-Only the latest `0.12.x` release receives security fixes. Upgrade before reporting.
+Only the latest `0.14.x` release receives security fixes. Upgrade before reporting.
 
 ---
 

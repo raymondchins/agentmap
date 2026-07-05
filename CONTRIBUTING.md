@@ -10,7 +10,10 @@ agentmap is a **TypeScript/JavaScript-first** code-relationship map built on
 [`ts-morph`](https://github.com/dsherret/ts-morph). It parses a repo, derives a
 file-level import graph from named/default/namespace imports and re-export
 barrels, ranks files (PageRank) and symbols (Aider-style identifier graph), and
-exposes a single `--any` router plus a token-budgeted `--map` digest.
+exposes a single `--any` router plus a token-budgeted `--map` digest. It also
+exposes an opt-in, compiler-accurate call graph (`--callers`/`--calls`,
+transitive `--depth`) and a BM25 lexical fallback (`--search`) for vague
+queries — see the README for the full command reference.
 
 Contributions that fit the scope:
 
@@ -69,6 +72,10 @@ node agentmap.mjs --relates lib/foo.ts   # blast radius + random-walk relevance
 node agentmap.mjs --feature dashboard    # files in a Next.js app/ feature
 node agentmap.mjs --features             # list features
 node agentmap.mjs --print                # raw JSON
+node agentmap.mjs --search "auth retry logic"          # BM25 lexical search (vague queries)
+node agentmap.mjs --callers extractFacts               # call graph: who calls this (compiler-accurate)
+node agentmap.mjs --calls extractFacts                 # call graph: what this calls
+node agentmap.mjs --export mermaid --focus lib/foo.ts  # visualize the import graph (mermaid|dot)
 ```
 
 agentmap runs in the **target repo's** working directory and expects a
@@ -113,7 +120,7 @@ When you touch caching, building, or the schema:
 ## Submitting a PR
 
 1. For anything non-trivial, open (or link) an issue describing the change first.
-2. Branch, make the change, run `node --test test/` — all green on Node 18+.
+2. Branch, make the change, run `npm test` — all green on Node 18+.
 3. Tests are dependency-free black-box drivers over throwaway git repos (see
    `test/helpers.mjs`). New behavior needs a test in that style.
 4. Keep the diff minimal and the output byte-identical for existing commands —

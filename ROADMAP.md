@@ -51,9 +51,11 @@ Full research (with source URLs) is in the audit report — see *References* bel
 | **1** | Trust & truth (security + honesty) | 1–2 d | ✅ **DONE** (pushed) |
 | **2** | Modularize for testability + backend seam | 2–4 d | ✅ **DONE** — all substantive tasks landed (map byte-identical, 189 tests). Deferred-optional: `lib/` file split + in-process MCP. |
 | **3** | Dirty-tree performance | 3–5 d | ⬜ |
-| **4** | Distribution & release hygiene | 2–3 d | ⬜ |
-| **5** | TS-depth before language-breadth | weeks | ⬜ |
+| **4** | Distribution & release hygiene | 2–3 d | 🟨 Mostly done — plugin/marketplace, MCP Registry listing, tag-triggered publish, and README trust markers shipped; `npx skills add` alignment + Cursor/Gemini hooks deferred |
+| **5** | TS-depth before language-breadth | weeks | 🟨 Mostly done — depth + resolution shipped; monorepo intelligence + symbol-PageRank deferred |
 | **B** | Cross-cutting backlog (low-severity) | ongoing | ⬜ |
+
+**Legend:** ✅ done · 🟨 partial / mostly done · ⬜ not started
 
 ---
 
@@ -222,7 +224,7 @@ reported; `npm test` green + a concurrency test (see Batch B).
 
 ---
 
-## ⬜ Batch 4 — Distribution & release hygiene
+## 🟨 Batch 4 — Distribution & release hygiene
 
 **Goal:** fix the "near-zero market footprint" problem (agentmap doesn't surface
 in searches for its own category, and an unrelated `agentmap` npm package collides
@@ -278,7 +280,7 @@ posture and the name-collision caveat.
 
 ---
 
-## ⬜ Batch 5 — TS-depth before language-breadth (the long bet)
+## 🟨 Batch 5 — TS-depth before language-breadth (the long bet)
 
 **Goal:** become the *definitively best* TS/JS context tool. Deepen the ts-morph
 moat rather than diluting it. Revisit tree-sitter multi-language only if
