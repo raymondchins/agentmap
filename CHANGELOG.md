@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-19
+
+### Fixed
+- **MCP Registry publish unblocked.** The registry now enforces a 100-character limit
+  on `server.json`'s `description` (422 on v0.15.0's publish; npm publish itself was
+  unaffected). Shortened the description to comply. No code changes.
+
 ## [0.15.0] - 2026-07-19
 
 ### Fixed

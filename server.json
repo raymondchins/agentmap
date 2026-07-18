@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.raymondchins/agentmap",
-  "description": "TS/JS-accurate repo map for coding agents: a ts-morph import/symbol graph, 11 MCP query tools including a compiler-accurate call graph, BM25 lexical search, and Mermaid/DOT export.",
+  "description": "The TS/JS-accurate repo map for coding agents: ts-morph import/symbol/call graph + MCP query tools",
   "repository": {
     "url": "https://github.com/raymondchins/agentmap",
     "source": "github"
   },
-  "version": "0.15.0",
+  "version": "0.15.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@raymondchins/agentmap",
-      "version": "0.15.0",
+      "version": "0.15.1",
       "transport": {
         "type": "stdio"
       },
