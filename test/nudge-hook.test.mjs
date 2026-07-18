@@ -15,19 +15,33 @@
 //   - Exit-0 guarantee on every path
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { makeRepo } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(HERE, "..", "hooks", "agentmap-nudge.mjs");
 
-// Drive the hook: feed `payload` as JSON on stdin, return { stdout, status }.
-function runHook(payload) {
+// Project-presence gate fixtures. The behavioral suite below predates the
+// gate, so every call goes through a fixture that HAS agentmap by default
+// (runHook merges `cwd: WITH_AGENTMAP` into the payload unless the test
+// supplies its own `cwd`) — none of those ~30 existing cases needed touching.
+// The "Project-presence gate" section further down drives NO_AGENTMAP and
+// explicit cwd overrides directly.
+const WITH_AGENTMAP = makeRepo({ "node_modules/@raymondchins/agentmap/package.json": "{}" });
+const NO_AGENTMAP = makeRepo({ "README.md": "no agentmap here" });
+
+// Low-level runner: feed `payload` as JSON on stdin, optionally spawn the
+// subprocess with its OWN OS-level cwd set to `spawnCwd` (used only to prove
+// the gate reads `payload.cwd`, not `process.cwd()`). Returns { stdout, status }.
+function runRaw(payload, spawnCwd) {
   const input = JSON.stringify(payload);
   try {
     const stdout = execFileSync(process.execPath, [HOOK], {
       input,
+      cwd: spawnCwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -39,6 +53,13 @@ function runHook(payload) {
       status: typeof e.status === "number" ? e.status : 1,
     };
   }
+}
+
+// Drive the hook: feed `payload` as JSON on stdin, return { stdout, status }.
+// Defaults `payload.cwd` to a fixture WITH agentmap so pre-gate tests are
+// unaffected; a payload that sets its own `cwd` wins (spread order).
+function runHook(payload) {
+  return runRaw({ cwd: WITH_AGENTMAP, ...payload });
 }
 
 // Helper: assert the hook fired (emitted hookSpecificOutput).
@@ -375,5 +396,81 @@ test("Bash: stays silent on 'rg Foo data.json' (symbol-like name in JSON data fi
   assertSilent(
     runHook({ tool_name: "Bash", tool_input: { command: "rg FooBar data.json" } }),
     "rg FooBar data.json",
+  );
+});
+
+// ─── Project-presence gate ─────────────────────────────────────────────────
+// This hook ships at user/global scope (plugin bundle, copied
+// ~/.claude/hooks file), so it fires in every repo unless gated on the
+// project actually having agentmap. These tests bypass the runHook() default
+// (a WITH-agentmap fixture) to exercise the gate itself.
+
+test("gate: silent when no agentmap found anywhere up the tree (would otherwise fire)", () => {
+  assertSilent(
+    runHook({
+      cwd: NO_AGENTMAP,
+      tool_name: "Grep",
+      tool_input: { pattern: "import { Button }" },
+    }),
+    "gate: no marker anywhere",
+  );
+});
+
+test("gate: fires when the devDep marker is in cwd directly", () => {
+  assertFires(
+    runHook({
+      cwd: WITH_AGENTMAP,
+      tool_name: "Grep",
+      tool_input: { pattern: "import { Button }" },
+    }),
+    "gate: marker in cwd",
+  );
+});
+
+test("gate: fires when a built map.json alone is present (no devDep needed)", () => {
+  const mapOnlyDir = makeRepo({ ".claude/agentmap/map.json": "{}" });
+  assertFires(
+    runHook({
+      cwd: mapOnlyDir,
+      tool_name: "Grep",
+      tool_input: { pattern: "import { Button }" },
+    }),
+    "gate: map.json marker",
+  );
+});
+
+test("gate: fires when the marker is in a PARENT directory (walk-up works)", () => {
+  const subdir = join(WITH_AGENTMAP, "packages", "app");
+  mkdirSync(subdir, { recursive: true });
+  assertFires(
+    runHook({
+      cwd: subdir,
+      tool_name: "Grep",
+      tool_input: { pattern: "import { Button }" },
+    }),
+    "gate: marker in parent dir",
+  );
+});
+
+test("gate: payload.cwd wins over the hook process's actual OS cwd", () => {
+  // Spawn the hook with its OS-level cwd pointed at a WITH-agentmap fixture,
+  // but tell it (via payload.cwd) that the tool call actually happened in a
+  // NO-agentmap fixture. The gate must honor payload.cwd, not process.cwd().
+  assertSilent(
+    runRaw(
+      { cwd: NO_AGENTMAP, tool_name: "Grep", tool_input: { pattern: "import { Button }" } },
+      WITH_AGENTMAP,
+    ),
+    "gate: payload.cwd overrides process cwd",
+  );
+});
+
+test("gate: falls back to process.cwd() when payload has no cwd field", () => {
+  assertFires(
+    runRaw(
+      { tool_name: "Grep", tool_input: { pattern: "import { Button }" } },
+      WITH_AGENTMAP,
+    ),
+    "gate: process.cwd fallback",
   );
 });

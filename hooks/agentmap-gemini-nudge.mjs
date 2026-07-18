@@ -3,6 +3,33 @@
 // Gemini CLI BeforeTool nudge — non-blocking context when a search looks like
 // dependency / blast-radius / reuse work. Stdlib only; copied into the project
 // by `agentmap --install-skill --platform gemini`.
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+// Project-presence gate — see hooks/agentmap-nudge.mjs for the full
+// rationale (this hook ships at global scope too via `~/.gemini/settings.json`,
+// so without it it fires in every repo, agentmap or not). Standalone copy —
+// these files are distributed separately, no shared import. Never throws.
+const MAX_WALK_UP = 12;
+function hasAgentmapProject(startDir) {
+  try {
+    let dir = resolve(startDir || process.cwd());
+    for (let i = 0; i < MAX_WALK_UP; i++) {
+      if (
+        existsSync(join(dir, "node_modules", "@raymondchins", "agentmap")) ||
+        existsSync(join(dir, ".claude", "agentmap", "map.json"))
+      ) {
+        return true;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break; // reached filesystem root
+      dir = parent;
+    }
+  } catch {
+    // Never throw — treat as "not found".
+  }
+  return false;
+}
 
 let raw = "";
 process.stdin.setEncoding("utf8");
@@ -10,6 +37,15 @@ process.stdin.on("data", (c) => (raw += c));
 process.stdin.on("end", () => {
   try {
     const payload = JSON.parse(raw || "{}");
+
+    // Silent no-op ("{}", same as every other non-fire path) in a repo
+    // without agentmap. `payload.cwd` is the tool call's actual working
+    // directory; falls back to this process's own cwd if absent.
+    if (!hasAgentmapProject(payload.cwd)) {
+      process.stdout.write("{}");
+      process.exit(0);
+    }
+
     const tool = String(payload.tool_name || "");
     const ti = payload.tool_input || {};
 

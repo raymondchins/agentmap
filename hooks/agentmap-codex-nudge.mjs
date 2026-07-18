@@ -37,6 +37,37 @@
 //  Dependency-free (Node stdlib only). Copied into the project by
 //  `agentmap --install-skill --platform codex`.
 // ============================================================================
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+// ─── Project-presence gate ──────────────────────────────────────────────────
+// This hook is distributed outside per-repo installs too (a stale
+// `.codex/config.toml` block, a manually-copied hook), so without a check it
+// can DENY greps in repos that have no agentmap at all. Same walk-up check as
+// hooks/agentmap-nudge.mjs (kept as a standalone copy — these files are
+// distributed separately, no shared import). MUST run before any deny path:
+// see the call site below, which sits ahead of every structural check. Never
+// throws.
+const MAX_WALK_UP = 12;
+function hasAgentmapProject(startDir) {
+  try {
+    let dir = resolve(startDir || process.cwd());
+    for (let i = 0; i < MAX_WALK_UP; i++) {
+      if (
+        existsSync(join(dir, "node_modules", "@raymondchins", "agentmap")) ||
+        existsSync(join(dir, ".claude", "agentmap", "map.json"))
+      ) {
+        return true;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break; // reached filesystem root
+      dir = parent;
+    }
+  } catch {
+    // Never throw — treat as "not found".
+  }
+  return false;
+}
 
 function allow() {
   // Empty stdout + exit 0 = "no opinion"; Codex proceeds with the tool call.
@@ -53,6 +84,12 @@ process.stdin.on("end", () => {
     if (process.env.AGENTMAP_CODEX_GATE === "0") return allow();
 
     const payload = JSON.parse(raw || "{}");
+
+    // Project-presence gate — MUST come before any deny path. `payload.cwd`
+    // is the tool call's actual working directory (Codex PreToolUse input
+    // always includes it); falls back to this process's own cwd if absent.
+    if (!hasAgentmapProject(payload.cwd)) return allow();
+
     // Codex PreToolUse always reports tool_name "Bash" for shell; guard anyway so
     // an apply_patch / MCP tool call (if the matcher is ever widened) can't fire.
     const tool = String(payload.tool_name || "");

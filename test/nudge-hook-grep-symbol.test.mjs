@@ -21,15 +21,21 @@ import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { makeRepo } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(HERE, "..", "hooks", "agentmap-nudge.mjs");
+
+// This suite predates the project-presence gate (see the "Project-presence
+// gate" section of test/nudge-hook.test.mjs for the dedicated coverage), so
+// every call here runs against a fixture that HAS agentmap by default.
+const WITH_AGENTMAP = makeRepo({ "node_modules/@raymondchins/agentmap/package.json": "{}" });
 
 // Drive the hook: feed `payload` as JSON on stdin, return { stdout, status }.
 // spawnSync never throws on a non-zero exit, so we can assert the exit code too.
 function runHook(payload) {
   const r = spawnSync(process.execPath, [HOOK], {
-    input: JSON.stringify(payload),
+    input: JSON.stringify({ cwd: WITH_AGENTMAP, ...payload }),
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
   });
