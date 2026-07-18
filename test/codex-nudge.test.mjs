@@ -11,17 +11,35 @@
 // ============================================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { makeRepo } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = join(HERE, "..", "hooks", "agentmap-codex-nudge.mjs");
 
+// Project-presence gate fixtures. The DENY/ALLOW suite below predates the
+// gate, so gate() defaults `payload.cwd` to a fixture WITH agentmap unless
+// the caller passes its own `cwd` — none of those existing cases needed
+// touching. The "Project-presence gate" section further down drives
+// NO_AGENTMAP and process.cwd()-vs-payload.cwd directly.
+const WITH_AGENTMAP = makeRepo({ "node_modules/@raymondchins/agentmap/package.json": "{}" });
+const NO_AGENTMAP = makeRepo({ "README.md": "no agentmap here" });
+
 // Drive the hook: pipe a Bash tool-call payload, return { denied, reason, exit }.
-function gate(command, env = {}) {
+// `payload` may override `cwd`; `spawnCwd` sets the hook process's own OS-level
+// cwd (used only to prove the gate reads payload.cwd, not process.cwd()).
+function gate(command, env = {}, payload = {}, spawnCwd = undefined) {
   const r = spawnSync(process.execPath, [HOOK], {
-    input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }),
+    input: JSON.stringify({
+      cwd: WITH_AGENTMAP,
+      tool_name: "Bash",
+      tool_input: { command },
+      ...payload,
+    }),
+    cwd: spawnCwd,
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
@@ -87,4 +105,39 @@ test("ALLOW: a non-Bash tool never fires", () => {
     encoding: "utf8",
   });
   assert.equal((r.stdout || "").trim(), "", "a non-Bash tool must be allowed silently");
+});
+
+// --- Project-presence gate: MUST come before any deny path ---
+
+test("gate: ALLOW (not denied) when no agentmap found anywhere up the tree", () => {
+  const g = gate("grep -rn ProviderCard src/", {}, { cwd: NO_AGENTMAP });
+  assert.equal(g.denied, false, "a structural grep must not be denied in a repo with no agentmap");
+  assert.equal(g.out, "", "allow = empty stdout");
+  assert.equal(g.exit, 0);
+});
+
+test("gate: DENY still fires when the devDep marker is in cwd directly", () => {
+  const g = gate("grep -rn ProviderCard src/", {}, { cwd: WITH_AGENTMAP });
+  assert.equal(g.denied, true, "the gate must not suppress a real agentmap project");
+});
+
+test("gate: DENY still fires when a built map.json alone is present", () => {
+  const mapOnlyDir = makeRepo({ ".claude/agentmap/map.json": "{}" });
+  const g = gate("grep -rn ProviderCard src/", {}, { cwd: mapOnlyDir });
+  assert.equal(g.denied, true, "a built map.json alone must satisfy the gate");
+});
+
+test("gate: DENY still fires when the marker is in a PARENT directory (walk-up works)", () => {
+  const subdir = join(WITH_AGENTMAP, "packages", "app");
+  mkdirSync(subdir, { recursive: true });
+  const g = gate("grep -rn ProviderCard src/", {}, { cwd: subdir });
+  assert.equal(g.denied, true, "walk-up to a parent marker must still deny");
+});
+
+test("gate: payload.cwd wins over the hook process's actual OS cwd", () => {
+  // Spawn the hook with its OS-level cwd pointed at a WITH-agentmap fixture,
+  // but tell it (via payload.cwd) the tool call happened in a NO-agentmap
+  // fixture. The gate must honor payload.cwd, not process.cwd().
+  const g = gate("grep -rn ProviderCard src/", {}, { cwd: NO_AGENTMAP }, WITH_AGENTMAP);
+  assert.equal(g.denied, false, "payload.cwd must override the hook process's own OS cwd");
 });

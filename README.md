@@ -199,6 +199,13 @@ PascalCase identifiers (`ProviderCard`, `TopProviders`) that almost always mean 
 this symbol / who uses it". The Bash branch additionally only fires when the searcher is the *primary* command (at the start,
 or after `;`/`&&`); piped log-filters stay silent.
 
+All four nudge/gate variants (this one, Codex, Gemini, OpenCode) also **self-gate on
+project presence**: since they ship at user/global scope too (plugin bundle, `~/.gemini`,
+`~/.codex`, `~/.config/opencode`), they walk up from the tool call's cwd to the
+filesystem root looking for `node_modules/@raymondchins/agentmap` or a built
+`.claude/agentmap/map.json` before doing anything else, so a repo with no agentmap stays
+silent instead of nagging (or, for Codex, denying a grep it has no business denying).
+
 `--install-hooks` writes both matchers into `.claude/settings.json` for you (merge-safe —
 preserves existing settings, won't duplicate on re-run). The single hook file dispatches
 internally on `tool_name`. For reference, or to wire it by hand:

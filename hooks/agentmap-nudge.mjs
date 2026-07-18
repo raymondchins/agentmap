@@ -31,6 +31,41 @@
 //  interpolated into the emitted message or executed. Output is a single fixed
 //  JSON object.
 // ============================================================================
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+// ─── Project-presence gate ──────────────────────────────────────────────────
+// This hook ships at USER/GLOBAL scope (the Claude Code plugin bundles it
+// globally; a copied ~/.claude/hooks/agentmap-nudge.mjs does too), so without
+// a check it fires in EVERY repo the agent touches — including ones with no
+// agentmap at all (Swift, config-only, non-TS/JS), where the nudge is pure
+// noise. Gate on project presence: walk up from the tool call's cwd (bounded,
+// so a monorepo subpackage several levels below the root install still hits
+// it) looking for a local devDep install (`node_modules/@raymondchins/agentmap`)
+// or a previously-built map (`.claude/agentmap/map.json`, covers npx/global-CLI
+// users with no local devDep). No hit → stay silent, same as every other
+// "don't fire" path in this file. Never throws — an unreadable path just means
+// "not found here", not a crash.
+const MAX_WALK_UP = 12;
+function hasAgentmapProject(startDir) {
+  try {
+    let dir = resolve(startDir || process.cwd());
+    for (let i = 0; i < MAX_WALK_UP; i++) {
+      if (
+        existsSync(join(dir, "node_modules", "@raymondchins", "agentmap")) ||
+        existsSync(join(dir, ".claude", "agentmap", "map.json"))
+      ) {
+        return true;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break; // reached filesystem root
+      dir = parent;
+    }
+  } catch {
+    // Never throw — treat as "not found".
+  }
+  return false;
+}
 
 let raw = "";
 process.stdin.setEncoding("utf8");
@@ -38,6 +73,14 @@ process.stdin.on("data", (c) => (raw += c));
 process.stdin.on("end", () => {
   try {
     const payload = JSON.parse(raw || "{}");
+
+    // Silent no-op in a repo without agentmap. `payload.cwd` is the tool
+    // call's actual working directory (Claude Code's PreToolUse input always
+    // includes it); falls back to this process's own cwd if absent.
+    if (!hasAgentmapProject(payload.cwd)) {
+      process.exit(0);
+    }
+
     const tool = String(payload.tool_name || "");
     const ti = payload.tool_input || {};
 

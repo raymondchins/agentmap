@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-19
+
+### Fixed
+- **Nudge hooks now self-gate on project presence.** All four PreToolUse/BeforeTool
+  variants (`hooks/agentmap-nudge.mjs` for Claude Code, `hooks/agentmap-codex-nudge.mjs`,
+  `hooks/agentmap-gemini-nudge.mjs`, `skills/opencode-agentmap-nudge.js` for OpenCode)
+  ship at user/global scope (plugin bundles, `~/.gemini`/`~/.codex`/`~/.config/opencode`
+  installs), so they used to fire in EVERY repo — including ones with no agentmap at
+  all, where the nudge was pure noise. Each hook now walks up from the tool call's cwd
+  (bounded, ~12 levels) looking for `node_modules/@raymondchins/agentmap` or a built
+  `.claude/agentmap/map.json`; no hit → stays silent (Claude/Gemini: no-op, exit 0;
+  OpenCode: no log). **The Codex gate fails open** — the presence check runs before
+  every deny path, so a repo without agentmap is never denied a grep it was already
+  allowed to run.
+
 ## [0.14.0] - 2026-07-04
 
 ### Added
