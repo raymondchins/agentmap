@@ -9,6 +9,13 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore(ci)"
+    # codeql-action/init and codeql-action/analyze must run at the same version
+    # or CodeQL fails with a configuration error. Bundle them into one PR so a
+    # bump never lands on only one of the pair.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
