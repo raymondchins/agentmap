@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Minimum Node is now 20** (`engines` was `>=18`). This is a breaking change for
+  anyone still installing on Node 18. The floor is set by the dependency tree, not
+  by EOL dates: `brace-expansion` — pulled in transitively via `ts-morph` →
+  `@ts-morph/common` → `minimatch`, and bumped to 5.0.8 for GHSA-mh99-v99m-4gvg —
+  declares `20 || >=22`, so `>=18` was a claim the installed tree contradicted.
+  npm only warns on a transitive `engines` mismatch, but pnpm and anyone running
+  `engine-strict=true` got a hard install failure on Node 18. agentmap's own code
+  uses nothing above Node 18; this is purely about telling the truth.
+- **CI matrix is now `[20, 22, 24]`** (was `[18, 20, 22]`) — the new floor, current
+  LTS, and forward coverage, at the same three-leg cost.
+
 ## [0.15.1] - 2026-07-19
 
 ### Fixed

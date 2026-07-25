@@ -13,8 +13,8 @@
 
 // Static ESM import of the shared harness. Must NOT be a sync `require()` of
 // helpers.mjs — `require()` of an ES module is only supported on Node 22.12+,
-// so the old createRequire() form threw ERR_REQUIRE_ESM on the Node 18 CI leg
-// (engines still declares node >=18). A static import works on every version.
+// so the old createRequire() form threw ERR_REQUIRE_ESM on the lowest CI leg
+// (engines declares node >=20). A static import works on every version.
 import { run } from "../helpers.mjs";
 
 // ---------------------------------------------------------------------------

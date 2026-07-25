@@ -13,7 +13,7 @@ body:
     id: node
     attributes:
       label: Node version
-      description: "node --version (must be >=18)"
+      description: "node --version (must be >=20)"
     validations:
       required: true
   - type: dropdown
