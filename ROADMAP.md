@@ -437,8 +437,12 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   4× with divergent failure behavior — unify once modularized. *(low)*
 - [ ] Duplicated recursive dir walk between `sourceFingerprint()` and `makeProject()`
   (`agentmap.mjs:431`) — extract one `walkSources()`. *(low)*
-- [ ] Node 18 is past EOL (Apr 2025) but in `engines` + CI matrix — decide support
-  policy. No `dependabot.yml`/renovate; `ts-morph` exact-pinned with no update path.
+- [x] Node 18 is past EOL (Apr 2025) but in `engines` + CI matrix — decide support
+  policy. Resolved: `engines` is `>=20` and the matrix is `[20, 22, 24]`. The floor
+  is set by the dependency tree, not by EOL dates — `brace-expansion` (via ts-morph
+  → @ts-morph/common → minimatch) declares `20 || >=22`, so `>=18` was a claim the
+  tree contradicted. `dependabot.yml` now covers npm + Actions, with `ts-morph` on
+  the weekly update path.
 - [ ] Community health files: no `.github/ISSUE_TEMPLATE`, PR template,
   `CODE_OF_CONDUCT.md`, `FUNDING.yml`. CI Actions pinned by mutable tags (`@v5`),
   not SHA — a hardening gap the SECURITY.md advertises.

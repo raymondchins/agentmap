@@ -19,7 +19,7 @@ itself (`ts-morph`), used when the map (re)builds.
 
 ## 0. Prerequisites
 
-- **Node 18+** on PATH.
+- **Node 20+** on PATH.
 - **agentmap installed.** Either:
   - install it: `npm i -D @raymondchins/agentmap` (then `npx @raymondchins/agentmap` works), or
   - install it globally: `npm i -g @raymondchins/agentmap` (then `agentmap` works).
