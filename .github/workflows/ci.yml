@@ -1,10 +1,20 @@
 name: CI
 
-# Run on every push and PR. The README badge resolves against this exact file
-# name (.github/workflows/ci.yml), so do not rename it.
+# Runs on pushes to main and on every PR. `push:` is filtered to main on
+# purpose: unfiltered, a same-repo PR branch fires BOTH push and pull_request,
+# running all three jobs twice per commit. The README badge is unaffected — it
+# pins neither branch nor event, so it resolves the latest run on the default
+# branch, which pushes to main still produce. The badge does resolve against
+# this exact file name (.github/workflows/ci.yml), so do not rename it.
 on:
   push:
+    branches: [main]
   pull_request:
+  # Daily sweep purely for the audit job below. `npm audit` queries the registry
+  # advisory DB live, so a newly published advisory is invisible until something
+  # runs — without this, a quiet week leaves main silently unaudited.
+  schedule:
+    - cron: "17 6 * * *"
 
 # Least privilege by default: jobs get a read-only GITHUB_TOKEN. Jobs that need
 # more (codeql re-declares security-events + actions below) override this.
@@ -14,6 +24,9 @@ permissions:
 jobs:
   test:
     name: test (node ${{ matrix.node-version }})
+    # The schedule trigger exists only to re-run `audit` against a moving
+    # advisory DB; the code is unchanged between crons, so skip the rest.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,16 +55,43 @@ jobs:
       - name: Smoke (--hubs on self)
         run: node agentmap.mjs --hubs
 
-      # Audit for high-severity vulnerabilities in the dependency tree.
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
-
       # Validate the published file set without actually packing.
       - name: Validate pack manifest
         run: npm pack --dry-run
 
+  # Audit for high-severity vulnerabilities in the dependency tree. Deliberately
+  # its own job rather than a step in the matrix above: it depends only on the
+  # lockfile, so running it per Node version was three identical checks, and a
+  # failure there also skipped the pack-manifest step behind it.
+  audit:
+    name: Audit dependencies
+    # Not on pull_request. `npm audit` resolves advisories live, so a third-party
+    # advisory published mid-review reddens PRs that never touched dependencies —
+    # this fired twice in four days over a transitive brace-expansion pulled in by
+    # ts-morph, blocking unrelated work both times. Pushes to main and the daily
+    # cron still fail loudly, which is where the signal is actually actionable.
+    # Trade-off accepted: a PR that *introduces* a vulnerable dep is caught on
+    # merge rather than pre-merge.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
   codeql:
     name: CodeQL analysis
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       security-events: write
@@ -71,6 +111,7 @@ jobs:
 
   secret-scan:
     name: Secret scan (Gitleaks)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
