@@ -1,9 +1,14 @@
 name: CI
 
-# Run on every push and PR. The README badge resolves against this exact file
-# name (.github/workflows/ci.yml), so do not rename it.
+# Runs on pushes to main and on every PR. `push:` is filtered to main on
+# purpose: unfiltered, a same-repo PR branch fires BOTH push and pull_request,
+# running all three jobs twice per commit. The README badge is unaffected — it
+# pins neither branch nor event, so it resolves the latest run on the default
+# branch, which pushes to main still produce. The badge does resolve against
+# this exact file name (.github/workflows/ci.yml), so do not rename it.
 on:
   push:
+    branches: [main]
   pull_request:
 
 # Least privilege by default: jobs get a read-only GITHUB_TOKEN. Jobs that need
