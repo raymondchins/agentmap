@@ -6,7 +6,7 @@
 
 ## Checklist
 
-- [ ] `node --test test/` passes locally (Node 18+).
+- [ ] `node --test test/` passes locally (Node 20+).
 - [ ] No new runtime dependency (ts-morph stays the only one).
 - [ ] Still a single published artifact (`agentmap.mjs`, `#!/usr/bin/env node` shebang intact).
 - [ ] Freshness invariant intact — the cache is never served on a dirty tree / SHA mismatch; no "skip freshness" flag added.

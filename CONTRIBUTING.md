@@ -111,7 +111,7 @@ When you touch caching, building, or the schema:
 
 ## Style
 
-- Plain ES modules, Node 18+, no build step. The published artifact is the
+- Plain ES modules, Node 20+, no build step. The published artifact is the
   single `agentmap.mjs` file (keep the `#!/usr/bin/env node` shebang at the top).
 - Determinism matters: ranking must not depend on a PRNG or unstable iteration
   order. PageRank uses a fixed node order and converges by tolerance.
@@ -120,7 +120,7 @@ When you touch caching, building, or the schema:
 ## Submitting a PR
 
 1. For anything non-trivial, open (or link) an issue describing the change first.
-2. Branch, make the change, run `npm test` — all green on Node 18+.
+2. Branch, make the change, run `npm test` — all green on Node 20+.
 3. Tests are dependency-free black-box drivers over throwaway git repos (see
    `test/helpers.mjs`). New behavior needs a test in that style.
 4. Keep the diff minimal and the output byte-identical for existing commands —
