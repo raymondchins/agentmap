@@ -79,10 +79,19 @@ jobs:
       # id-token: write permission above) authorizes the io.github.raymondchins/*
       # namespace — no secret needed. Runs LAST so a registry hiccup never blocks
       # the npm publish or the GitHub Release.
+      #
+      # continue-on-error is what actually delivers that "never blocks" promise:
+      # ordering alone still fails the job (and so the whole release run) when the
+      # registry is down, even though npm publish and the Release already landed.
+      # Re-running to clear the red would then hit EPUBLISHCONFLICT on npm publish.
+      # -f makes curl fail loudly on an HTTP error instead of piping an HTML error
+      # page into tar, which would otherwise surface as "not in gzip format".
       - name: Install mcp-publisher
-        run: curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+        continue-on-error: true
+        run: curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
 
       - name: Publish to the MCP Registry (GitHub OIDC — no secret)
+        continue-on-error: true
         run: |
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish ./server.json
