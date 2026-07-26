@@ -97,11 +97,30 @@ if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -10 2>/dev/null)" ];
 fi
 mkdir "$LOCK" 2>/dev/null || exit 0
 
+# The timeout must kill the whole process GROUP, not just $_am_pid. Runner #4 is
+# `npx --no-install @raymondchins/agentmap`, which execs a child `node
+# .../node_modules/.bin/agentmap` — so $_am_pid is the npx wrapper and the real
+# work is a grandchild. Signalling only the wrapper leaves that grandchild
+# reparented to init, still spinning a full core: observed in the wild as
+# `npm exec @raymondchins/agentmap` (pid 5361) whose child `node .../bin/agentmap`
+# (pid 7386) survived the wrapper's death and had to be killed by hand.
+#
+# `set -m` enables job control, which puts the background job in its own process
+# group with pgid == pid, so `kill -- -$_am_pid` reaches wrapper AND grandchildren.
+# The plain-$_am_pid fallbacks cover shells that don't honour job control here.
+# SIGTERM first so a healthy run can flush and exit; SIGKILL only if it ignores it.
 (
   cd "$ROOT" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
+  set -m
   $RUNNER >/dev/null 2>&1 &
   _am_pid=$!
-  ( sleep "${AGENTMAP_HOOK_TIMEOUT:-120}"; kill -9 "$_am_pid" 2>/dev/null ) >/dev/null 2>&1 &
+  set +m
+  (
+    sleep "${AGENTMAP_HOOK_TIMEOUT:-120}"
+    kill -TERM "-$_am_pid" 2>/dev/null || kill -TERM "$_am_pid" 2>/dev/null
+    sleep 5
+    kill -9 "-$_am_pid" 2>/dev/null || kill -9 "$_am_pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
   _am_wd=$!
   wait "$_am_pid" 2>/dev/null
   kill "$_am_wd" 2>/dev/null
