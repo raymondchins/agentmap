@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The CLI never ran through its own `bin`.** npm links
+  `node_modules/.bin/agentmap -> ../@raymondchins/agentmap/agentmap.mjs`, so
+  `process.argv[1]` is the SYMLINK while `import.meta.url` is the REAL path. The
+  entry guard string-compared the two, concluded "imported, not executed", and
+  skipped `main()` — so **`npx @raymondchins/agentmap`, `npm run agentmap`,
+  `--install-hooks`, and the MCP Registry's `--mcp` launch all printed nothing
+  and exited 0**. Introduced by the Batch 2 modularization (`a217331`,
+  2026-07-03) and shipped in every release from **v0.12.1 through v0.16.0**.
+  `isDirectRun()` now compares `realpathSync()` on both sides, in `agentmap.mjs`
+  and `mcp.mjs` alike.
+
+  Exit 0 with empty stdout is why this survived 356 green tests: every test
+  invoked `node <abs path>/agentmap.mjs`, the one form that happened to work, and
+  CI never exercised the bin. `test/bin-symlink.test.mjs` now runs the shipped
+  command through a real symlink and asserts on OUTPUT, not just exit status —
+  covering `--version`, a query, `--install-hooks` (asserts the hook file is
+  actually written), `--mcp`, `mcp.mjs` standalone, and that importing the module
+  still executes nothing.
+
 ## [0.16.0] - 2026-07-26
 
 ### Changed
