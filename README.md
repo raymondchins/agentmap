@@ -488,6 +488,24 @@ find "Message": 55 match
   …
 ```
 
+**Barrels don't hide the real file.** When a match is reached through a re-export
+(`export * from "./x"`, or a named/renamed re-export, at any depth), the output names the
+file that actually declares it. The TypeScript checker resolves the chain, so this works
+where a name search can't — `rg` sees the barrel and the origin as two equal hits with no
+way to tell which one you can edit. An origin outside the repo reports
+`→ defined outside the repo`; a `node_modules` path is never printed.
+
+```
+$ node agentmap.mjs --find useComposedRefs     # radix-ui/primitives@579c5b84
+find "useComposedRefs": 3 match
+  packages/react/compose-refs/src/index.ts → useComposedRefs (FunctionDeclaration) → defined in packages/react/compose-refs/src/compose-refs.tsx
+  packages/react/compose-refs/src/compose-refs.tsx → useComposedRefs (FunctionDeclaration)
+  packages/react/radix-ui/src/internal.ts → useComposedRefs (?)
+```
+
+In `--json` this is `definedIn: "<path>"` or `external: true` on the match, present only
+when the entry is a pass-through — a real definition carries neither.
+
 ### `--search <q>` — BM25 lexical search for vague queries
 
 When you don't know the exact symbol name — the query an agent actually types — `--search`
@@ -529,6 +547,26 @@ related (random-walk relevance):
   app/(chat)/api/chat/route.ts (0.0218)
   …
 ```
+
+**Type-only dependencies are listed separately, not silently dropped.** `dependents` means
+"would break at runtime". A file imported only via `import type` has no runtime dependents
+at all — but renaming or deleting its exports still breaks every consumer at compile time.
+Those appear under `type-only dependents`, so a types module stops reading like an orphan:
+
+```
+$ node agentmap.mjs --relates lib/types.ts     # vercel/chatbot@c2f8235e
+relates: lib/types.ts  (pr 0.002898)
+exports (7): messageMetadataSchema(VariableDeclaration), MessageMetadata(TypeAliasDeclaration), …
+imports (0): —
+dependents (0): —
+type-only imports (6): components/chat/artifact.tsx, lib/ai/tools/create-document.ts, …
+type-only dependents (23): hooks/use-active-chat.tsx, hooks/use-auto-resume.ts, lib/utils.ts, …
+```
+
+22.4% of that repo's import statements are type-only. The fields are
+`typeOnlyImports` / `typeOnlyDependents` in `--json`, omitted entirely when empty, and they
+never enter PageRank, `--hubs`, symbol ranking or `--export` — the ranking graph stays a
+runtime graph.
 
 For a file carrying a React Server Components directive prologue, the output adds one more
 line — `boundary: 'use client' (client component)` or `boundary: 'use server' (server module/actions)`

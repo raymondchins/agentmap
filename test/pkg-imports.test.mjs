@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeRepo, gitInit, run, cleanup } from "./helpers.mjs";
+import { CODE_EXT } from "../agentmap.mjs";
 
 // ---- Fixtures --------------------------------------------------------------
 
@@ -89,4 +90,33 @@ test('a "#foo" import with NO matching "imports" entry does not fabricate an edg
   // #lib/util is mapped but imported by nobody; #missing/x has no map entry → 0 deps.
   assert.match(r.stdout, /dependents \(0\): —/, r.stdout);
   cleanup(dir);
+});
+
+// The extension ladder inside packageImportsToPaths was a second, hand-written
+// copy of CODE_EXT. It happened to agree, so nothing was broken — but nothing
+// forced it to stay in agreement either, and a 9th extension added to CODE_EXT
+// would have silently stopped resolving here, with exit 0 and no warning.
+//
+// This test iterates the LIVE constant rather than restating its members, so it
+// covers a future extension the day it is added and needs no edit to do so.
+// Restating the list here would just have created a third copy.
+test("every CODE_EXT member is strippable in an #imports target", () => {
+  for (const ext of CODE_EXT) {
+    const dir = makeRepo({
+      "package.json": JSON.stringify({
+        name: "app", version: "1.0.0",
+        // Target names the EMITTED extension; the source on disk is .ts, which is
+        // only reachable if the target's extension gets stripped first.
+        imports: { "#internal/*": `./src/internal/*.${ext}` },
+      }),
+      "src/internal/thing.ts": "export function thing() { return 1; }\n",
+      "src/app.ts": 'import { thing } from "#internal/thing";\nexport const a = thing();\n',
+    });
+    gitInit(dir, { commit: true });
+    try {
+      const j = JSON.parse(run(dir, "--relates", "src/internal/thing.ts", "--json").stdout);
+      assert.deepEqual(j.dependents, ["src/app.ts"],
+        `"#internal/*" → "*.${ext}" formed no edge — CODE_EXT and the stripper have drifted`);
+    } finally { cleanup(dir); }
+  }
 });

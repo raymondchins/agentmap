@@ -62,7 +62,7 @@ const TOOLS = [
   },
   {
     name: "find",
-    description: "Find every symbol whose name matches (substring, case-insensitive) — exported symbols plus non-exported top-level declarations. Use to locate a function/class/type before rebuilding it.",
+    description: "Find every symbol whose name matches (substring, case-insensitive) — exported symbols plus non-exported top-level declarations. Use to locate a function/class/type before rebuilding it. A match reached through a re-export barrel carries `definedIn` — the file that actually declares it, resolved by the TypeScript checker through any number of barrel hops — or `external: true` when the origin is outside the repo. Read that field to find the file to EDIT rather than the index.ts that only forwards the name.",
     inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports.") }, required: ["symbol"] },
   },
   {
@@ -72,7 +72,7 @@ const TOOLS = [
   },
   {
     name: "relates",
-    description: "Blast radius for a file: its exports, imports, direct dependents, and the files most related to it by random-walk relevance. Use before editing to see who breaks.",
+    description: "Blast radius for a file: its exports, imports, direct dependents, and the files most related to it by random-walk relevance. Use before editing to see who breaks. `dependents` means 'breaks at RUNTIME'; files that depend on this one only through `import type` are listed separately as `typeOnlyDependents` — they break at COMPILE time when an export is renamed or removed, so check both before a rename.",
     inputSchema: { type: "object", properties: { path: str("File path, basename, or unique substring identifying the target file.") }, required: ["path"] },
   },
   {

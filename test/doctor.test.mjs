@@ -43,7 +43,11 @@ function tree(dir) {
   return out.sort();
 }
 
-const SCHEMA = 5; // keep in sync with SCHEMA_VERSION in agentmap.mjs
+// Read the live constant instead of restating it. The hand-synced copy that used
+// to live here went stale on the very next schema bump, and a test asserting
+// "schema 5 reports ok" against a binary writing schema 6 fails for a reason that
+// has nothing to do with --doctor.
+import { SCHEMA_VERSION as SCHEMA } from "../agentmap.mjs";
 
 // ----------------------------------------------------------------------------
 

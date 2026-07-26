@@ -12,6 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,6 +53,27 @@ test("SECURITY.md's supported-version table tracks package.json", () => {
     supported[1], minor,
     `SECURITY.md says ${supported[1]}.x is supported but package.json is ${VERSION}`,
   );
+});
+
+test("no shipped source file contains a raw NUL byte", () => {
+  // `agentmap.mjs:424` used a raw \x00 as a rename delimiter in a cache-key token.
+  // The delimiter is right — NUL is the one byte no path can contain, which is why
+  // `git status -z` uses it — but writing it as a literal byte instead of the `\0`
+  // escape made `file` report the whole 3.6k-line module as "binary data", and grep
+  // then suppresses matches (GNU prints "Binary file matches"; some paths return
+  // nothing at all). Two independent audits of this file hit that and one silently
+  // got zero results. A search tool that answers "not found" when it means "not
+  // looked at" is the exact failure class this project exists to remove, so it must
+  // not be reintroduced into the project's own sources.
+  const files = execFileSync("git", ["ls-files", "-z", "*.mjs", "*.js", "*.json", "*.md"], {
+    cwd: ROOT, encoding: "utf8",
+  }).split("\0").filter(Boolean);
+  assert.ok(files.length > 20, `expected a populated file list, got ${files.length}`);
+
+  const offenders = files
+    .filter((f) => !f.startsWith("test/fixtures/"))  // fixtures may encode odd bytes on purpose
+    .filter((f) => readFileSync(join(ROOT, f)).includes(0x00));
+  assert.deepEqual(offenders, [], `raw NUL byte found — use the \\0 escape instead: ${offenders.join(", ")}`);
 });
 
 test("the Node engines floor and the README badge agree", () => {
