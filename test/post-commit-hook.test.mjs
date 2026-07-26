@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, copyFileSync, chmodSync, mkdirSync, utimesSync } from "node:fs";
+import { existsSync, copyFileSync, chmodSync, mkdirSync, utimesSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeRepo, writeFiles, gitInit, cleanup } from "./helpers.mjs";
@@ -98,4 +98,54 @@ test("a lock older than 10 minutes is cleared so refresh cannot stay dead", () =
     "a stale lock permanently blocked the rebuild");
   assert.equal(existsSync(lock), false, "lock not released after the run");
   cleanup(dir);
+});
+
+// ─── Timeout kills the whole process group ────────────────────────────────────
+//
+// The timeout must reach GRANDCHILDREN, not just the pid the hook backgrounded.
+// Runner fallback #4 is `npx --no-install @raymondchins/agentmap`, where the
+// backgrounded pid is the npx wrapper and the real work is a child `node
+// .../bin/agentmap`. Signalling only the wrapper leaves that child reparented to
+// init, still spinning: observed in the wild as `npm exec @raymondchins/agentmap`
+// (pid 5361) whose child (pid 7386) outlived it at ~30 W, three at once drawing
+// 114.5 W with the battery dropping 2%/min.
+//
+// This asserts on a heartbeat file going stale rather than on process tables,
+// which are awkward to inspect portably. A surviving grandchild keeps writing.
+
+// Stands in for the npx wrapper: spawns a heartbeat-writing child in the SAME
+// process group (npx does not detach), then hangs so the watchdog has to fire.
+const WRAPPER = [
+  'import{spawn}from"node:child_process";',
+  'spawn(process.execPath,["-e",',
+  '  "setInterval(()=>require(\'fs\').writeFileSync(\'HEARTBEAT\',String(Date.now())),100)"',
+  '],{stdio:"ignore"});',
+  'setInterval(()=>{},1000);\n',
+].join("");
+
+test("the timeout reaps a hung runner's grandchild, not just the wrapper", () => {
+  const dir = makeRepo({ "agentmap.mjs": WRAPPER, "a.ts": "export const a = 1;\n" });
+  const beat = join(dir, "HEARTBEAT");
+  try {
+    gitInit(dir);
+    installHook(dir);
+    execFileSync("sh", [join(dir, ".git", "hooks", "post-commit")], {
+      cwd: dir,
+      env: { ...process.env, AGENTMAP_HOOK_ALLOW_LOCAL: "1", AGENTMAP_HOOK_TIMEOUT: "2" },
+      stdio: "ignore",
+    });
+    // 2s timeout + 5s SIGTERM→SIGKILL grace + slack.
+    execFileSync("sh", ["-c", "sleep 9"]);
+    assert.ok(existsSync(beat), "grandchild never started — test is not exercising the kill path");
+    const first = readFileSync(beat, "utf8");
+    execFileSync("sh", ["-c", "sleep 2"]);
+    assert.equal(readFileSync(beat, "utf8"), first,
+      "grandchild outlived the watchdog — the timeout killed only the wrapper pid, so an orphan is left spinning a full core");
+  } finally {
+    // Never let a failing assertion leak the very process this test is about.
+    try {
+      execFileSync("pkill", ["-f", "HEARTBEAT"], { stdio: "ignore" });
+    } catch { /* nothing matched — already reaped */ }
+    cleanup(dir);
+  }
 });
