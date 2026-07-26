@@ -21,7 +21,7 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 [![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
 [![CI](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg)](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](#)
+[![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](#)
 
 > One file, one runtime dependency (`ts-morph`, which bundles the TypeScript compiler — ~10 MB installed). No vector DB, no embedding API, no server.
 > `npx @raymondchins/agentmap --any <query>` and you have a ranked answer.
