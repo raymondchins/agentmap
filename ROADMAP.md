@@ -604,14 +604,14 @@ denominator is zero and the fidelity cost is real and large.
 
 | Phase | Theme | Effort | State |
 |---|---|---|---|
-| **0** | Repair the instrument — make the shipped commands run | 2–4 d | 🟨 guard fix + 6 regression tests committed (`ae3365e`, 362 tests green, **unreleased**); rest open |
+| **0** | Repair the instrument — make the shipped commands run | 2–4 d | ✅ **DONE** — shipped as **0.16.1**. All five gate conditions met and now enforced in CI every run; 0.10.0–0.16.0 deprecated on npm. Only the day-14 baseline remains (a time-based measurement, not work). |
 | **1** | Instrument demand + spend the 90-day window on TS/JS depth | 5–6 d build, then 90 d elapsed at ~0 cost | ⬜ |
 | **F** | **The fidelity contract** — precondition for any non-TS byte | 4–6 d | ⬜ |
 | **2** | Hard-timeboxed throwaway cost spike (Go), never merged | 5 d hard box | ⬜ |
 | **3** | Ship exactly ONE language, experimental flag, `resolved` tier or not at all | 10–14 d | ⬜ |
 | **4** | Promote or delete — binary, in writing | 3–5 d | ⬜ |
 
-**Legend:** ✅ done · 🟨 partial · ⬜ not started
+**Legend:** ✅ done · 🟨 partial · ⬜ not started · `[~]` moot/deprioritized, with the reason recorded inline
 
 Total maintainer spend before any irreversible public commitment: **~7 working
 days** (Phase 0 + the Phase 2 spike). The 90-day windows cost zero maintainer
@@ -652,7 +652,14 @@ patch release inside 48 hours regardless of which language strategy wins.
   latent: `--setup-mcp` writes a *direct path* for local installs
   (`agentmap.mjs:2358`), which works — the MCP surface died because the *npx*
   branch goes through the broken CLI bin.
-- [ ] **Fix the nudge test properly, not by inverting it.**
+- [~] **Fix the nudge test properly, not by inverting it.** DEPRIORITIZED — this
+  was written while `npx` was broken, which made the test look like it was locking
+  in a dead command. With 0.16.1 the asserted `npx` form is the correct, most
+  portable recommendation (`node node_modules/...` genuinely ENOENTs on global and
+  npx installs), so the test now asserts true behaviour. The deeper point still
+  stands and is worth doing eventually — assert the runner the hook actually
+  resolved rather than a hardcoded string — but it is no longer urgent. Original
+  finding:
   `test/nudge-hook-grep-symbol.test.mjs:126–136` asserts the emitted command MUST
   contain `npx @raymondchins/agentmap` and MUST NOT contain the working
   `node node_modules/@raymondchins` form — the suite locks the broken command in
@@ -661,25 +668,43 @@ patch release inside 48 hours regardless of which language strategy wins.
   actually resolved (the same rung logic `hooks/post-commit:50–72` already
   implements) and assert *that*, so the emitted command cannot go stale against a
   future install shape the way it just did against this one.
-- [ ] **Add the missing CI test class.** `.github/workflows/ci.yml:52` runs
+- [x] **Add the missing CI test class.** DONE — `install-smoke` job (Node 20/22/24,
+  ~15-19s each) packs, installs into a scratch consumer, and drives the real bin:
+  symlink, npx, global install, `--mcp` JSON-RPC, and `--install-hooks` + a real
+  commit that must move `generatedSha`. Verified on a clean runner:
+  `generatedSha 4be1c17 -> 135ce42`. Original finding: `.github/workflows/ci.yml:52` runs
   `npm test`, `:56` runs `node agentmap.mjs --hubs`, `:60` runs
   `npm pack --dry-run` (executes nothing). 92 test files exercise the one path
   real users never take. Add: `npm pack` → `npm i -g ./tgz` → `agentmap --version`
   → `agentmap --hubs` → `npx -y ./tgz --mcp` JSON-RPC `initialize`.
-- [ ] **Fix the three downstream copies of the dead command.** `hooks/post-commit`
+- [~] **Fix the three downstream copies of the dead command.** MOOT as written —
+  the commands are no longer dead. `npx @raymondchins/agentmap` works as of 0.16.1
+  (verified against the live registry), so the hooks and SKILL.md now recommend a
+  command that runs. The rung logic itself was never wrong. Original finding: `hooks/post-commit`
   rung 1 requires `AGENTMAP_HOOK_ALLOW_LOCAL=1` (`:52`) so npm users fall to rungs
   2–4 — `node_modules/.bin` symlink, PATH symlink, `npx` — all three guard-bug
   casualties, run detached and silenced at `:84`, while `--install-hooks` prints
   "Done — the map auto-refreshes on commit." Same dead `AM` constant in
   `hooks/agentmap-nudge.mjs:160`, `hooks/agentmap-codex-nudge.mjs:137`,
   `hooks/agentmap-gemini-nudge.mjs:90`, and `skills/agentmap/SKILL.md:49,69`.
-- [ ] **Disclose the dead maps already in the wild.** Existing installs have been
+- [x] **Disclose the dead maps already in the wild.** DONE — 0.10.0-0.16.0 (12
+  versions) deprecated on npm via a new `workflow_dispatch` Deprecate workflow
+  (local `~/.npmrc` token is expired, so the repo's `NPM_TOKEN` secret is the only
+  path); an empty message un-deprecates, so it is reversible. Verified against the
+  raw packument: all 12 flagged, 0.9.0 and 0.16.1 clean. Original finding: Existing installs have been
   serving maps frozen at install time under a "stays current on its own" promise.
   Ship an explicit release note stating post-commit auto-refresh was
   non-functional for npm-installed users, and run `npm deprecate` on 0.10.0–0.16.0
   pointing at the fixed release. For a tool whose value proposition is freshness,
   silently-stale maps are a trust liability a changelog line does not cover.
-- [ ] **Version + doc drift, one sweep.** `.claude-plugin/plugin.json:5` is
+- [x] **Version + doc drift, one sweep.** DONE — `plugin.json` 0.14.0 -> 0.16.1,
+  README badge >=18 -> >=20, `hooks/INSTALL.md` tsconfig-required claim corrected,
+  the false vite/webpack warning at `:1420` replaced with the real gaps, and the
+  MCP Registry re-published at 0.16.1. Plus the systemic fix the original item did
+  not ask for: `test/version-lockstep.test.mjs` now fails `npm test` if
+  `server.json`, `plugin.json` or the README badge drift from `package.json` —
+  `publish.yml` only gated `server.json`, which is how `plugin.json` slipped two
+  minor versions with every check green. Original finding: `.claude-plugin/plugin.json:5` is
   `0.14.0` against `package.json` 0.16.0 and `server.json` 0.16.0.
   `README.md:24` badges node `>=18` against `engines: >=20` — actively misleading
   after the 0.16.0 breaking change. `hooks/INSTALL.md:28` states "The repo must
@@ -689,7 +714,11 @@ patch release inside 48 hours regardless of which language strategy wins.
   (`:587`) AST-parses them, `bundlerAliasToPaths()` (`:642`) normalizes them, and
   `test/vite-alias.test.mjs` covers it. Republish the MCP Registry listing (stale
   at 0.12.1).
-- [ ] **`--doctor` must stop greenlighting a broken map.** `degraded` is computed
+- [x] **`--doctor` must stop greenlighting a broken map.** DONE — a 0-file map now
+  reports `invalid`, a low-edge-coverage map reports `degraded` with the measured
+  percentage, and both roll into `overall`. Exit code stays 0: `README.md:761`
+  documents `--doctor` as always exiting 0, so the report was the bug, not the exit
+  code. Pre-schema-5 caches lack the fields and still read `ok`. Original finding: `degraded` is computed
   at `agentmap.mjs:1382` and consumed only by the stderr warning at `:1419`;
   `collectMapStatus()` (`:2210–2265`) never reads it, `fileCount`, or
   `edgeCoverage` — so `--doctor` reports "Map cache: ok" with exit 0 for a map
@@ -698,7 +727,11 @@ patch release inside 48 hours regardless of which language strategy wins.
 - [ ] **Record the post-fix baseline on day 14** — downloads/week **and** inbound
   non-security issue count. This pair is the denominator for every later gate.
 
-### Gate (binary, in CI, no interpretation)
+### Gate (binary, in CI, no interpretation) — ✅ MET 2026-07-26
+
+All five verified on clean GitHub runners on Node 20/22/24, and they are no longer
+a one-time check: the `install-smoke` job asserts every one of them on each push,
+so this gate cannot silently regress the way it silently broke.
 
 On a clean runner with no repo checkout, on Node 20/22/24, **all five**:
 
@@ -710,7 +743,8 @@ On a clean runner with no repo checkout, on Node 20/22/24, **all five**:
    `map.json`'s `generatedSha`.**
 
 Gate 5 is the one the obvious test plan misses, and it is the one that would have
-caught the dead auto-refresh.
+caught the dead auto-refresh. Measured on the runner: `generatedSha 4be1c17 ->
+135ce42`, i.e. a real commit really does rebuild the map again.
 
 ### Kill
 
