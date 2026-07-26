@@ -25,7 +25,9 @@ itself (`ts-morph`), used when the map (re)builds.
   - install it globally: `npm i -g @raymondchins/agentmap` (then `agentmap` works).
   - (For developing agentmap itself you can keep `agentmap.mjs` at the repo root and set
     `AGENTMAP_HOOK_ALLOW_LOCAL=1` — the hook does not run a repo-local script otherwise.)
-- The repo must have a `tsconfig.json` (agentmap reads it to find source files).
+- A `tsconfig.json` is **not** required. agentmap uses it when present (for `paths`
+  aliases and the file list) and otherwise falls back to source globs, so a plain
+  JS repo or one with a solution-style config still maps (`agentmap.mjs:823-825`).
 
 **Caveats:**
 

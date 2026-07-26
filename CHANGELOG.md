@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Three documentation claims that were false.** `.claude-plugin/plugin.json`
+  said `0.14.0` while the package shipped 0.15.0 → 0.16.1 (this is the version
+  users see in the Claude Code marketplace); the README badge advertised Node
+  `>=18` through the entire life of the `>=20` breaking change; and
+  `hooks/INSTALL.md` listed a `tsconfig.json` as a hard prerequisite, which it
+  has never been — `makeProject()` falls back to source globs when the config is
+  missing, malformed, or solution-style (`agentmap.mjs:823-825`), so plain-JS
+  repos map fine.
+- **Version drift is now caught by `npm test`.** New
+  `test/version-lockstep.test.mjs` asserts `server.json` (both fields),
+  `.claude-plugin/plugin.json` and the README Node badge all track
+  `package.json`. `publish.yml` already gated `server.json`, but nothing watched
+  `plugin.json` at all, which is how it drifted two minor versions unnoticed —
+  and a publish-time gate only fires once a tag is pushed, which costs a
+  delete-and-move of a published tag to recover from.
+
 ## [0.16.1] - 2026-07-26
 
 ### Added
