@@ -817,7 +817,14 @@ because it needs the checker or the resolver.
   Surface "the real definition site behind the barrel" as an explicit output.
   **This is the single most legible demonstration that compiler-grade beats
   name-matching** and should lead the depth story.
-- [ ] **Fix `--callers` on JSX, or make it state its limitation in the payload.**
+- [x] **Fix `--callers` on JSX, or make it state its limitation in the payload.**
+  **DONE — resolved, not labelled.** JSX elements are now call sites in BOTH
+  directions, via one shared `invocationOf()` helper (the filter was duplicated,
+  and only the incoming copy was ever reasoned about). Measured on a real React
+  repo: `--callers Container` 0 -> 43 call sites. `<Foo>…</Foo>` counts once,
+  `<Foo.Bar />` resolves to `Bar`, intrinsic tags fabricate nothing, non-JSX repos
+  are byte-identical. This unblocks 1C — the depth positioning could not honestly
+  ship while the flagship query lost to `rg`. Original finding:
   ⚠️ **Reproduced in this session** on a 4-file TSX fixture: `--callers Container`
   returns **1** caller (the plain call in `Direct.ts`) and misses **both**
   `<Container>` element usages that `rg '<Container'` finds. That is a shipped

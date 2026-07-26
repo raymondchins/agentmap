@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`--callers` / `--calls` were blind to JSX.** A JSX element is an invocation in
+  every runtime — `<Foo />` compiles to `React.createElement(Foo, …)` (classic) or
+  `jsx(Foo, …)` (automatic) — but both call-graph directions collected only
+  `CallExpression` / `NewExpression`, so every React component under-reported its
+  callers and a component that merely renders children reported **zero** outgoing
+  calls. Measured on a real React repo: `--callers Container` returned **0 call
+  sites** before, **43** after.
+
+  This was the worst instance of the failure class the tool is built to prevent: a
+  shipped feature returning under-counted results with exit 0, under an explicit
+  "compiler-accurate, not tree-sitter name-matching" label (`mcp.mjs:81`). A
+  name-matching `rg '<Container'` beat it outright.
+
+  Both directions now share one `invocationOf()` helper rather than two copies of
+  the same filter — the incoming path had drifted into being the only one anybody
+  reasoned about. `JsxClosingElement` is deliberately not matched, so
+  `<Foo>…</Foo>` counts once; `<Foo.Bar />` resolves to `Bar`, not the `Foo`
+  namespace; and intrinsic tags (`<div>`) still produce no in-project edge.
+  Non-JSX repos are unaffected — asserted.
 - **Three documentation claims that were false.** `.claude-plugin/plugin.json`
   said `0.14.0` while the package shipped 0.15.0 → 0.16.1 (this is the version
   users see in the Claude Code marketplace); the README badge advertised Node
