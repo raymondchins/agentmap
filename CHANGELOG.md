@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-26
+
 ### Changed
 - **Minimum Node is now 20** (`engines` was `>=18`). This is a breaking change for
   anyone still installing on Node 18. The floor is set by the dependency tree, not
@@ -16,6 +18,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   uses nothing above Node 18; this is purely about telling the truth.
 - **CI matrix is now `[20, 22, 24]`** (was `[18, 20, 22]`) — the new floor, current
   LTS, and forward coverage, at the same three-leg cost.
+- **Three test assertions dropped needless regexes** that tripped CodeQL as high-severity
+  findings. `assert.match(out, /-->/)` (a Mermaid arrow) read as `js/bad-tag-filter`, an
+  incomplete HTML-comment-end filter; `new RegExp(PKG.version.replace(/\./g, "\\."))`
+  read as `js/incomplete-sanitization`, a hand-rolled regex escape that does not escape
+  backslashes. Both were false positives — no shipped code is involved — but neither
+  assertion needed a regex at all, so `.includes()` removes the finding at its cause
+  rather than suppressing it. No behavior change; 356/356 tests still pass.
 
 ## [0.15.1] - 2026-07-19
 
