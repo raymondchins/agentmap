@@ -48,6 +48,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rather than teaching the cache to reproduce a wrong answer.
 
 ### Added
+- **`--routes` / `--route <url|file>`: a Next.js App Router route table whose URLs
+  are real.** The bar is a URL you can paste into a browser, and that is exactly
+  where a convention-only extractor goes wrong: a `(group)` folder organises the
+  tree and contributes NOTHING to the URL, but it DOES contribute a layout.
+  Measured against a 394-file App Router repo, a competing tool emitted 35 routes
+  of a true 64, and 31 of those 35 carried the route group in the URL
+  (`/(app)/brands/:id` — a path that 404s), leaving 4 usable. It indexed none of
+  the 13 API routes and none of the 16 `export { default } from` shim routes.
+
+  `--routes` gets all 64: groups stripped, `[id]` -> `:id`, `[...rest]` -> `*rest`,
+  `[[...rest]]` -> `*rest?`, `@slot` contributing no segment, the root page as `/`
+  rather than `/page.tsx`, HTTP methods per API route, and shim routes resolved to
+  their target. `--route` answers both directions — a concrete URL
+  (`/brands/123`, matched through dynamic segments) or a file path — and reports
+  the layout chain and RSC boundary.
+
+  A layout chain is reported for pages ONLY: `route.ts` returns a Response and
+  never renders, so claiming layouts wrap it would be a confident falsehood.
+
+  Computed on demand from the map's own file list — no new persisted state, no
+  staleness class, ~80ms on 400 files. Repos without `app/`/`src/app/` say so and
+  exit 1 rather than inventing an empty table.
+
 - **`--build-edges`: a precomputed call-edge index, so `--callers` stops paying the
   type-checker on every query.** `--callers` was ~1500ms and the reason was not the
   reference search — profiling put ~750-860ms, about half the total, in the FIRST

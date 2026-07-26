@@ -2850,6 +2850,11 @@ Query commands:
   --symbols [n]        top-n Aider-style ranked symbols (default 30)
   --feature <name>     files composing a feature + external dependents
   --features           list all features (route segments) by size
+  --routes             Next.js App Router route table: real URLs (route groups
+                       stripped, [id] -> :id), HTTP methods per API route, the
+                       layout chain, and re-export shim aliases
+  --route <url|file>   what serves this URL (or which URL a file serves):
+                       matched file, methods, layout chain, RSC boundary
   --hubs               top files by PageRank importance
   --print              dump the full cached map as JSON
   --export <mermaid|dot> [--focus <p>]
@@ -2921,14 +2926,14 @@ async function main() {
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp", "--build-edges",
     "--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--export", "--focus", "--tokens",
-    "--symbols", "--feature", "--features", "--hubs",
+    "--symbols", "--feature", "--features", "--hubs", "--routes", "--route",
   ]);
 
   // A token consumed as the VALUE of a value-taking flag is never itself a flag —
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform", "--route"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2965,6 +2970,7 @@ async function main() {
     "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"], "--build-edges": [],
     "--any": [], "--find": [], "--search": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
+    "--routes": [], "--route": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
   if (presentCommands.length > 1) {
@@ -3399,6 +3405,56 @@ async function main() {
       console.log(`features (${list.length}):`);
       for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
     });
+  } else if (has("--routes")) {
+    const data = ensureFresh();
+    const routes = buildRouteTable(data);
+    if (!routes) {
+      out({ command: "routes", routes: [], reason: "no Next.js App Router directory (app/ or src/app/)", _code: 1 },
+        () => console.log("routes: no app/ or src/app/ directory — not a Next.js App Router project"));
+      process.exitCode = 1;
+    } else {
+      out({ command: "routes", total: routes.length, routes }, () => {
+        const pages = routes.filter((r) => r.kind === "page").length;
+        console.log(`routes (${routes.length}): ${pages} pages, ${routes.length - pages} api`);
+        for (const r of routes) {
+          const m = r.methods?.length ? ` [${r.methods.join(",")}]` : "";
+          const a = r.alias ? `  -> ${r.alias}` : "";
+          const b = r.boundary ? ` (${r.boundary})` : "";
+          console.log(`  ${r.url}${m}${b}  ${r.file}${a}`);
+        }
+      });
+    }
+  } else if (has("--route")) {
+    const raw = arg("--route");
+    if (!raw) { console.error("--route needs a URL or file, e.g. `--route /brands/123` (run --routes to list)"); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      const routes = buildRouteTable(data);
+      const hits = routes ? matchRoute(routes, raw) : [];
+      if (!hits.length) {
+        out({ command: "route", query: raw, matches: [], _code: 1 },
+          () => console.log(`route "${raw}": no match (run --routes to list)`));
+        process.exitCode = 1;
+      } else {
+        // Enrich each hit with what the map already knows: the modules the
+        // handler imports, flagged by RSC boundary — i.e. the server actions a
+        // page can actually reach.
+        const enriched = hits.map((r) => {
+          const f = data.files[r.file] || {};
+          const serverDeps = (f.imports || []).filter((i) => data.files[i]?.rsc === "server");
+          return { ...r, imports: f.imports || [], serverModules: serverDeps };
+        });
+        out({ command: "route", query: raw, total: enriched.length, matches: enriched }, () => {
+          for (const r of enriched) {
+            console.log(`${r.url}${r.methods?.length ? ` [${r.methods.join(",")}]` : ""}  (${r.kind})`);
+            console.log(`  serves: ${r.file}${r.boundary ? `  boundary: '${r.boundary}'` : ""}`);
+            if (r.alias) console.log(`  alias of: ${r.alias}`);
+            if (r.layoutChain.length) console.log(`  layouts (outer->inner): ${r.layoutChain.join(" -> ")}`);
+            if (r.serverModules.length) console.log(`  server modules: ${r.serverModules.join(", ")}`);
+          }
+        });
+      }
+    }
   } else if (has("--hubs")) {
     const data = ensureFresh();
     out({ command: "hubs", fileCount: data.fileCount, sha: data.generatedSha, hubs: data.hubs }, () => {
@@ -3508,6 +3564,105 @@ function invocationOf(id, SyntaxKind) {
     if (el && el.getTagNameNode() === tagHolder) return el;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Next.js App Router route table.
+//
+// Computed on demand from the filesystem rather than persisted: it is pure
+// readdir + string work (single-digit ms even on 400 files), so caching it would
+// buy nothing and add a staleness class. Nothing here touches map.json.
+//
+// The bar is a URL you can paste into a browser. That is precisely where a
+// convention-only extractor goes wrong: a `(group)` folder organises the tree
+// and contributes NOTHING to the URL, but it DOES contribute a layout. Emitting
+// `/(app)/brands/:id` — a path that 404s — is worse than emitting nothing,
+// because it looks authoritative.
+// ---------------------------------------------------------------------------
+const ROUTE_FILE_RE = /(^|\/)(page|route|layout)\.(t|j)sx?$/;
+const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+// One path segment -> its URL contribution, or null when it contributes none.
+function routeSegment(seg) {
+  if (/^\(.+\)$/.test(seg)) return null;               // (group) — organisational only
+  if (/^@/.test(seg)) return null;                     // @slot — parallel route
+  if (/^\[\[\.\.\..+\]\]$/.test(seg)) return `*${seg.slice(5, -2)}?`; // [[...rest]]
+  if (/^\[\.\.\..+\]$/.test(seg)) return `*${seg.slice(4, -1)}`;      // [...rest]
+  if (/^\[.+\]$/.test(seg)) return `:${seg.slice(1, -1)}`;            // [id]
+  return seg;
+}
+
+function buildRouteTable(data) {
+  // Derive the app dir from the MAP's own file list rather than the filesystem:
+  // the map already honours .gitignore and the ignore rules, so a build artefact
+  // or an untracked scratch file under app/ can never become a phantom route.
+  const keys = Object.keys(data.files);
+  const appDir = ["app", "src/app"].find((d) => keys.some((p) => p.startsWith(`${d}/`) && ROUTE_FILE_RE.test(p)));
+  if (!appDir) return null;                            // not an App Router project
+  const files = keys.filter((p) => p.startsWith(`${appDir}/`) && ROUTE_FILE_RE.test(p));
+  const layouts = new Map();
+  for (const f of files) if (/(^|\/)layout\.(t|j)sx?$/.test(f)) layouts.set(f.replace(/(^|\/)layout\.(t|j)sx?$/, ""), f);
+  const routes = [];
+  for (const f of files) {
+    const kind = /(^|\/)page\./.test(f) ? "page" : /(^|\/)route\./.test(f) ? "route" : null;
+    if (!kind) continue;                               // layout.tsx is chain-only, never its own URL
+    const relDir = f.slice(appDir.length + 1).replace(/(^|\/)(page|route)\.(t|j)sx?$/, "");
+    const segs = relDir === "" ? [] : relDir.split("/");
+    const url = "/" + segs.map(routeSegment).filter((s) => s !== null).join("/");
+    let src = ""; try { src = readFileSync(f, "utf8"); } catch {}
+    const methods = kind === "route"
+      ? HTTP_METHODS.filter((m) => new RegExp(`export\\s+(async\\s+)?(function|const)\\s+${m}\\b`).test(src))
+      : null;
+    // `export { default } from "X"` — a shim route that renders another route's
+    // component. A convention-only extractor misses these entirely because there
+    // is no `export default function` to match.
+    const alias = src.match(/export\s*\{\s*default(?:\s+as\s+default)?\s*\}\s*from\s*["']([^"']+)["']/)?.[1] ?? null;
+    // Layout chain: every ancestor dir INCLUDING (group) dirs — the groups that
+    // vanish from the URL are exactly the ones that add a layout.
+    //
+    // PAGES ONLY. A route.ts handler is not wrapped by layout.tsx — layouts are
+    // React components composing a rendered tree, and an API handler returns a
+    // Response, never JSX. Reporting a layout chain for /api/* would be a
+    // confident falsehood about what runs on that request.
+    const chain = [];
+    if (kind === "page") {
+      let cur = f.replace(/(^|\/)(page)\.(t|j)sx?$/, "");
+      for (;;) {
+        if (layouts.has(cur)) chain.unshift(layouts.get(cur));
+        if (!cur || cur === appDir) break;
+        const up = cur.slice(0, cur.lastIndexOf("/"));
+        if (up.length < appDir.length) break;
+        cur = up === cur ? "" : up;
+      }
+    }
+    routes.push({
+      url: url.length > 1 ? url.replace(/\/+$/, "") : "/",
+      kind, file: f,
+      ...(methods ? { methods } : {}),
+      ...(alias ? { alias } : {}),
+      layoutChain: chain,
+      boundary: data.files[f]?.rsc ?? null,
+    });
+  }
+  routes.sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : (a.kind < b.kind ? -1 : 1)));
+  return routes;
+}
+
+// Match a concrete URL against the table, honouring dynamic segments.
+function matchRoute(routes, q) {
+  const norm = (u) => ("/" + u.replace(/^\/+|\/+$/g, "")).replace(/\/+/g, "/");
+  const direct = routes.filter((r) => r.url === norm(q) || r.file === q || r.file.endsWith(`/${q}`));
+  if (direct.length) return direct;
+  const parts = norm(q).split("/").filter(Boolean);
+  return routes.filter((r) => {
+    const rp = r.url.split("/").filter(Boolean);
+    if (rp.some((s) => s.startsWith("*"))) {
+      const fixed = rp.filter((s) => !s.startsWith("*"));
+      return fixed.every((s, i) => s.startsWith(":") || s === parts[i]);
+    }
+    if (rp.length !== parts.length) return false;
+    return rp.every((s, i) => s.startsWith(":") || s === parts[i]);
+  });
 }
 
 // Resolve the named function/class that lexically encloses a reference node.
