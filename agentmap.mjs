@@ -1499,7 +1499,13 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
       // by test/vite-alias.test.mjs. That message sent users to mirror aliases
       // into tsconfig paths — work the tool had already done — and hid the real
       // causes below.
-      process.stderr.write(`⚠ ${nodes.length} files, ${fileEdges.length} import edge${fileEdges.length === 1 ? "" : "s"} resolved — most imports unresolved. Known gaps: tsconfig \`references\` (solution-style configs), and computed aliases (function/regex/URL idioms) in bundler configs, which are skipped. Run \`agentmap --doctor\`, or file an issue with your config layout.\n`);
+      // tsconfig `references` is NOT listed here. It was, briefly, and that was
+      // wrong: project references govern build order and declaration output, not
+      // module resolution, and file discovery already ignores tsconfig `include`
+      // entirely (see the git ls-files pass in makeProject). Measured across
+      // solution-style / narrow-include / partial-include / no-tsconfig layouts —
+      // all index the full repo. See test/monorepo-shapes.test.mjs.
+      process.stderr.write(`⚠ ${nodes.length} files, ${fileEdges.length} import edge${fileEdges.length === 1 ? "" : "s"} resolved — most imports unresolved. Known gaps: computed aliases (function/regex/URL idioms) in bundler configs, which are skipped, and package-name imports with no \`paths\` entry and no workspace \`package.json\` (TypeScript cannot resolve those either). Run \`agentmap --doctor\`, or file an issue with your config layout.\n`);
     }
   }
   return out;

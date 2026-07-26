@@ -809,7 +809,23 @@ This is the content of the waiting window. Capacity goes here, not to idling.
 Every item is genuinely underserved and structurally beyond a tree-sitter tool,
 because it needs the checker or the resolver.
 
-- [ ] **tsconfig `references` (project references).** The ~296-line resolver at
+- [x] **tsconfig `references` (project references).** **CLOSED — NOT A GAP.**
+  The premise was wrong on both halves, and measuring it is what showed that.
+  (a) Project references are not a module-resolution mechanism — they govern
+  build order and declaration output. TypeScript resolves cross-package imports
+  via relative paths, `paths`, or node_modules/workspaces, and agentmap already
+  handles all three. Checked against TypeScript's own `ts.resolveModuleName`: a
+  package-name import with references but no `paths` and no `package.json` is
+  TS2307 in tsc too, so reporting no edge there is the correct answer.
+  (b) A narrow or solution-style `include` never limited the file set anyway —
+  `makeProject` reads tsconfig for compiler options and then adds everything
+  `git ls-files` returns that `include` missed. That was deliberate, and the
+  comment at the call site says so.
+  Measured across 7 fixture shapes (solution-style, narrow include, partial
+  include, no tsconfig, paths, workspace package.json, unresolvable); all index
+  the full repo and resolve the cross-package edge except the one tsc rejects.
+  Locked in by `test/monorepo-shapes.test.mjs`. The degraded-map warning no
+  longer names `references` as a known gap. Original claim: The ~296-line resolver at
   `agentmap.mjs:530–825` covers extends-chains, `baseUrl`, `paths`, vite/webpack
   alias, `package.json` `imports`/`exports`, and workspace discovery — project
   references, **the** defining monorepo primitive, are absent. Verified: the only
