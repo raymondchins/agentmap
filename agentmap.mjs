@@ -3044,6 +3044,44 @@ function mcpResetCache() { _mcpMapCache = null; }
 // path (build/--map/--find/--relates/--hubs) never constructs a Project, so it is
 // provably untouched. Returns a plain object; `_code` is the exit code (stripped
 // by both callers before it reaches the user).
+// Given a reference identifier, return the node that INVOKES it, or null.
+//
+// Two shapes count as an invocation:
+//   1. `foo()` / `ns.foo()` — a CallExpression whose CALLEE (not an argument) is
+//      this identifier. The two-hop PropertyAccessExpression check is what makes
+//      `ns.foo()` resolve while `foo(ns.bar)` correctly does not.
+//   2. `<Foo />` / `<Foo>…</Foo>` — a JSX element whose TAG NAME is this
+//      identifier. JSX is an invocation in every runtime (classic compiles to
+//      `React.createElement(Foo, …)`, automatic to `jsx(Foo, …)`), and a user
+//      asking "who calls Container" means the components rendering it.
+//
+// Shape 2 was missing, so `--callers` under-reported every React component while
+// still exiting 0 under a "compiler-accurate" label — the exact silent-degradation
+// class this tool exists to avoid. Verified before the fix: a 4-file TSX fixture
+// with one direct call and two JSX usages returned 1 of 3.
+//
+// JsxClosingElement is deliberately NOT matched: `<Foo>…</Foo>` is ONE call site,
+// and matching the closing tag too would double-count it on multi-line elements.
+//
+// `SyntaxKind` is passed in rather than closed over, so this stays a pure
+// module-scope helper against the lazily-loaded ts-morph (same shape as
+// rscBoundary at :450).
+function invocationOf(id, SyntaxKind) {
+  let call = id.getParentIfKind(SyntaxKind.CallExpression);
+  const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
+  if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
+  if (call && call.getExpression() === (pa ?? id)) return call;
+
+  // `<Foo.Bar />` puts the identifier under a JsxMemberExpression; the element's
+  // tag-name node is that member expression, not the bare identifier.
+  const tagHolder = id.getParentIfKind(SyntaxKind.JsxMemberExpression) ?? id;
+  for (const kind of [SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxOpeningElement]) {
+    const el = tagHolder.getParentIfKind(kind);
+    if (el && el.getTagNameNode() === tagHolder) return el;
+  }
+  return null;
+}
+
 function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1 } = {}) {
   // --depth N (default 1) makes the query TRANSITIVE. depth 1 is byte-identical to
   // the single-hop path below (guarded `if (maxDepth > 1)`); depth ≥2 runs a capped
@@ -3167,13 +3205,26 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
       const callSites = [
         ...decl.getDescendantsOfKind(SyntaxKind.CallExpression),
         ...decl.getDescendantsOfKind(SyntaxKind.NewExpression),
+        // JSX elements are invocations too (see invocationOf). Without these, a
+        // component that only renders children reported ZERO outgoing calls —
+        // the mirror of the --callers JSX gap, in a separate code path.
+        // JsxOpeningElement only: the closing tag of `<Foo>…</Foo>` is the same
+        // call site, and collecting both would double-count it.
+        ...decl.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+        ...decl.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
       ];
       for (const site of callSites) {
-        const callee = site.getExpression();
+        const siteKind = site.getKind();
+        const isJsx = siteKind === SyntaxKind.JsxSelfClosingElement || siteKind === SyntaxKind.JsxOpeningElement;
+        const callee = isJsx ? site.getTagNameNode() : site.getExpression();
         let idNode = null;
         if (callee.getKind() === SyntaxKind.Identifier) idNode = callee;
         else if (callee.getKind() === SyntaxKind.PropertyAccessExpression) idNode = callee.getNameNode();
+        // `<Foo.Bar />` — the component is Bar, not the Foo namespace.
+        else if (callee.getKind() === SyntaxKind.JsxMemberExpression) idNode = callee.getNameNode();
         if (!idNode) continue; // computed / parenthesized / dynamic — unresolvable
+        // Intrinsic tags (`<div>`) need no special case: they resolve into lib
+        // .d.ts and are dropped by the isDeclarationFile() gate below.
         let targets;
         try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
         for (const d of targets) {
@@ -3202,11 +3253,11 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
       calls: shownCalls, _code: out.length ? 0 : 1,
     };
   }
-  // Keep ONLY true call sites: a reference identifier whose parent (two-hop for
-  // `ns.foo()` member/namespace calls) is a CallExpression AND is its CALLEE, not
-  // an argument. This is the compiler-accuracy line — a type-position mention, a
-  // re-export, a bare value reference, or a same-named local in another file binds
-  // to a DIFFERENT symbol and never reaches here.
+  // Keep ONLY true call sites — see invocationOf(): a CallExpression whose callee
+  // is this identifier (two-hop for `ns.foo()`), or a JSX element whose tag name it
+  // is. This is the compiler-accuracy line — a type-position mention, a re-export, a
+  // bare value reference, or a same-named local in another file binds to a DIFFERENT
+  // symbol and never reaches here.
   if (maxDepth > 1) {
     // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
     // node for the ENCLOSING symbol of each call site. `enclosing()` returns that
@@ -3241,10 +3292,7 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
         let refs;
         try { refs = fr.node.findReferencesAsNodes(); } catch { continue; }
         for (const id of refs) {
-          let call = id.getParentIfKind(SyntaxKind.CallExpression);
-          const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
-          if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
-          if (!call || call.getExpression() !== (pa ?? id)) continue;
+          if (!invocationOf(id, SyntaxKind)) continue;
           const file = rel(id.getSourceFile().getFilePath());
           const line = id.getStartLineNumber();
           const siteKey = `${file}:${line}`;
@@ -3277,10 +3325,7 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
     let refs;
     try { refs = decl.findReferencesAsNodes(); } catch { continue; }
     for (const id of refs) {
-      let call = id.getParentIfKind(SyntaxKind.CallExpression);
-      const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
-      if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
-      if (!call || call.getExpression() !== (pa ?? id)) continue;
+      if (!invocationOf(id, SyntaxKind)) continue;
       const file = rel(id.getSourceFile().getFilePath());
       const line = id.getStartLineNumber();
       const dedupe = `${file}:${line}`;
