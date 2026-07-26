@@ -3447,8 +3447,14 @@ export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJ
 // match, the guard reads "imported", main() never runs — and the CLI exits 0
 // having printed nothing. That silently killed `npx @raymondchins/agentmap`,
 // `npm run agentmap`, `--install-hooks`, and the MCP Registry's `--mcp` launch
-// from v0.12.1 (a217331) through v0.16.0. Compare realpaths so the symlink and
-// its target resolve to the same file.
+// across 12 published versions, 0.10.0 through 0.16.0. Compare realpaths so the
+// symlink and its target resolve to the same file.
+//
+// The range is measured against published tarballs, not inferred from tags:
+// `git tag --contains a217331` starts at v0.12.1, but 0.10.0 and 0.11.0 were
+// published manually off the same day's work (ROADMAP.md:262), so the tag
+// ancestry understates it. Verified via the bin symlink: 0.9.0 prints "0.9.0",
+// 0.10.0 prints nothing.
 function isDirectRun(metaUrl) {
   const argv1 = process.argv[1];
   if (!argv1) return false;

@@ -8,11 +8,25 @@
 > **How to use:** work the batches top-to-bottom (they're ordered by
 > effort-vs-impact and dependency). Batch 2 is the structural enabler for 3 and
 > 5 — do it before them. Within a batch, land one commit per logical fix with a
-> regression test, and keep `npm test` green (currently **165 tests**).
+> regression test, and keep `npm test` green (**362 tests** as of 2026-07-26).
+>
+> **[Part II](#part-ii--make-it-useful-for-the-majority-2026-07-26) (2026-07-26)**
+> is a second audit pass answering "make this useful for the majority of people —
+> multi-language?". It supersedes the *Strategic decision* section below and the
+> deferred tree-sitter item in Batch 5. Start there; Batches 1–B remain the
+> engineering backlog.
 
 ---
 
 ## Strategic decision: multi-language support
+
+> ⚠️ **SUPERSEDED 2026-07-26 by [Part II](#part-ii--make-it-useful-for-the-majority-2026-07-26).**
+> The verdict below ("build the seam now, defer the languages") survives, but its
+> reasoning does not: the gate it set could never fire (there was no working
+> distribution to generate demand — every npm install path exited 0 printing
+> nothing from 0.10.0 to 0.16.0), the seam it claims to have bought was not
+> actually built, and four of its supporting claims are stale or refuted. Read
+> Part II §1 before acting on anything in this section.
 
 **Question raised:** should agentmap move beyond TS/JS (adopt Python/Go/Rust…)?
 
@@ -356,8 +370,16 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   declarations. Add a config file / `package.json` key / `--exclude` globs.
 
 ### Deferred (do NOT do yet)
-- [ ] Tree-sitter multi-language tier (Python → Go → Java via `web-tree-sitter` +
-  `tags.scm`). Gate on real demand. See *Strategic decision* above.
+- [ ] ⚠️ **SUPERSEDED by [Part II](#part-ii--make-it-useful-for-the-majority-2026-07-26).**
+  The old item read: *"Tree-sitter multi-language tier (Python → Go → Java via
+  `web-tree-sitter` + `tags.scm`). Gate on real demand."* Still deferred, but the
+  plan changed on three points: the first spike language is **Go, not Python**
+  (Go's resolver is a `go.mod` prefix strip — it measures a lower bound, and
+  `go list -deps -json` gives free ground truth; Python's import model has
+  permanently unfixable static-analysis gaps), "real demand" is replaced by a
+  countable instrument because the old gate could not fire, and the whole tier is
+  now gated behind a fidelity contract that forbids shipping a name-matched graph.
+  See Part II Phases F, 2 and 3.
 
 ---
 
@@ -460,8 +482,795 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   with source URLs, completeness critique, contradictions) — generated
   2026-07-03. Ask Claude to regenerate from the workflow run, or see the session
   where this roadmap was created.
-- **Key numbers:** the tool is a single-file CLI (`agentmap.mjs`, ~1831 lines),
-  one runtime dep (`ts-morph`), Node ≥18, currently **165 tests** green.
-- **Competitive north star:** CodeGraph (multi-language, 57k stars) owns breadth;
-  agentmap wins on ts-morph compiler accuracy + honest eval + agent-loop wiring.
-  Don't chase breadth; deepen TS.
+- **Key numbers (refreshed 2026-07-26):** single-file CLI (`agentmap.mjs`, **3,470
+  lines**), one runtime dep (`ts-morph`), **Node ≥20**, **362 tests** green across
+  92 files. *(Previously recorded here as ~1831 lines / Node ≥18 / 165 tests —
+  stale on all three.)*
+- **Competitive north star:** ⚠️ the old note read "CodeGraph (multi-language, 57k
+  stars) owns breadth; agentmap wins on ts-morph compiler accuracy + honest eval +
+  agent-loop wiring. Don't chase breadth; deepen TS." As of 2026-07-26 CodeGraph
+  is at 62,450 stars and 35 languages, its eval is now public (so honest eval is
+  no longer a differentiator), and `scip-query` — same compiler-accuracy class —
+  out-downloads agentmap on npm. The conclusion still holds; the reasoning is
+  restated with sources in **Part II §1**. Star counts in this category are
+  inflated and are not used as an adoption proxy anywhere in Part II.
+
+---
+
+# Part II — "Make it useful for the majority" (2026-07-26)
+
+> Second full audit pass: 4 code-recon dimensions + 3 external research reports +
+> 3 competing strategy proposals, adjudicated. Same rules as Part I — every task
+> carries a `file:line` anchor and a checkbox; every number carries a source or is
+> explicitly flagged unverified.
+>
+> **This part supersedes the *Strategic decision* section at ROADMAP.md:21–58 and
+> the "Deferred (do NOT do yet)" item at ROADMAP.md:372–375.** Where they
+> conflict, this wins — it is later, and it is measured.
+>
+> Phases below are numbered 0–4 and run *after* Batch 5. They do not renumber the
+> existing batches.
+
+---
+
+## 0. The question, and the honest answer
+
+**Asked:** "make this more useful for the majority of people — multi-language support?"
+
+Those are two questions, and conflating them is how this roadmap went wrong the
+first time.
+
+1. **"Useful for the majority"** — today, verifiably, **nobody can run it**. From
+   v0.10.0 through v0.16.0 every documented install path (`npx`, `npm i -g`,
+   `node_modules/.bin`, `npm run agentmap`, the Claude Code plugin, the MCP
+   Registry entry, the post-commit auto-refresh) exited 0 having printed zero
+   bytes. Verified below, against published tarballs.
+2. **"Multi-language"** — a real question, but **unanswerable until (1) is
+   fixed**, because every demand signal the old gate was waiting on was being
+   read off a population that had never seen the tool emit output.
+
+Fixing (1) is not a phase. It is the precondition, and it ships regardless of
+which language strategy wins.
+
+---
+
+## 1. Verdict on the existing *Strategic decision* (ROADMAP.md:21–58)
+
+**REFINED — the conclusion survives, the reasoning does not.**
+
+The verdict ("build the seam now, defer the languages") is still right, and is
+right for a solo maintainer for reasons the original section never stated. But
+its gate was unfireable, its "seam" was not built, and three of its four
+supporting claims are stale, wrong, or refuted.
+
+| Original claim (line) | Verdict | Replacement |
+|---|---|---|
+| "only pull the tree-sitter tier forward if post-distribution demand actually asks for Python" (`:39–40`) | **Unfireable gate** | There was no distribution. The binary did not run for npm users. "ZERO issues requesting other languages" measures zero *working* users. The real signal arrived as **exits**, not issues: `rifanid98/agentmap-go` (2026-06-15) and `dstwn/agentmap-php` (2026-06-19, shipped in three days) — two independent language ports, neither of which filed a request first. A gate that waits for a filed issue is the wrong instrument. |
+| "ship the `extractFacts()` backend interface in Batch 2 → cheap optionality" (`:37–38`, checkbox at `:101`) | **Materially incomplete** | What landed is an extracted *function*, not an *interface*. There is no backend registry, no `backendFor(path)`, no dispatch; `extractFacts(inc)` takes no backend parameter and calls `makeProject()`/`tsMorph()` unconditionally (`agentmap.mjs:1008–1009`). `assemble()` — documented as backend-agnostic at `:1280` — is **not exported** (`:3439`), so a second backend cannot live in another file. The optionality was not bought. |
+| "hoist the source-extension list … one per-backend descriptor" (`:108–111`, marked `[x]`) | **Half done** | The list was hoisted (`:153–157`); the *consumers* were not. Nine call sites read the module constant, and there are two further hardcoded extension ladders that do not derive from it: `agentmap.mjs:674` and `eval/eval.mjs:54`. Swapping `CODE_EXT` swaps all languages at once; two backends cannot coexist. |
+| "tree-sitter rivals are demonstrably noisy on call graphs" (`:26`) | **Refuted as framed** | The only hard evidence found (`tree-sitter-analyzer`'s miswire-audit: CodeGraph 745 mis-wires / 38,103 call edges = 1.96%, vs its own 6 / 114,160) comes from a tool that is **itself tree-sitter-based**. Noise is a *resolver-design* choice, not a parser property. Correct restatement: *some* implementations, including the category leader, ship measurable cross-language call-graph noise. ⚠️ Source is a 44-star adversarial competitor, self-published, measured on its own repo, and its README says it is "re-verifying" — treat as **likely, not verified**. |
+| "honest eval methodology" is a differentiator (`:27`) | **No longer true** | CodeGraph now publishes measured per-language cross-file coverage on named public repos including unflattering ceilings. `EVAL.md` is still good practice; it is no longer a moat. |
+| "compiler-grade ts-morph accuracy" is unmatched (`:25–26`) | **Overstated** | Serena is LSP-based across 40+ languages; `scip-typescript` is built on the TypeScript typechecker — same accuracy class as ts-morph — and `scip-query` does 4,934 npm downloads/month against agentmap's 3,266. The defensible claim is narrower: *the only zero-config, single-dependency, local, token-budgeted TS/JS repo map with compiler-grade resolution.* |
+| "CodeGraph … ~57k stars, 20+ languages, 2s auto-sync" (`:23`) | **Stale / misread** | 62,450 stars and a 35-language table as of 2026-07-26. "2s" is a file-watcher **debounce quiet window** (tunable), not indexing latency — Batch 3's framing at `ROADMAP.md:160` attacks a number that is not a performance figure. Also: stars in this category are near-worthless as signal; use npm downloads. |
+| "Entering [multi-language] = being the 4th-best polyglot" (`:24`) | **Optimistic** | Realistic entry position is 5th–8th. Four polyglot tools at 26k–96k stars launched inside six months. The conclusion (stay out) gets *stronger*, not weaker. |
+
+**What does not change:** for one part-time maintainer, being the definitive TS/JS
+tool beats being a mediocre polyglot. That call stands. Everything below is about
+making it stand on measured ground instead of on a gate that could not fire.
+
+---
+
+## 2. Evidence that argues *against* the instinct
+
+Stated plainly, because the plan is worse if these are buried.
+
+- **Language coverage is the #1 or #2 request in every comparable project.**
+  Serena's top issue is "Swift language support" (+34); CodeGraph's language
+  tracker is +27. If reach is the goal, breadth is what people ask for.
+- **~78% of new repos are not TS/JS.** Octoverse 2025: six languages ≈ 80% of new
+  repos; Python 9.26M new repos vs TypeScript 5.39M. (JetBrains 2025 ranks TS #4
+  at 22% of primary use — the addressable share is population-dependent, and this
+  roadmap is betting on the more favourable population. Say so.)
+- **A fork already did it.** `dstwn/agentmap-php` is the strongest existing
+  multi-language demand datapoint and it exists because there was no channel for
+  demand to arrive as an issue.
+- **And the counter-evidence, which is stronger:**
+  - **Accuracy is commercially invisible.** In CodeGraph's tracker, four open,
+    reproduced, end-to-end-verified *wrong-edge* bugs sit at **+0 reactions**
+    each, while a cosmetic Windows console flash has **+14** and install-target
+    requests have **+36**. Accuracy is real, and nobody is scoring it.
+  - **A graph index measured *less* accurate than no index at all still won.**
+    arXiv 2603.27277 reports 83% answer quality for the graph-MCP agent vs 92%
+    for a plain file-reading agent, adopted anyway on ~10× token savings; the
+    project reached 35k stars.
+  - **Python/Go/Java buys parity, not differentiation.** Every polyglot
+    competitor already ships them. The live request tail is BrightScript,
+    ReScript, Julia, Fortran, Terraform, GLSL, ABAP.
+  - **A non-TS language would get a materially worse product.** See §6. Under any
+    parse-only backend, **0 of the 11 MCP tools run at TS fidelity**: 7 degrade,
+    4 must refuse.
+  - **The real baseline competitor is free.** Claude Code deliberately ships no
+    index (agentic Glob/Grep/Read) on precision, freshness, maintenance and
+    privacy grounds. Every value claim has to beat *"just grep"*, not just beat
+    CodeGraph.
+
+**Net:** the instinct is directionally reasonable and the evidence does not
+support acting on it yet — not because languages are wrong, but because the
+denominator is zero and the fidelity cost is real and large.
+
+---
+
+## 3. Status at a glance (Part II)
+
+| Phase | Theme | Effort | State |
+|---|---|---|---|
+| **0** | Repair the instrument — make the shipped commands run | 2–4 d | 🟨 guard fix + 6 regression tests committed (`ae3365e`, 362 tests green, **unreleased**); rest open |
+| **1** | Instrument demand + spend the 90-day window on TS/JS depth | 5–6 d build, then 90 d elapsed at ~0 cost | ⬜ |
+| **F** | **The fidelity contract** — precondition for any non-TS byte | 4–6 d | ⬜ |
+| **2** | Hard-timeboxed throwaway cost spike (Go), never merged | 5 d hard box | ⬜ |
+| **3** | Ship exactly ONE language, experimental flag, `resolved` tier or not at all | 10–14 d | ⬜ |
+| **4** | Promote or delete — binary, in writing | 3–5 d | ⬜ |
+
+**Legend:** ✅ done · 🟨 partial · ⬜ not started
+
+Total maintainer spend before any irreversible public commitment: **~7 working
+days** (Phase 0 + the Phase 2 spike). The 90-day windows cost zero maintainer
+time and are explicitly redirected to Phase 1B, not to idling.
+
+---
+
+## ⬜ Phase 0 — Repair the instrument (BLOCKING)
+
+**Goal:** make every documented install path actually execute. Nothing downstream
+is interpretable until this ships — there is no product strategy on top of a
+binary that exits 0 with zero output.
+
+**Why first, and why it is not a phase:** it is the precondition. It ships as a
+patch release inside 48 hours regardless of which language strategy wins.
+
+### Tasks
+
+- [x] **Main-module guard** — `agentmap.mjs:3444` / `mcp.mjs:246` compared
+  `import.meta.url` (realpath) against `process.argv[1]` (symlink path), so under
+  any npm bin the guard read "imported", `main()` never ran, and the process
+  exited 0 with zero bytes. **Landed in the working tree** as `isDirectRun()`
+  (realpath compare) in both files, plus `test/bin-symlink.test.mjs` — 6 tests
+  through a real symlink asserting on OUTPUT, not exit status, since exit 0 was
+  the bug's own signature. Committed as `ae3365e`; suite 356 → **362 green**.
+  **Not yet released — every published version is still broken.**
+- [x] **Correct the affected-version range before it goes in a release note.** DONE —
+  The new in-code comment says "from v0.12.1 (a217331) through v0.16.0". Measured
+  against published tarballs: **v0.9.0 has no guard and works under a symlink;
+  v0.10.0 is the first published version that is broken.** `git tag --contains
+  a217331` starts at v0.12.1 because 0.10.0/0.11.0 were published manually off
+  the same day's work (see `ROADMAP.md:262`). The affected set is **0.10.0 →
+  0.16.0** (12 published versions). Independently re-confirmed by installing each
+  published tarball and invoking through `node_modules/.bin/agentmap`: 0.8.0 and
+  0.9.0 print their version, 0.10.0/0.11.0/0.12.0/0.12.1/0.13.0/0.15.1/0.16.0 all
+  print nothing. The in-code comment and CHANGELOG now say 0.10.0–0.16.0. Separately, `mcp.mjs` has carried the guard
+  since **0.2.0** (first published version shipping `mcp.mjs`), but that guard was
+  latent: `--setup-mcp` writes a *direct path* for local installs
+  (`agentmap.mjs:2358`), which works — the MCP surface died because the *npx*
+  branch goes through the broken CLI bin.
+- [ ] **Fix the nudge test properly, not by inverting it.**
+  `test/nudge-hook-grep-symbol.test.mjs:126–136` asserts the emitted command MUST
+  contain `npx @raymondchins/agentmap` and MUST NOT contain the working
+  `node node_modules/@raymondchins` form — the suite locks the broken command in
+  and fails any outsider who fixes it. **Do not just flip the assertion to the
+  other hardcoded string.** Have the hook emit the command for the runner it
+  actually resolved (the same rung logic `hooks/post-commit:50–72` already
+  implements) and assert *that*, so the emitted command cannot go stale against a
+  future install shape the way it just did against this one.
+- [ ] **Add the missing CI test class.** `.github/workflows/ci.yml:52` runs
+  `npm test`, `:56` runs `node agentmap.mjs --hubs`, `:60` runs
+  `npm pack --dry-run` (executes nothing). 92 test files exercise the one path
+  real users never take. Add: `npm pack` → `npm i -g ./tgz` → `agentmap --version`
+  → `agentmap --hubs` → `npx -y ./tgz --mcp` JSON-RPC `initialize`.
+- [ ] **Fix the three downstream copies of the dead command.** `hooks/post-commit`
+  rung 1 requires `AGENTMAP_HOOK_ALLOW_LOCAL=1` (`:52`) so npm users fall to rungs
+  2–4 — `node_modules/.bin` symlink, PATH symlink, `npx` — all three guard-bug
+  casualties, run detached and silenced at `:84`, while `--install-hooks` prints
+  "Done — the map auto-refreshes on commit." Same dead `AM` constant in
+  `hooks/agentmap-nudge.mjs:160`, `hooks/agentmap-codex-nudge.mjs:137`,
+  `hooks/agentmap-gemini-nudge.mjs:90`, and `skills/agentmap/SKILL.md:49,69`.
+- [ ] **Disclose the dead maps already in the wild.** Existing installs have been
+  serving maps frozen at install time under a "stays current on its own" promise.
+  Ship an explicit release note stating post-commit auto-refresh was
+  non-functional for npm-installed users, and run `npm deprecate` on 0.10.0–0.16.0
+  pointing at the fixed release. For a tool whose value proposition is freshness,
+  silently-stale maps are a trust liability a changelog line does not cover.
+- [ ] **Version + doc drift, one sweep.** `.claude-plugin/plugin.json:5` is
+  `0.14.0` against `package.json` 0.16.0 and `server.json` 0.16.0.
+  `README.md:24` badges node `>=18` against `engines: >=20` — actively misleading
+  after the 0.16.0 breaking change. `hooks/INSTALL.md:28` states "The repo must
+  have a `tsconfig.json`" — **false**; `makeProject()` falls back to source globs
+  and the code says so at `agentmap.mjs:823–825`. `agentmap.mjs:1420` tells users
+  vite/webpack aliases "aren't read yet" — **false**; `readBundlerAliasEntries()`
+  (`:587`) AST-parses them, `bundlerAliasToPaths()` (`:642`) normalizes them, and
+  `test/vite-alias.test.mjs` covers it. Republish the MCP Registry listing (stale
+  at 0.12.1).
+- [ ] **`--doctor` must stop greenlighting a broken map.** `degraded` is computed
+  at `agentmap.mjs:1382` and consumed only by the stderr warning at `:1419`;
+  `collectMapStatus()` (`:2210–2265`) never reads it, `fileCount`, or
+  `edgeCoverage` — so `--doctor` reports "Map cache: ok" with exit 0 for a map
+  containing zero files. This is the single most dangerous thing to leave unfixed
+  before any partial-resolution backend exists.
+- [ ] **Record the post-fix baseline on day 14** — downloads/week **and** inbound
+  non-security issue count. This pair is the denominator for every later gate.
+
+### Gate (binary, in CI, no interpretation)
+
+On a clean runner with no repo checkout, on Node 20/22/24, **all five**:
+
+1. `npx @raymondchins/agentmap --version` prints a version.
+2. `npm i -g <tarball> && agentmap --hubs` prints a map.
+3. `./node_modules/.bin/agentmap --any <q>` prints a result.
+4. `npx -y @raymondchins/agentmap --mcp` answers `initialize`.
+5. `--install-hooks` followed by a real commit **measurably rewrites
+   `map.json`'s `generatedSha`.**
+
+Gate 5 is the one the obvious test plan misses, and it is the one that would have
+caught the dead auto-refresh.
+
+### Kill
+
+- Gate not met, or slipped past 3 weeks → stop everything else. There is no
+  strategy on top of a binary that prints nothing.
+
+---
+
+## ⬜ Phase 1 — Instrument demand, and spend the window on TS/JS depth
+
+**Goal:** replace a demand detector that provably cannot fire (wait-for-an-issue)
+with one that can — and put the 90 days of waiting to work, not to idling.
+
+### 1A — The demand instrument (2–3 d)
+
+- [ ] **In-CLI language census.** Count tracked sources by extension over
+  `git ls-files`, including extensions with no backend. When ≥30% of tracked
+  sources are a single unsupported language, replace the generic warning at
+  `agentmap.mjs:1418` with a specific one: *"agentmap sees 412 `.py` and 3 `.ts`
+  files. agentmap is TS/JS-only today — vote for Python here: `<url>`."* This is
+  the only signal in play that **cannot be bot-inflated**, because it takes a
+  human GitHub account to react.
+- [ ] **One pinned issue**, reaction-voted, linked from the README, the census
+  message, and the MCP error text. One issue, not a discussion board — it must be
+  countable at a glance.
+- [ ] **Publish the capability matrix (§6) *before* building anything**, and ask
+  voters directly: *would you still use it if `--callers`/`--calls` returned an
+  explicit unsupported error and `--features` returned nothing?* The cheapest way
+  to discover you are being asked for a different product is to describe the
+  product accurately first.
+- [ ] **Add a "Forks & ports" README section** linking **both** language ports.
+  There are two, not one: `dstwn/agentmap-php` (created 2026-06-19, pushed
+  2026-06-22) and **`rifanid98/agentmap-go`** (created 2026-06-15) — the Go port
+  was missed during research and found by direct enumeration of the fork list.
+  Two independent people chose to fork rather than file an issue, which is the
+  single strongest refutation of the "zero demand" reading. Converts the best
+  existing demand datapoint from invisible to tracked for about an hour of work;
+  contacting them about upstreaming is cheaper than competing with them.
+- [ ] **Ship NO telemetry.** For a solo-maintainer OSS dev tool the trust cost
+  outweighs the data-quality gain. Record it as a decision so it is not
+  relitigated — and accept that every gate below is therefore a lagging,
+  loudness-biased proxy with wide error bars.
+
+### 1B — TS/JS depth (2–3 weeks part-time, ~25–30 focused hours)
+
+This is the content of the waiting window. Capacity goes here, not to idling.
+Every item is genuinely underserved and structurally beyond a tree-sitter tool,
+because it needs the checker or the resolver.
+
+- [ ] **tsconfig `references` (project references).** The ~296-line resolver at
+  `agentmap.mjs:530–825` covers extends-chains, `baseUrl`, `paths`, vite/webpack
+  alias, `package.json` `imports`/`exports`, and workspace discovery — project
+  references, **the** defining monorepo primitive, are absent. Verified: the only
+  occurrence of the word in the file is the comment at `:824` noting that
+  solution-style configs index 0 files.
+- [ ] **pnpm `workspace:*` and `catalog:` protocols** in
+  `discoverWorkspacePackages` (`:767–808`) / `resolveWorkspace` (`:1106–1124`).
+  Verified: **zero occurrences** of either protocol string in `agentmap.mjs`.
+- [ ] **Broaden conditional exports**, and fix the latent bug at `:674` —
+  `packageImportsToPaths` carries a second hardcoded extension ladder that does
+  not derive from `CODE_EXT` (`:153–157`), so adding an extension silently fails
+  to update it.
+- [ ] **Type-only edges as a first-class attribute.** `isTypeOnly()` is already
+  read at `:1204`, `:1211`, `:1223`, `:1232`, `:1236` — purely to *exclude* — and
+  the information is then discarded. Letting an agent distinguish a type import
+  from a runtime dependency is a real blast-radius correctness feature that no
+  tree-sitter tool can produce, because it requires the checker.
+- [ ] **Barrel resolution as the headline.** `getExportedDeclarations()` at
+  `:1164` already follows re-export barrels transitively through the type checker.
+  Surface "the real definition site behind the barrel" as an explicit output.
+  **This is the single most legible demonstration that compiler-grade beats
+  name-matching** and should lead the depth story.
+- [ ] **Fix `--callers` on JSX, or make it state its limitation in the payload.**
+  ⚠️ **Reproduced in this session** on a 4-file TSX fixture: `--callers Container`
+  returns **1** caller (the plain call in `Direct.ts`) and misses **both**
+  `<Container>` element usages that `rg '<Container'` finds. That is a shipped
+  feature returning under-reported results with exit 0 under a
+  "compiler-accurate" label (`mcp.mjs:81`) — the exact silent-degradation class
+  this whole document is built to prevent, living inside the feature the depth
+  story wants to sell. Either resolve JSX element references, or have `--callers`
+  declare the JSX gap in its result payload. **No depth positioning ships before
+  this is resolved or labelled.**
+- [ ] **Extend `eval/eval.mjs` to named public TS monorepos** (pnpm/turbo/nx) and
+  kill its third independent extension list at `eval/eval.mjs:54`.
+
+### 1C — Positioning reset (~1 d)
+
+- [ ] **Move Quickstart from `README.md:363` to above line 60.** A skimming
+  evaluator currently passes auto-refresh, PreToolUse hooks, a 7-platform skill
+  matrix, the plugin, an onboarding matrix, an *uninstall* section and a
+  troubleshooting table before learning how to run it once.
+- [ ] **Compress `README.md:7–19`** — a 9-line single sentence front-loading
+  ts-morph, tsconfig paths, vite/webpack alias, `#imports` subpaths, workspaces,
+  PageRank and two hedged percentages with an inline methodology caveat. The
+  problem statement lands and is then buried in resolver trivia.
+- [ ] **Lead with `--relates` blast radius.** The baseline competitor is Claude
+  Code's own free, zero-install, always-fresh agentic grep — so every claim must
+  beat *"just grep"*, and `--relates` is the one that does. ⚠️ The
+  "28 precise dependents vs `rg -l`'s 48 hits" figure is **maintainer-measured on
+  one repo (nalarx-ace), not re-verified here** — re-measure on a named public
+  repo before it goes in the README.
+- [ ] **Sell depth as fewer wrong files read and fewer tokens burned — never as
+  "compiler-grade accuracy."** Accuracy is the axis this market verifiably does
+  not price (§2). Token savings is the axis every breakout tool headlines.
+
+### Gate (90 days after Phase 0's working-install release)
+
+**Demand signal — relative, not absolute.** The top-voted language must be
+**≥3× the second-place language**, with a floor of **≥8 distinct GitHub
+accounts** on the winner; and **≥50% of those accounts (minimum 5)** must
+explicitly accept the published capability matrix.
+
+*Why relative:* 25 voters on a 45-star, 0-watcher repo whose observed inbound is
+regional rather than category-driven is a bar that would be rationalized past, and
+naming that failure mode is not the same as fixing it. A ratio reads a **signal
+shape** instead of an audience size this repo does not have.
+
+**Distribution signal — never downloads alone.** Pair every download figure with
+an inbound non-security issue count. ⚠️ The 3,266/month baseline was accumulated
+by a package that never executed, so the post-fix delta is contaminated by exactly
+the traffic that was never a user. Downloads are also bot- and CI-inflated.
+
+### Kill
+
+- Census + vote fails the ratio gate → the original deferral was correct. **Close
+  the multi-language question in writing for 12 months** and do not reopen it on
+  anecdote.
+- The language is requested but the majority reject the degraded matrix → those
+  users want CodeGraph or Serena. Serving them means entering at 5th–8th place
+  against incumbents with ~115× the distribution. Kill.
+- 90 days after Phase 0+1 ship, downloads have not moved **and** inbound
+  non-security issues remain ≤2 → distribution was not the bottleneck either.
+  Reopen strategy from scratch, including multi-language.
+- ≥30% of post-fix inbound requests other languages → the old gate is satisfied
+  honestly. Concede and proceed. This is the cleanest possible refutation of the
+  deferral and Phase 1A exists to detect it.
+
+---
+
+## ⬜ Phase F — The fidelity contract (precondition, not a phase)
+
+**No non-TS byte is ever indexed until this exists.** The consumer is an LLM that
+reads payloads, not READMEs, so the tradeoff must be machine-readable before the
+first backend, not documented after it.
+
+- [ ] **Closed `precision` enum** on every `map.json` file entry and every
+  `--json` / MCP payload: `compiler` (type-checker-resolved), `resolved` (parsed
+  + real import resolution to file paths), `heuristic` (parsed + bare-name
+  matching). **State in code and docs that agentmap will NEVER ship a backend at
+  `heuristic`.** The value exists so the enum is closed and a future violation is
+  a visible diff, not a silent slide. *(This replaces the earlier proposal to ship
+  a first backend at that label — a label does not stop the map from being wrong,
+  it only documents that it is.)*
+- [ ] **One `capabilities` object per backend, read by BOTH surfaces** — the CLI
+  dispatch at `agentmap.mjs:2514–2520` and the `TOOLS` registry at
+  `mcp.mjs:56–121`. Without a single source of truth, gating gets written twice
+  and drifts.
+- [ ] **Generate MCP tool descriptions from the matrix.** `mcp.mjs:81` and `:87`
+  contain the literal string *"resolved by the TypeScript language service (not
+  tree-sitter name-matching)"* — verified. Serving another language through those
+  tool names makes the contract false at the point an LLM reads it. Generating the
+  description makes that string **physically unemittable** for a non-TS backend.
+- [ ] **Hard-refuse, never degrade.** `--callers`/`--calls` on a file whose backend
+  lacks the `callGraph` capability exits non-zero **naming the language**; MCP
+  returns `isError`. `--features`/`--feature` return an explicit
+  `undefined for language: <lang>` instead of `{}` with exit 0 — `featureOf()`
+  (`:435–443`) is Next.js App Router-only, so silent emptiness already misreads as
+  "this repo has no features" for every Vue/Nuxt/plain-JS user today.
+- [ ] **CI assertion: no emitted edge has endpoints owned by different backends.**
+  Cheap to write *before* a second backend exists, and it is what makes the
+  ~1.96% cross-language mis-wire failure class structurally unreachable.
+- [ ] **Extend `SOURCE_EXT` plumbing in the same commit as any backend.**
+  `:153–157` feeds `dirtyFiles` (`:243`), `sourceFingerprint` (`:337`) and the
+  incremental dirty list (`:1544`). Landing a backend without this means editing a
+  `.py` file silently serves a stale map. Correctness landmine, not polish.
+- [ ] **Eval discipline as a merge gate.** Every TS/JS number in `EVAL.md`
+  unchanged **to the digit** — today: symbol definition top-1/top-3 **50.7% /
+  94.7%** (n=75), dependents recall/precision **98% / 100%** (n=42), per-repo table
+  at `EVAL.md:78–80` against pinned commits. Plus: **installed package size
+  unchanged for TS-only users** (grammars optional and lazily loaded).
+- [ ] **Dependency ruling, written down now.** Forbid depending on `tree-sitter-*`
+  npm packages outright — each declares `"install": "node-gyp-build"` and ships
+  six platforms of prebuilt `.node`; seven languages is ~145 MB unpacked to
+  extract ~10.5 MB of wasm, re-importing the exact native surface
+  `ROADMAP.md:33` forbids. **Vendor `.wasm` only**, pin the ABI to the
+  `web-tree-sitter` runtime (tree-sitter issue #5171: 0.26.x rejects `.wasm` built
+  by cli 0.20.x), and evaluate `@vscode/tree-sitter-wasm` (MIT, no install script,
+  covers all 7 targets) as the alternative to hand-vendoring.
+- [ ] **`pyright` is an offline EVAL oracle, never a runtime dependency** (npm,
+  pure JS, MIT, `fsevents` its only optional dep). Ground truth without a ~19 MB
+  install-path cost.
+
+---
+
+## ⬜ Phase 2 — Hard-timeboxed throwaway cost spike (Go), never merged
+
+**Goal:** measure the true fixed cost of a second backend and the marginal cost of
+the *most favourable* language, so the forever-tax can be priced instead of
+guessed. The spike ships nothing. It produces four numbers and a delete-or-proceed
+decision.
+
+**Why Go, not Python** (reversing `ROADMAP.md:30`): the spike's job is a **lower
+bound**. Go's resolver is a `go.mod` prefix strip plus a directory read; Python's
+is a subsystem with permanently unfixable gaps (pyright's own docs concede
+`sys.path.append()`, import hooks and `pkgutil.extend_path` are invisible to
+static analysis; PEP 420 namespace packages span multiple `sys.path` portions).
+If the favourable case blows the box, Python is dead without further argument.
+`go list -deps -json` also gives free ground truth.
+
+### Tasks (5 working days, hard box)
+
+- [ ] Build the registry `ROADMAP.md:101` already marks done: per-backend
+  descriptor + `backendFor(path)` dispatch, updating all nine `CODE_EXT` consumers
+  (`:243`, `:337`, `:862`, `:871`, `:927`, `:940`, `:1041`, `:1341`, `:1544`) plus
+  the duplicate ladders at `:674` and `eval/eval.mjs:54`.
+- [ ] Make `extractFacts` a dispatcher that fans out per backend and merges facts
+  maps, and **export `assemble`** (`:3439` omits it today).
+- [ ] Extract the resolver out of the ts-morph closure into
+  `resolveSpec(fromDir, spec) -> relKey | null`. **Riskiest single item:**
+  `:1050–1132` are closures bound to the live ts-morph `Project`, and it is the
+  piece the codebase has zero abstraction for — and the piece a second language
+  most needs.
+- [ ] Fix the three `assemble()` leaks that falsify its own "knows nothing about
+  ts-morph / Vue" comment at `:1280`: the `CODE_EXT_RE` + hardcoded `/\.vue$/`
+  strip at `:1341`, `featureOf` at `:1318`/`:1342`, and the stale warning at
+  `:1420`.
+- [ ] Normalize `kind` at the facts boundary to a declared enum. Today it is raw
+  ts-morph `getKindName()` with a trailing `Declaration` regex-stripped at `:1346`,
+  so a second backend must fake TypeScript kind names or fragment the lexical index.
+- [ ] Author a Go `tags.scm` + a real `go.mod` resolver. **Explicitly do NOT adopt
+  Aider's edge model** — `repomap.py` adds an edge from every referencing file to
+  every defining file sharing a bare identifier, with no import resolution at all.
+- [ ] **Spend 0.5 day desk-checking pyright-as-oracle first.** If it works, the
+  per-language resolver cost drops by an order of magnitude and the maintenance
+  arithmetic driving every kill criterion below is simply wrong. That must be
+  known before, not after.
+- [ ] Write down four numbers and stop: hours spent, lines changed/added, Go
+  cross-file edge resolution rate on 3 **named** public repos, and whether the
+  356-test TS/Vue suite stayed green untouched.
+
+### Gate (end of day 5 — ALL FOUR, or the branch is deleted)
+
+1. Fixed seam cost (registry + dispatch + resolver contract + `assemble` export +
+   the three leaks) consumed **≤3 of the 5 days**.
+2. Go resolves **≥90%** of cross-file import edges on 3 named public repos against
+   `go list -deps -json`.
+3. **All 356 existing tests pass with zero changes to TS behaviour.** This is the
+   reversibility guarantee — TS/JS is 100% of current value.
+4. Total diff **≤1,200 lines**.
+
+### Kill
+
+- Any of the four missed → **delete the branch the same day. Do not extend.** An
+  extended timebox is not an experiment, it is a commitment with extra steps.
+- The only design that fits the budget is bare-identifier matching → kill
+  immediately. Shipping a mis-wired graph under the same CLI as a compiler-exact
+  one destroys the one technical claim that is verifiably true, and the trust loss
+  is not versioned.
+- ⚠️ **Evidence that would defeat the framing, named up front:** if the spike
+  lands in ≤3 days at ≥95%, the "expensive commitment" premise collapses and the
+  hedge was over-engineered. Record that outcome honestly if it happens.
+
+---
+
+## ⬜ Phase 3 — Ship exactly ONE language, `resolved` tier or not at all
+
+**Runs only if BOTH the Phase 1 and Phase 2 gates passed, and only after Phase F
+is green.**
+
+- [ ] Gate the backend behind `AGENTMAP_EXPERIMENTAL_BACKENDS=<lang>`, off by
+  default, absent from the main `--help` table (`:2390–2440`). A flag deletes in
+  one commit; a documented feature does not.
+- [ ] **`precision: "resolved"` is the floor.** Real import resolution to file
+  paths. If the backend cannot reach it, **do not ship the language** — a ~70%
+  map is the competition's noise profile at a fraction of their reach, and it
+  retroactively falsifies every accuracy claim agentmap has made.
+- [ ] Bail to a full rebuild rather than extending `buildIncremental` — its guards
+  at `:1632–1633` and the five hardcoded ECMAScript regexes at `:1668–1673` would
+  be either over-conservative or silently wrong for another language. **Name the
+  lost incrementality in the release notes.**
+- [ ] Ship the three non-goals *above the fold*, enforced in code: no
+  `--callers`/`--calls` (hard-refuse — `:3004–3262` is 259 lines of language
+  service, entered directly via `makeProject()` at `:3037`, outside the declared
+  seam), no incremental rebuild, no type-inferred receiver resolution.
+- [ ] Lead the story with `--search` and `--relates`, never `--callers`.
+  `bm25Search` (`:286`) and `splitIdent` (`:273`) are genuinely language-neutral —
+  `splitIdent` already handles `snake_case` correctly — so `--search` ports at
+  full algorithmic fidelity on day one.
+- [ ] Publish the per-language capability matrix as the **first** table in the
+  README, above the benchmark numbers. The matrix is the product claim, not a
+  caveat.
+
+### Ship gate
+
+Measured **≥95%** cross-file import-edge agreement with the language-native oracle
+on ≥3 **named** public repos, denominator disclosed; fidelity-contract tests
+green; cross-backend-edge assertion green; `EVAL.md` TS/JS numbers unchanged to
+the digit; installed size unchanged for TS-only users.
+
+### Adoption gate (90 days after the experimental release — ALL THREE)
+
+- **(a)** ≥5 distinct external users publicly report real use of the backend.
+- **(b)** ≤3 correctness bug reports against the new language's edge graph.
+- **(c)** **The TS/JS surface shipped at least one user-visible improvement in the
+  same 90 days.**
+
+**(c) overrides (a) and (b).** If the polyglot work consumed all capacity, the
+language is killed regardless of how well its own adoption went. That is the
+half-finished-polyglot failure mode arriving on schedule, converted from a risk
+paragraph into a tripwire.
+
+---
+
+## ⬜ Phase 4 — Promote or delete. Binary, in writing.
+
+- [ ] **PROMOTE:** write the maintenance budget into this file as a hard cap —
+  **maximum TWO non-TS languages, ever**, with each additional language requiring
+  a feature deleted or a named sponsor. Add the fixture suite to the CI matrix,
+  publish per-language coverage in `EVAL.md`, and add a standing check that the
+  vendored `.wasm` ABI matches the pinned `web-tree-sitter` version.
+- [ ] **DELETE:** one revert commit removing the backend and the flag. **Keep the
+  seam** — the registry, dispatch, resolver contract, `assemble` export and the
+  three `assemble()` fixes all have standalone TS value: they unblock the still-
+  unchecked `lib/` split (`ROADMAP.md:126`) and turn Vue from a 7-touch-point
+  pseudo-backend into a first-class one.
+- [ ] **DELETE:** publish the post-mortem with the measured numbers. Nobody in this
+  category publishes negative results, and a credible "we measured the cost of
+  polyglot and declined" is itself distribution.
+- [ ] **EITHER:** reallocate freed capacity to Phase 1B's TS/JS depth frontier.
+
+**Gate:** the decision is recorded here with all four Phase 2 numbers and all three
+Phase 3 signals **within 2 weeks** of the Phase 3 90-day mark. No third extension,
+no "one more language to be sure". **Undecided at week 3 is itself a kill:** the
+backend reverts, the seam stays, the post-mortem publishes.
+
+---
+
+## 6. Feature-fidelity matrix — what a non-TS language would and would NOT get
+
+This table determines whether "Python support" is a real product or a
+bait-and-switch. It is the product claim, not a caveat. Surface = 13 CLI query
+commands + 8 maintenance commands + 11 MCP tools (`agentmap.mjs:2514–2520`,
+`mcp.mjs:56–121`).
+
+| Query (CLI / MCP) | TS/JS — `compiler` | Non-TS — `resolved` (the only shippable tier) | Why |
+|---|---|---|---|
+| `--print`, `--export` | full | **full** | reads the cached map only; no backend involvement |
+| `--search` / `search` | full | **full algorithm, corpus-limited** | `bm25Search` `:286` + `splitIdent` `:273` are language-neutral; corpus is `exports`+`locals`, so quality tracks export extraction |
+| `--relates` / `relates` | full | **full at tier** | pure edge inversion over resolved imports — the query that ports best; lead with it |
+| `--hubs`, `--map`, `--symbols` / `hubs`, `map`, `symbols` | full | **full at tier** | `pagerank` `:469`, `rankSymbols` `:1429`, `identMul` `:514` are language-neutral; quality == resolver quality |
+| `--find` / `find` | full | **partial** | TS exports come from `getExportedDeclarations()` `:1164`, which follows barrels *through the checker*. Python's `__all__` is readable by tree-sitter; a transitive re-export chain is not |
+| `--any` / `any` | full | **partial + degraded routing** | content rung is `git grep` `:191` (language-agnostic), but the router short-circuits at the first hit (`:3287–3302`), so a thin symbol index returns a thin `[lexical]` answer and never reaches the rung that would have answered |
+| `--callers` / `callers` | ⚠️ **already lossy on JSX** (verified) | **NONE — hard refuse** | `:3004–3262` is 259 lines of TS language service (`findReferencesAsNodes` `:3199`/`:3235`) |
+| `--calls` / `calls` | full | **NONE — hard refuse** | `getDefinitionNodes` → `getDefinitionAtPosition`; ~48% of call sites are `PropertyAccessExpression` receivers needing type inference (measured over agentmap's own JS — ⚠️ recon-measured, not re-run here) |
+| `--features`, `--feature` / `features`, `feature` | Next.js App Router only | **NONE — explicit unsupported** | `featureOf()` `:435–443` matches `app/` route segments only. Today this returns `{}` with exit 0 on every non-Next repo — reads as "no features", not "undefined for your stack" |
+| `--include-dts` | TS only | **n/a** | `.d.ts` is a TypeScript file class; the generalization is "declaration-only artifacts" and does not exist |
+| incremental rebuild | TS only | **NONE — full rebuild every time** | `:1632–1633` + five hardcoded ECMAScript regexes `:1668–1673` |
+| `--doctor`, `--install-hooks`, `--install-skill`, `--hook-status`, `--setup-mcp`, `--mcp`, `--help`, `--version` | full | **full** | no backend involvement |
+
+**MCP tally under any non-TS backend: 0 of 11 tools at TS fidelity — 7 degrade
+(`any`, `find`, `search`, `relates`, `map`, `hubs`, `symbols`), 4 must refuse
+(`callers`, `calls`, `features`, `feature`).**
+
+Note the asterisk in the TS column: `--callers` is *already* under-reporting on
+JSX today. The matrix is not just a promise about future languages — it is a
+disclosure about the current one.
+
+---
+
+## 7. Maintenance arithmetic — the number that actually decides this
+
+At ~1 day/week, the maintainer has roughly **45 productive days/year**.
+
+Steady-state per-language tax — grammar ABI re-vendor on every `web-tree-sitter`
+major, fixture re-verify, resolver bug tail, eval-corpus upkeep, a per-language
+feature-deriver and incremental-hazard predicate — is estimated at
+**~2.5–3.5 days/language/year**. ⚠️ **This is an estimate, not a measurement.**
+Phase 2's spike exists partly to replace it with a real number, and the
+pyright-as-oracle desk-check could invalidate it entirely.
+
+On that estimate:
+
+| Languages | Annual upkeep | Share of all capacity |
+|---|---|---|
+| 1 | 2.5–3.5 d | 6–8% |
+| 2 | 5–7 d | 11–16% |
+| 4 | 10–14 d | **22–31%, permanently, before shipping anything new** |
+
+**Two is the honest ceiling for one part-time person.** That cap is why the
+9–12-month "build them all properly" path was rejected: it buys acknowledged
+parity, on an axis the market verifiably does not price, with no steady-state
+budget anywhere in it.
+
+---
+
+## 8. Consolidated kill criteria
+
+1. **Any TS/JS regression, at any phase.** One `EVAL.md` number moves down →
+   revert that phase. The existing TS/JS users are the only proven users.
+2. **Phase 0's five-way install gate fails or slips past 3 weeks** → stop
+   everything.
+3. **Phase 1 census fails the 3× ratio / ≥8-account floor** → close the question
+   in writing for 12 months.
+4. **Phase 1: language requested but the majority reject the degraded matrix** →
+   those users want a different product. Kill.
+5. **Phase 2: any of the four box conditions missed** → delete the branch same
+   day.
+6. **Any design that requires bare-identifier matching** → kill immediately,
+   permanently.
+7. **One cross-backend edge, or one name-matched `--callers` result on a non-TS
+   file, in a shipped release** → kill that language. The entire defensibility of
+   going polyglot is that the precision labels are TRUE.
+8. **Phase 3 gate (c) fails** — no user-visible TS/JS improvement in the same 90
+   days → kill the language regardless of its own adoption.
+9. **Steady state: non-TS work exceeds ~25% of capacity, or a vendored-wasm
+   platform install failure is reported by a user** → stop adding languages at
+   whatever count is shipped and harden.
+10. **A `web-tree-sitter` major forces an N-grammar re-vendor that does not land
+    within 2 weeks** → revert to TS/JS-only rather than shipping a map built on an
+    unverified grammar set.
+11. **Phase 4 reaches week 3 undecided** → revert the backend, keep the seam,
+    publish.
+12. **The maintainer's own routing stops using agentmap for structure questions
+    across his 8 installed repos.** His private notes already carry carve-outs
+    (`--callers` broken on JSX; `--any` unreliable for content because it
+    short-circuits at the lexical stage). If the "do not use X" exceptions
+    outnumber the "use X" routes, the tool is losing its own maintainer, and no
+    roadmap survives that.
+
+---
+
+## 9. Evidence log — what was verified, and how
+
+### Verified first-hand in this session (reproduced, not cited)
+
+- **Guard bug.** `node <symlink> --version` → zero bytes, exit 0; direct
+  invocation → `0.16.0`. Probe confirmed both guard arms false under a symlink
+  (Node v26.4.0).
+- **First broken published version = 0.10.0.** Extracted published tarballs
+  0.9.0 → 0.13.0: 0.9.0 has no guard and runs under a symlink (prints `0.9.0`);
+  0.10.0 onward carry the guard. `mcp.mjs` has carried it since 0.2.0 (0.1.0
+  shipped as `repomap.mjs`, no `mcp.mjs`). **The in-code comment now in the
+  working tree says "v0.12.1" — correct it before the deprecate list is written.**
+- **`--callers` misses JSX.** 4-file TSX fixture: `--callers Container` → 1 caller
+  (`src/Direct.ts`); `rg '<Container'` → 2 files (`Page.tsx`, `Other.tsx`) that
+  agentmap does not report.
+- **The nudge hook is itself an instance of the bug** — it fired during this
+  session recommending `npx @raymondchins/agentmap`, the dead command.
+- `test/nudge-hook-grep-symbol.test.mjs:126–136` asserts the broken form and
+  forbids the working one.
+- `hooks/post-commit:50–72` rung order; rung 1 gated on
+  `AGENTMAP_HOOK_ALLOW_LOCAL=1`; detached + silenced at `:84`.
+- `.claude-plugin/plugin.json:5` = `0.14.0`; `package.json` / `server.json` =
+  `0.16.0`; `README.md:24` badge `>=18` vs `engines >=20`.
+- `hooks/INSTALL.md:28` tsconfig prerequisite is false (`agentmap.mjs:823–825`
+  documents the glob fallback).
+- `agentmap.mjs:1420` vite/webpack warning is false (`:587`, `:642`).
+- `degraded` at `:1382` consumed only at `:1419`; `collectMapStatus()` at `:2210`
+  never reads it.
+- tsconfig `references` absent (only the comment at `:824`); `workspace:` /
+  `catalog:` — **zero occurrences** in `agentmap.mjs`.
+- `isTypeOnly()` at `:1204`/`:1211`/`:1223`/`:1232`/`:1236` used only to exclude.
+- `getExportedDeclarations()` at `:1164` and `:3045`; `callGraph()` at `:3004`
+  calls `makeProject()` directly at `:3037`, outside the declared seam.
+- `assemble` omitted from the export list at `:3439`; second extension ladder at
+  `:674`.
+- `.github/workflows/ci.yml:52/:56/:60` — bin path never executed.
+- `mcp.mjs:81` and `:87` contain the literal
+  "resolved by the TypeScript language service (not tree-sitter name-matching)".
+- **Current suite: 356 tests across 92 files; `agentmap.mjs` = 3,446 lines
+  (3,470 with the working-tree guard fix).** `ROADMAP.md:11` ("165 tests") and
+  `:463` ("~1831 lines") were stale — **both corrected in this same pass**, along
+  with the Node ≥18 claim and the competitive north-star note.
+- **The guard fix landed while this document was being written** — committed as
+  `ae3365e` with `test/bin-symlink.test.mjs` (6 tests, real symlink, asserting on
+  output). Suite 356 → 362 green. Phase 0's remaining items are unaffected, and
+  **nothing is released yet**.
+- **Two language forks exist, not one.** Enumerating
+  `GET /repos/raymondchins/agentmap/forks` surfaced `rifanid98/agentmap-go`
+  (2026-06-15) alongside the `dstwn/agentmap-php` port found in research.
+- **npm, same 30-day window (2026-06-25 → 2026-07-24), re-pulled:** agentmap
+  3,266; `scip-query` 4,934. A direct compiler-grade TS competitor out-downloads
+  agentmap today.
+
+### Verified by recon (file:line given, not re-run here)
+
+`extractFacts` facts-contract shape and its three undocumented obligations; the
+~296-line resolver inventory at `:530–825`; the ~48% PropertyAccess call-site
+measurement; the 0-source-files behaviour on a pure-Python repo; the 47-site
+TS-coupling sweep.
+
+### External, verified against primary sources
+
+npm downloads over the identical window 2026-06-25 → 2026-07-24 (agentmap 3,266 /
+CodeGraph 374,878 / scip-query 4,934 / repomix 313,467); Octoverse 2025 language
+and new-repo figures; JetBrains 2025 TS at #4 / 22%; `web-tree-sitter` 0.26.11
+(MIT, zero deps, no install script); `tree-sitter-*` npm packages declaring
+`"install": "node-gyp-build"`; `@vscode/tree-sitter-wasm` 0.3.1; tree-sitter issue
+#5171 ABI mismatch; pyright's npm shape and its own documented resolution limits;
+Aider's `repomap.py` bare-identifier edge model and its stall (v0.86.0
+2025-08-09, last commit 2026-05-22); CodeGraph issue reaction counts (+36 install
+targets, +27 languages, +14 console flash, +0 on each reproduced wrong-edge bug);
+`dstwn/agentmap-php` and `rifanid98/agentmap-go` creation dates (re-pulled from the GitHub API).
+
+### ⚠️ Flagged — used with caveats, never as a gate
+
+- **1.96% mis-wire rate (745/38,103).** Self-published by a 44-star adversarial
+  competitor, measured on its own repo, README says re-verification pending.
+  **Likely, not verified.** Used as illustration of a failure *class*, never as a
+  target.
+- **CodeGraph's "2–7× faster re-index" and its token/tool-call benchmark figures.**
+  Vendor-reported, no independent replication found.
+- **arXiv 2603.27277 (83% vs 92% answer quality).** Read from the abstract; the
+  full evaluation was not independently reviewed.
+- **"28 vs 48" `--relates` precision figure.** Maintainer-measured on one private
+  repo. Re-measure on a named public repo before it enters the README.
+- **~2.5–3.5 days/language/year maintenance tax.** An estimate. Phase 2 exists
+  partly to replace it with a measurement.
+- **Star counts across this category.** Systematically inflated (one competitor
+  reportedly gained 21,424 stars in a week). Do not use as an adoption proxy
+  anywhere in this roadmap.
+- **CodeGraph's historical star count at the time `ROADMAP.md:23` was written
+  ("~57k").** Not verifiable — the GitHub API exposes only the current value.
+
+### Explicitly excluded
+
+- **"CodeGraph self-reports 95.8% TS coverage" must not become a gate, in any
+  form.** It is a vendor figure from a README, on a denominator nobody outside
+  CodeGraph has audited, measured against a different repo set. Betting the
+  strategy on out-scoring an unaudited number computed a different way is a coin
+  flip with a decimal point. It appears here once, as a rejected gate, and nowhere
+  else.
+- **A fabricated research finding was caught and removed.** During recon, a
+  WebFetch summarizer produced a claim that arXiv 2606.22417 showed
+  "compiler-accurate approaches significantly outperform tree-sitter." Full-text
+  extraction shows the paper contains **zero** occurrences of "compiler", "LSP" or
+  "language server", and its own index is tree-sitter-based. That fabricated claim
+  would have directly confirmed this roadmap's original thesis. It is recorded
+  here so it does not get re-derived.
+- **`heuristic` as a shippable precision tier.** Killed. The enum value exists so
+  the enum is closed and a violation is a visible diff — nothing more.
+
+---
+
+## 10. What this plan deliberately does not do
+
+- It does not add a language on the strength of the fork, the Octoverse
+  percentages, or the competitor issue trackers. Those are reasons to *ask* the
+  question, not to answer it.
+- It does not spend 9–12 months of a solo maintainer's year buying acknowledged
+  parity on an axis the market demonstrably ignores.
+- It does not defend the old deferral on its original reasoning. That reasoning
+  rested on a gate that could not fire, a seam that was not built, and three
+  claims that no longer hold.
+- It does not ship telemetry, and therefore accepts that every gate here is a
+  lagging proxy with wide error bars. The bars are stated so they are not
+  quietly rationalized away later.
+
+**The one-sentence version:** the majority cannot run it at all, so language
+coverage is a question that cannot be asked until the denominator is non-zero —
+fix the binary, spend the waiting window making TS/JS undeniable, buy the
+multi-language option for about seven working days, and let a measured signal, not
+an instinct, decide whether it is ever exercised.
