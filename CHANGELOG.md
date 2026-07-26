@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **The post-commit rebuild could orphan itself and burn a core.** The refresh is
+  backgrounded so it outlives the commit shell — which also means a run that hangs
+  is reparented to init with nothing left to reap it. Observed in the wild at **21
+  minutes of CPU in 21 minutes of wall time** (a full core, killed by hand), with a
+  fresh orphan stacking on every subsequent commit.
+
+  `hooks/post-commit` now takes a single-instance lock and enforces a hard timeout.
+  The lock is an atomic `mkdir`, so a commit landing while a rebuild is still
+  running skips instead of piling on; the runner is backgrounded under a watchdog
+  that `kill -9`s it after `AGENTMAP_HOOK_TIMEOUT` seconds (default 120 — a normal
+  rebuild takes 1–3s). A lock older than 10 minutes is cleared first, so one killed
+  rebuild can never disable auto-refresh permanently — that failure would be worse,
+  and quieter, than the leak it guards against.
+
+  Verified end-to-end before shipping: a normal commit still refreshes and releases
+  the lock; a held lock skips with zero stray processes; a deliberately hung runner
+  is killed by the timeout and the lock is released; a stale lock is cleared and the
+  refresh resumes. Two of those are now regression tests in
+  `test/post-commit-hook.test.mjs`, and both fail against the previous hook.
+
 ## [0.17.0] - 2026-07-26
 
 ### Added
