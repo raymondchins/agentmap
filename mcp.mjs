@@ -18,7 +18,7 @@
 //  old spawn path. The isError / crash-masking contract is preserved: a build
 //  crash throws and is surfaced as isError, never as a false "no results".
 // ============================================================================
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -243,6 +243,23 @@ export async function serve(mcpQueryFn) {
 }
 
 // Run directly (`node mcp.mjs`) as well as when imported + invoked via --mcp.
-if (import.meta.url === `file://${process.argv[1]}` || (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])) {
+// Realpath-compared for the same reason as agentmap.mjs's isDirectRun: a bin
+// symlink puts the LINK in argv[1] and the TARGET in import.meta.url, so a
+// string compare reads "imported" and the server silently never starts.
+// Duplicated rather than imported from agentmap.mjs — that would be a cycle
+// (agentmap.mjs dynamically imports this file for --mcp).
+function isDirectRun(metaUrl) {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const self = fileURLToPath(metaUrl);
+  if (self === argv1) return true;
+  try {
+    return realpathSync(self) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun(import.meta.url)) {
   serve();
 }

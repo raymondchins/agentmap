@@ -13,7 +13,7 @@
 //  Near-zero deps (ts-morph only). Runs in the target repo's cwd.
 //  Algorithm credit: Aider's repo map (Apache-2.0) — github.com/Aider-AI/aider
 // ============================================================================
-import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, lstatSync, chmodSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync, lstatSync, chmodSync, realpathSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -3436,11 +3436,35 @@ function mcpQuery(name, args) {
 // below), so these pure building blocks can be used in-process by the MCP
 // server, tests, and any future library caller without spawning a subprocess.
 // ---------------------------------------------------------------------------
-export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache, bm25Search, splitIdent };
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache, bm25Search, splitIdent, isDirectRun };
 
-// Run the CLI only when executed directly (`node agentmap.mjs …`), never when
-// imported. Dual check (matches mcp.mjs) so it holds on Windows (backslash
-// argv[1]) and POSIX alike.
-if (import.meta.url === `file://${process.argv[1]}` || (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])) {
+// True when this module IS the process entry point, false when imported.
+//
+// The naive `fileURLToPath(import.meta.url) === process.argv[1]` comparison is
+// WRONG for every install that goes through the package's own bin: npm links
+// `node_modules/.bin/agentmap -> ../@raymondchins/agentmap/agentmap.mjs`, so
+// argv[1] is the SYMLINK path while import.meta.url is the REAL path. They never
+// match, the guard reads "imported", main() never runs — and the CLI exits 0
+// having printed nothing. That silently killed `npx @raymondchins/agentmap`,
+// `npm run agentmap`, `--install-hooks`, and the MCP Registry's `--mcp` launch
+// from v0.12.1 (a217331) through v0.16.0. Compare realpaths so the symlink and
+// its target resolve to the same file.
+function isDirectRun(metaUrl) {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const self = fileURLToPath(metaUrl);
+  // Fast path first: identical strings need no syscall, and this is the only
+  // branch available if realpath throws (deleted file, permission, exotic FS).
+  if (self === argv1) return true;
+  try {
+    return realpathSync(self) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+}
+
+// Run the CLI only when executed directly (`node agentmap.mjs …`, `npx
+// @raymondchins/agentmap …`, `node_modules/.bin/agentmap …`), never on import.
+if (isDirectRun(import.meta.url)) {
   await main();
 }
