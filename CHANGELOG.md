@@ -3,6 +3,48 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **The post-commit hook's timeout killed the wrapper, not the process it
+  wrapped.** 0.18.0 put the backgrounded rebuild under a single-instance lock and
+  a 120s watchdog, but the watchdog signalled only the pid it backgrounded. When
+  the runner resolves to fallback #4, `npx --no-install @raymondchins/agentmap`,
+  that pid is the npx wrapper and the real work is a child `node
+  .../bin/agentmap` — so the wrapper died on schedule and the child was reparented
+  to init, still spinning a full core with nothing left to reap it. The lock
+  stopped orphans *stacking*; this is why one could still be created at all.
+
+  `set -m` puts the background job in its own process group (pgid == pid), so
+  `kill -- -$_am_pid` reaches the wrapper and everything under it. SIGTERM first
+  so a healthy run can flush, SIGKILL only if it ignores it, with plain-pid
+  fallbacks for shells that do not honour job control in this context.
+
+  Measured on the machine where this surfaced: **~30 W per orphan**, three at once
+  drawing **114.5 W** with the battery falling 2%/min, against a 23.4 W baseline
+  with the same applications open. Now covered by a fifth regression test in
+  `test/post-commit-hook.test.mjs` that drives a wrapper-plus-grandchild runner
+  and asserts a heartbeat file goes stale; it fails against the single-pid form.
+
+- **The test suite leaked the MCP server it spawned.** `mcpCalls()` and `rpc()`
+  start a long-running `agentmap --mcp` over stdio but called `child.kill()` only
+  in the happy-path callback — the timeout-reject and `child.on("error")` branches
+  abandoned it. A live piped child keeps the event loop alive, so the run hung
+  until killed externally, at which point the child became an orphan burning a
+  core. `helpers.mjs`'s fixture cleanup ran only on `"exit"`, which never fires on
+  SIGTERM/SIGKILL, so `agentmap-test-*` dirs accumulated down the same path
+  (427 MB observed).
+
+  `helpers.mjs` now owns `trackChild()`/`killChild()` (SIGTERM, SIGKILL after a 2s
+  grace) with a `_children` registry wired into the exit backstop and `SIGINT`/
+  `SIGTERM` handlers, plus a 60s `CHILD_TIMEOUT_MS` ceiling; both MCP suites kill
+  on every settle path. Direct `execFileSync`/`spawnSync` calls in seven suites
+  that bypassed the helper gained timeouts, and `runWithHome()` — previously
+  copy-pasted into three suites without one — is now shared.
+
+  Neither leak is reachable from the published CLI: both live in the test harness
+  and the hook's watchdog, so no user-facing behaviour changed.
+
 ## [0.18.0] - 2026-07-26
 
 Map `SCHEMA_VERSION` bumped **5 → 6** (adds per-export `definedIn`/`external` and
@@ -151,41 +193,6 @@ barrel-heavy repos it is not negligible: `map.json` **+1.8% to +6.0%**,
   is killed by the timeout and the lock is released; a stale lock is cleared and the
   refresh resumes. Two of those are now regression tests in
   `test/post-commit-hook.test.mjs`, and both fail against the previous hook.
-
-- **The hook's timeout killed the wrapper, not the process it wrapped.** The
-  watchdog signalled only the pid it backgrounded. When the runner resolves to
-  fallback #4, `npx --no-install @raymondchins/agentmap`, that pid is the npx
-  wrapper and the real work is a child `node .../bin/agentmap` — so the wrapper
-  died on schedule and the child was reparented to init, still spinning a full
-  core with nothing left to reap it. The guard above stopped orphans *stacking*;
-  this is why one could still be created at all.
-
-  `set -m` puts the background job in its own process group (pgid == pid), so
-  `kill -- -$_am_pid` reaches the wrapper and everything under it. SIGTERM first
-  so a healthy run can flush, SIGKILL only if it ignores it, with plain-pid
-  fallbacks for shells that do not honour job control in this context.
-
-  Measured on the machine where this surfaced: **~30 W per orphan**, three at once
-  drawing **114.5 W** with the battery falling 2%/min, against a 23.4 W baseline
-  with the same applications open. Now covered by a fifth regression test that
-  drives a wrapper-plus-grandchild runner and asserts a heartbeat file goes stale;
-  it fails against the single-pid form.
-
-- **The test suite leaked the MCP server it spawned.** `mcpCalls()` and `rpc()`
-  start a long-running `agentmap --mcp` over stdio but called `child.kill()` only
-  in the happy-path callback — the timeout-reject and `child.on("error")` branches
-  abandoned it. A live piped child keeps the event loop alive, so the run hung
-  until killed externally, at which point the child became an orphan burning a
-  core. `helpers.mjs`'s fixture cleanup ran only on `"exit"`, which never fires on
-  SIGTERM/SIGKILL, so `agentmap-test-*` dirs accumulated down the same path
-  (427 MB observed).
-
-  `helpers.mjs` now owns `trackChild()`/`killChild()` (SIGTERM, SIGKILL after a 2s
-  grace) with a `_children` registry wired into the exit backstop and `SIGINT`/
-  `SIGTERM` handlers, plus a 60s `CHILD_TIMEOUT_MS` ceiling; both MCP suites kill
-  on every settle path. Direct `execFileSync`/`spawnSync` calls in seven suites
-  that bypassed the helper gained timeouts, and `runWithHome()` — previously
-  copy-pasted into three suites without one — is now shared.
 
 ## [0.17.0] - 2026-07-26
 
