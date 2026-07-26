@@ -33,6 +33,15 @@ const MAP = ".claude/agentmap/map.json";
 const MAP_LEGACY = ".claude/agentmap.json"; // pre-namespacing path; read for migration
 const MAP_DIRTY = ".claude/agentmap/map.dirty.json"; // dirty-tree build cache, keyed by dirtyFingerprint (Batch 3 Tier 1)
 const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for incremental rebuild (Batch 3 Tier 2)
+// Call-edge index, written ONLY by `--build-edges` (which the post-commit hook
+// runs in the background). Deliberately a SEPARATE file from map.json, not a new
+// field on it: building it costs ~4x a normal build (the type-checker's
+// go-to-definition per call site is irreducible — measured 5.9s vs 1.5s on a
+// 250-file repo even after prefiltering), and every other command
+// (--relates/--find/--hubs/--map) must not pay that. A missing or stale sidecar
+// is never an error: --callers silently falls back to the live ts-morph walk it
+// has always used, so this is a pure speedup with no new failure mode.
+const EDGES = ".claude/agentmap/calledges.json";
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
@@ -2855,6 +2864,11 @@ Maintenance:
                        wire .claude/settings.json (--dry-run = preview, no writes)
   --install-skill [--platform claude|cursor|codex|opencode|gemini|antigravity|copilot|agents|all] [--project|--global] [--dry-run]
                        install skills + always-on docs/hooks per platform
+  --build-edges        precompute the call-edge index so --callers answers from
+                       cache (~35ms) instead of a live type-checker walk (~1.5s).
+                       Costs ~4x a normal build, so it is explicit: the
+                       post-commit hook runs it in the background. Safe to skip —
+                       --callers falls back to the live walk without it.
   --hook-status          report whether agentmap git/nudge wiring is installed
   --doctor             read-only health report: hooks, skills/rules, MCP wiring, map cache
                          (exits 0, suggests fix commands, never writes files)
@@ -2899,7 +2913,7 @@ async function main() {
   const KNOWN = new Set([
     "--json", "--include-dts", "--no-locals", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
-    "--dry-run", "--setup-mcp", "--mcp",
+    "--dry-run", "--setup-mcp", "--mcp", "--build-edges",
     "--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--export", "--focus", "--tokens",
     "--symbols", "--feature", "--features", "--hubs",
   ]);
@@ -2942,7 +2956,7 @@ async function main() {
   const COMMANDS = {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
-    "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
+    "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"], "--build-edges": [],
     "--any": [], "--find": [], "--search": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
   };
@@ -3010,6 +3024,20 @@ async function main() {
   else if (has("--hook-status")) {
     try { hookStatus(); process.exit(0); }
     catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(3); }
+  }
+  // --build-edges: precompute the call-edge sidecar that --callers reads. Explicit
+  // (never implicit) because it costs ~4x a normal build — the post-commit hook
+  // runs it in the background so no interactive query ever waits on it.
+  else if (has("--build-edges")) {
+    try {
+      const r = buildCallEdges();
+      if (wantJson) console.log(JSON.stringify({ command: "build-edges", ...r }));
+      else console.log(`agentmap: ${r.edges} call edges from ${r.sites} sites across ${r.files} files → ${EDGES}`);
+      process.exit(0);
+    } catch (e) {
+      console.error(`agentmap --build-edges failed: ${e?.message || e}`);
+      process.exit(3);
+    }
   }
   // --doctor: read-only harness health report (hooks + skills + MCP + map cache).
   // Always exits 0; never writes. --json emits the structured report.
@@ -3472,6 +3500,130 @@ function invocationOf(id, SyntaxKind) {
   return null;
 }
 
+// Resolve the named function/class that lexically encloses a reference node.
+// Module scope because BOTH the live callGraph() walk and the sidecar sweep must
+// name callers identically — a second copy would drift and make the two paths
+// disagree. An anonymous callback (`.map(x => <Foo/>)`, an IIFE,
+// `startTransition(async () => …)`) is NOT an answer — it has no name worth
+// printing and no findReferences-able node to recurse on — so keep walking OUTWARD
+// until a named owner appears rather than giving up at the first anonymous
+// ancestor. Returns `{name, node}`: `node` is what the transitive BFS recurses on
+// (null when the owner cannot be recursed on); "<module>" means genuinely
+// top-level, not merely "wrapped in a callback".
+function enclosingOwner(id, SyntaxKind) {
+  let cur = id;
+  for (;;) {
+    const enc = cur.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
+    if (!enc) return { name: "<module>", node: null };
+    const k = enc.getKindName();
+    if (k === "Constructor") {
+      const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration);
+      if (cls?.getName?.()) return { name: cls.getName(), node: cls };
+    } else if (/ArrowFunction|FunctionExpression/.test(k)) {
+      const p = enc.getParent();
+      const pk = p?.getKind?.();
+      // `const Foo = () => …` / `const Foo = function () {…}`
+      if (pk === SyntaxKind.VariableDeclaration && p.getInitializer?.() === enc
+        && p.getNameNode?.().getKind?.() === SyntaxKind.Identifier) return { name: p.getName(), node: p.getNameNode() };
+      // `{ foo: () => … }`
+      if (pk === SyntaxKind.PropertyAssignment && p.getName?.()) return { name: p.getName(), node: null };
+      // named function expression: `foo(function bar() {…})`
+      if (enc.getName?.()) return { name: enc.getName(), node: null };
+    } else if (enc.getName?.()) {
+      return { name: enc.getName(), node: enc };
+    }
+    cur = enc; // anonymous / unnamed — keep walking outward
+  }
+}
+const enclosingName = (id, SyntaxKind) => enclosingOwner(id, SyntaxKind).name;
+
+// Identity of the map a sidecar was derived from. ensureFresh() can return a map
+// keyed three different ways (clean HEAD / dirty fingerprint / non-git source
+// fingerprint); fold all of them plus the schema into one string so ANY drift
+// yields a different key and a stale sidecar is simply ignored. Cheap and
+// conservative on purpose: a false "stale" costs one live query, a false "fresh"
+// would serve wrong answers.
+function edgeKey(data) {
+  return [
+    SCHEMA_VERSION,
+    data.generatedSha || "",
+    data.dirtyFingerprint || "",
+    data.fingerprint || "",
+    data.dirty ?? "",
+  ].join(":");
+}
+
+// Read the sidecar, or null when it is absent / unreadable / keyed to a different
+// map. Never throws: every failure means "fall back to the live walk".
+function readCallEdges(data) {
+  if (!existsSync(EDGES)) return null;
+  try {
+    const c = JSON.parse(readFileSync(EDGES, "utf8"));
+    if (c.schema !== SCHEMA_VERSION || c.key !== edgeKey(data)) return null;
+    return Array.isArray(c.edges) ? c.edges : null;
+  } catch { return null; }
+}
+
+// Sweep every in-project file once and record every resolvable call/JSX site.
+//
+// This is the SAME resolution primitive the live --callers query uses, run from
+// the call-site side instead of per-symbol: "this site resolves to that
+// declaration" and "that declaration's references include this site" describe the
+// same edge, so one whole-repo pass yields what N per-symbol findReferences()
+// walks would, minus the per-query cost. Expensive (getDefinitionNodes() per
+// site) — which is exactly why it is a background/explicit step, never implicit.
+function buildCallEdges() {
+  const data = ensureFresh();
+  const { SyntaxKind } = tsMorph();
+  const { project, vueMap } = makeProject();
+  const cwd = process.cwd().replace(/\\/g, "/");
+  const rel = (p) => { const abs = p.replace(/\\/g, "/"); return (vueMap[abs] || abs).replace(cwd + "/", ""); };
+  const inProject = (k) => Object.prototype.hasOwnProperty.call(data.files, k);
+  const edges = [];
+  let sites = 0;
+  for (const sf of project.getSourceFiles()) {
+    const fp = sf.getFilePath().replace(/\\/g, "/");
+    if (fp.includes("/node_modules/") || fp.includes("/.next/")) continue;
+    const callerFile = rel(fp);
+    if (!inProject(callerFile)) continue;
+    for (const site of [
+      ...sf.getDescendantsOfKind(SyntaxKind.CallExpression),
+      ...sf.getDescendantsOfKind(SyntaxKind.NewExpression),
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+    ]) {
+      sites++;
+      const k = site.getKind();
+      const isJsx = k === SyntaxKind.JsxSelfClosingElement || k === SyntaxKind.JsxOpeningElement;
+      const callee = isJsx ? site.getTagNameNode() : site.getExpression();
+      // Same shapes invocationOf() accepts: a bare identifier, or the name half of
+      // a dotted access (`ns.foo()` and `<UI.Widget />` alike — TypeScript models
+      // both as PropertyAccessExpression).
+      let idNode = null;
+      if (callee.getKind() === SyntaxKind.Identifier) idNode = callee;
+      else if (callee.getKind() === SyntaxKind.PropertyAccessExpression) idNode = callee.getNameNode();
+      if (!idNode) continue; // computed / parenthesized / dynamic — the same honest limit --calls has
+      let targets;
+      try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
+      const callerLine = idNode.getStartLineNumber();
+      const callerName = enclosingName(idNode, SyntaxKind);
+      for (const d of targets) {
+        const tsf = d.getSourceFile();
+        if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue;
+        const calleeFile = rel(tsf.getFilePath().replace(/\\/g, "/"));
+        if (!inProject(calleeFile)) continue;
+        const calleeName = d.getName?.() ?? idNode.getText();
+        edges.push({ callerFile, callerLine, callerName, calleeFile, calleeName, kind: isJsx ? "jsx" : "call" });
+      }
+    }
+  }
+  mkdirSync(".claude/agentmap", { recursive: true });
+  const tmp = `${EDGES}.${process.pid}.tmp`; // PID-suffixed for the same reason assemble() is
+  writeFileSync(tmp, JSON.stringify({ schema: SCHEMA_VERSION, key: edgeKey(data), edges }));
+  renameSync(tmp, EDGES);
+  return { files: Object.keys(data.files).length, sites, edges: edges.length };
+}
+
 function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1 } = {}) {
   // --depth N (default 1) makes the query TRANSITIVE. depth 1 is byte-identical to
   // the single-hop path below (guarded `if (maxDepth > 1)`); depth ≥2 runs a capped
@@ -3512,6 +3664,36 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   if (!owners.length) return { command: direction, query: symbolName, error: "no match", candidates: [], _code: 1 };
   if (owners.length > 1) return { command: direction, query: symbolName, error: "ambiguous", candidates: owners, _code: 1 };
   const fileKey = owners[0];
+  // Phase B FAST PATH — answer from the prebuilt call-edge sidecar when one exists
+  // for exactly this map. Skips tsMorph() + makeProject() + the checker's
+  // full-program bind entirely (~1.5s -> ~35ms measured on a 250-400 file repo).
+  // Deliberately narrow: single-hop --callers only. --calls has a different output
+  // shape and --depth >= 2 needs findReferences-able NODES to recurse on, which a
+  // JSON row cannot carry; both keep the live walk. A missing/stale sidecar just
+  // falls through, so this can only ever be faster, never wrong.
+  if (direction === "callers" && maxDepth === 1) {
+    const cached = readCallEdges(data);
+    if (cached) {
+      const seen = new Set();
+      const sites = [];
+      for (const e of cached) {
+        if (e.calleeFile !== fileKey || e.calleeName !== symbolName) continue;
+        const dedupe = `${e.callerFile}:${e.callerLine}`; // same key the live walk dedupes on
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        sites.push({ file: e.callerFile, line: e.callerLine, caller: e.callerName });
+      }
+      sites.sort((x, y) =>
+        ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+      const shown = sites.slice(0, SYMBOL_MATCH_LIMIT);
+      return {
+        command: "callers", query: symbolName, symbol: symbolName, file: fileKey,
+        total: sites.length, shown: shown.length, truncated: sites.length > shown.length,
+        callers: shown, _code: sites.length ? 0 : 1,
+      };
+    }
+  }
   // Phase B — LAZY full Project (inc=null ⇒ language service live; NEVER the
   // incremental branch, which loads other files as empty stubs and would hide
   // cross-file callers). tsMorph() is the ~105ms init, fired only here.
@@ -3659,39 +3841,8 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   // is. This is the compiler-accuracy line — a type-position mention, a re-export, a
   // bare value reference, or a same-named local in another file binds to a DIFFERENT
   // symbol and never reaches here.
-  // Resolve the named function/class that lexically encloses a call site. Shared by
-  // the single-hop and the transitive path. An anonymous callback (`.map(x => <Foo/>)`,
-  // an IIFE, `startTransition(async () => …)`) is NOT an answer — it has no name worth
-  // printing and no findReferences-able node to recurse on — so keep walking OUTWARD
-  // until a named owner appears rather than giving up at the first anonymous ancestor.
-  // `node` is the findReferences-able node for the BFS to recurse on (null when the
-  // owner cannot be recursed on); `name` is what gets printed. "<module>" now means
-  // genuinely top-level, not merely "wrapped in a callback".
-  const enclosing = (id) => {
-    let cur = id;
-    for (;;) {
-      const enc = cur.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
-      if (!enc) return { name: "<module>", node: null };
-      const k = enc.getKindName();
-      if (k === "Constructor") {
-        const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration);
-        if (cls?.getName?.()) return { name: cls.getName(), node: cls };
-      } else if (/ArrowFunction|FunctionExpression/.test(k)) {
-        const p = enc.getParent();
-        const pk = p?.getKind?.();
-        // `const Foo = () => …` / `const Foo = function () {…}`
-        if (pk === SyntaxKind.VariableDeclaration && p.getInitializer?.() === enc
-          && p.getNameNode?.().getKind?.() === SyntaxKind.Identifier) return { name: p.getName(), node: p.getNameNode() };
-        // `{ foo: () => … }`
-        if (pk === SyntaxKind.PropertyAssignment && p.getName?.()) return { name: p.getName(), node: null };
-        // named function expression: `foo(function bar() {…})`
-        if (enc.getName?.()) return { name: enc.getName(), node: null };
-      } else if (enc.getName?.()) {
-        return { name: enc.getName(), node: enc };
-      }
-      cur = enc; // anonymous / unnamed — keep walking outward
-    }
-  };
+  // Shared with the sidecar sweep — see enclosingOwner() at module scope.
+  const enclosing = (id) => enclosingOwner(id, SyntaxKind);
   if (maxDepth > 1) {
     // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
     // node for the ENCLOSING symbol of each call site — that is `enclosing().node`

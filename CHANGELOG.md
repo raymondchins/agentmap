@@ -5,6 +5,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`--build-edges`: a precomputed call-edge index, so `--callers` stops paying the
+  type-checker on every query.** `--callers` was ~1500ms and the reason was not the
+  reference search — profiling put ~750-860ms, about half the total, in the FIRST
+  touch of the type-checker (`getExportedDeclarations()` forcing a full-program
+  bind), a cost that is nearly fixed: a 2-reference symbol pays the same as a
+  119-reference one, and scoping the ts-morph Project to a file's known dependents
+  (251 files -> 50) cut it only ~24%, because the bulk is binding `lib.d.ts` and
+  `@types`, not your code.
+
+  So the checker work moves off the query path entirely. `--build-edges` sweeps
+  every file once, resolves each call/JSX site through the same go-to-definition
+  primitive the live walk uses, and writes `.claude/agentmap/calledges.json`.
+  `--callers` then answers from that file: **1514ms -> 77ms** on a 252-file repo,
+  verified byte-identical to the live walk across 12 symbols there (including `cn`
+  at 119 call sites, and both definitions of an ambiguous `ToggleSwitch`).
+
+  It is a cache, never a second source of truth. The sidecar is keyed to the exact
+  map it was derived from — HEAD, dirty fingerprint, schema — so an edit invalidates
+  it and the query silently falls back to the live walk. Corrupt file, missing file,
+  `--depth >= 2` (which needs findReferences-able nodes a JSON row cannot carry),
+  and `--calls` (different output shape) all fall back the same way. There is no
+  configuration in which a stale sidecar is served.
+
+  Building it costs ~4x a map rebuild (~9s on 252 files) and that is irreducible:
+  the per-site `getDefinitionNodes()` call is 89-94% of it, and a prefilter that
+  skips candidates absent from a file's declared/imported names drops 35-44% of real
+  edges, because React code overwhelmingly calls names bound at nested scope
+  (destructured hook state, nested helpers). A correct prefilter only recovers
+  ~25-35% of the cost. So the step is explicit, never implicit: the post-commit hook
+  runs it detached, lock-guarded and timeout-capped, where nothing waits on it.
+  `AGENTMAP_HOOK_EDGES=0` skips it. `--relates`/`--find`/`--hubs`/`--map` never read
+  or write it and are unchanged.
+
 ### Fixed
 - **`<Foo.Bar />` was never a call site — the whole branch was dead code since 0.17.0.**
   `invocationOf()` reached for the tag holder with

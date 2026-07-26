@@ -127,9 +127,21 @@ _am_descendants() {
   printf '%s' "$_am_all"
 }
 
+# After the map, precompute the call-edge index so `--callers` answers from cache
+# (~77ms) instead of a live type-checker walk (~1500ms). It is a SEPARATE step
+# because it costs ~4x a map rebuild (~9s on 250 files) — acceptable here, where
+# it is detached, lock-guarded and timeout-capped and no one is waiting, but not
+# acceptable inline on an interactive query. Set AGENTMAP_HOOK_EDGES=0 to skip it
+# (on a very large repo, or to keep post-commit CPU to a minimum); --callers then
+# simply falls back to the live walk, which is what it has always done.
+_am_edges() {
+  [ "${AGENTMAP_HOOK_EDGES:-1}" = "1" ] || return 0
+  $RUNNER --build-edges
+}
+
 (
   cd "$ROOT" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
-  $RUNNER >/dev/null 2>&1 &
+  { $RUNNER && _am_edges; } >/dev/null 2>&1 &
   _am_pid=$!
   # SIGTERM first so a healthy run can flush and exit; SIGKILL only if it ignores
   # it. A pid could in principle be recycled inside that 5s window; the exposure
