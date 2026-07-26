@@ -21,7 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { makeRepo, gitInit, run, cleanup } from "./helpers.mjs";
+import { makeRepo, gitInit, run, runErr, cleanup } from "./helpers.mjs";
 
 const EDGES = ".claude/agentmap/calledges.json";
 
@@ -146,12 +146,16 @@ test("a CORRUPT sidecar falls back to the live walk instead of crashing", () => 
     gitInit(dir, { commit: true });
     run(dir, "--build-edges");
     writeFileSync(join(dir, EDGES), "{ this is not json");
-    const r = run(dir, "--callers", "target", "--in", "src/target.ts", "--json");
+    const r = runErr(dir, "--callers", "target", "--in", "src/target.ts", "--json");
     assert.equal(r.status, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout).total, 2);
-    // Truncated-but-valid JSON with the wrong shape must also fall back.
-    writeFileSync(join(dir, EDGES), JSON.stringify({ schema: 999, key: "nope", edges: "not-an-array" }));
-    assert.equal(JSON.parse(run(dir, "--callers", "target", "--in", "src/target.ts", "--json").stdout).total, 2);
+    // ...and SAYS so. Staleness is routine and stays quiet, but silently serving a
+    // 20x-slower path because the cache is corrupt is undiagnosable.
+    assert.match(r.stderr, /unreadable|malformed/, "a corrupt sidecar must be reported on stderr");
+    // Valid JSON with the wrong shape must also fall back, and also say so.
+    const r2 = runErr(dir, "--callers", "target", "--in", "src/target.ts", "--json");
+    assert.equal(JSON.parse(r2.stdout).total, 2);
+    assert.match(r2.stderr, /unreadable|malformed/, "a malformed sidecar must be reported too");
   } finally { cleanup(dir); }
 });
 

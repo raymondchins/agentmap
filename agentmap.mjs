@@ -3560,12 +3560,23 @@ function edgeKey(data) {
 // Read the sidecar, or null when it is absent / unreadable / keyed to a different
 // map. Never throws: every failure means "fall back to the live walk".
 function readCallEdges(data) {
-  if (!existsSync(EDGES)) return null;
-  try {
-    const c = JSON.parse(readFileSync(EDGES, "utf8"));
-    if (c.schema !== SCHEMA_VERSION || c.key !== edgeKey(data)) return null;
-    return Array.isArray(c.edges) ? c.edges : null;
-  } catch { return null; }
+  if (!existsSync(EDGES)) return null;          // never built — the normal state
+  let c;
+  try { c = JSON.parse(readFileSync(EDGES, "utf8")); }
+  catch {
+    // Present but unreadable. Staleness is routine and stays quiet; a CORRUPT
+    // cache is not, and answering correctly-but-20x-slower with no explanation is
+    // the kind of silent degradation that never gets diagnosed. One line, stderr,
+    // never fatal — the answer below is still the authoritative live walk.
+    console.error(`# agentmap: ${EDGES} unreadable — using the live walk (rebuild with \`agentmap --build-edges\`)`);
+    return null;
+  }
+  if (c.schema !== SCHEMA_VERSION || c.key !== edgeKey(data)) return null; // stale: expected, silent
+  if (!Array.isArray(c.edges)) {
+    console.error(`# agentmap: ${EDGES} malformed — using the live walk (rebuild with \`agentmap --build-edges\`)`);
+    return null;
+  }
+  return c.edges;
 }
 
 // Sweep every in-project file once and record every resolvable call/JSX site.
