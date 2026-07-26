@@ -95,7 +95,7 @@ test("--version prints package.json version and exits 0", () => {
   gitInit(dir, { commit: true });
   const r = run(dir, "--version");
   assert.equal(r.status, 0, `--version should exit 0, got ${r.status}`);
-  assert.match(r.stdout.trim(), new RegExp(PKG.version.replace(/\./g, "\\.")), `expected version ${PKG.version} in output`);
+  assert.ok(r.stdout.trim().includes(PKG.version), `expected version ${PKG.version} in output`);
   cleanup(dir);
 });
 
@@ -104,6 +104,6 @@ test("-v is an alias for --version (exit 0, prints version)", () => {
   gitInit(dir, { commit: true });
   const r = run(dir, "-v");
   assert.equal(r.status, 0);
-  assert.match(r.stdout.trim(), new RegExp(PKG.version.replace(/\./g, "\\.")));
+  assert.ok(r.stdout.trim().includes(PKG.version), `expected version ${PKG.version} in output`);
   cleanup(dir);
 });

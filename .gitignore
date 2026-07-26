@@ -8,3 +8,4 @@ tmp/
 
 # mcp-publisher CLI binary (downloaded for registry publish, not source)
 mcp-publisher
+.serena/

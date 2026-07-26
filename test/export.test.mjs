@@ -52,7 +52,7 @@ test("--export mermaid is valid + ids are sanitized (no raw paths as node ids)",
     const out = r.stdout;
     assert.match(out, /flowchart TD/);
     assert.match(out, /classDef hub /);
-    assert.match(out, /-->/, "at least one edge");
+    assert.ok(out.includes("-->"), "at least one edge");
     // every node-declaration line uses a sanitized nN id, never a raw slash/dot path.
     for (const line of out.split("\n").filter((l) => l.includes(":::"))) {
       assert.match(line, /^ {2}n\d+\["/, `mermaid node id must be sanitized: ${line}`);
