@@ -40,6 +40,20 @@ test(".claude-plugin/plugin.json tracks package.json", () => {
   );
 });
 
+test("SECURITY.md's supported-version table tracks package.json", () => {
+  // It sat at `0.14.x` while the package shipped 0.15.x, 0.16.x and 0.17.x —
+  // three minor versions of telling users their only supported release was two
+  // behind, and that current versions got no security fixes. Nothing checked it.
+  const minor = VERSION.split(".").slice(0, 2).join(".");
+  const security = readFileSync(join(ROOT, "SECURITY.md"), "utf8");
+  const supported = security.match(/^\|\s*(\d+\.\d+)\.x\s*\|\s*Yes\s*\|/m);
+  assert.ok(supported, "no `| X.Y.x | Yes |` row found in SECURITY.md — if the table format changed, update this test");
+  assert.equal(
+    supported[1], minor,
+    `SECURITY.md says ${supported[1]}.x is supported but package.json is ${VERSION}`,
+  );
+});
+
 test("the Node engines floor and the README badge agree", () => {
   // The badge is the first thing a visitor reads, and it claimed >=18 for the
   // entire life of the >=20 breaking change.
