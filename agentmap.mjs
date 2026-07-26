@@ -3457,9 +3457,14 @@ function invocationOf(id, SyntaxKind) {
   if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
   if (call && call.getExpression() === (pa ?? id)) return call;
 
-  // `<Foo.Bar />` puts the identifier under a JsxMemberExpression; the element's
-  // tag-name node is that member expression, not the bare identifier.
-  const tagHolder = id.getParentIfKind(SyntaxKind.JsxMemberExpression) ?? id;
+  // `<Foo.Bar />` puts the identifier under a member expression; the element's
+  // tag-name node is that member expression, not the bare identifier. TypeScript
+  // models a dotted JSX tag as a plain PropertyAccessExpression — there is NO
+  // `SyntaxKind.JsxMemberExpression` (that is a Babel/ESTree node type, and
+  // reading it off SyntaxKind yields `undefined`, so getParentIfKind never
+  // matched and this whole branch was dead from 0.17.0). `pa` above already
+  // holds that node.
+  const tagHolder = pa ?? id;
   for (const kind of [SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxOpeningElement]) {
     const el = tagHolder.getParentIfKind(kind);
     if (el && el.getTagNameNode() === tagHolder) return el;
@@ -3654,27 +3659,44 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   // is. This is the compiler-accuracy line — a type-position mention, a re-export, a
   // bare value reference, or a same-named local in another file binds to a DIFFERENT
   // symbol and never reaches here.
-  if (maxDepth > 1) {
-    // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
-    // node for the ENCLOSING symbol of each call site. `enclosing()` returns that
-    // node (a FunctionDeclaration/Method/Class directly; the VariableDeclaration
-    // name node for an arrow-const; null for a module-level or anonymous caller =
-    // a leaf). Rows dedup by call SITE; expansion dedups by enclosing SYMBOL (the
-    // cycle guard) — two separate concerns. Frontier + total caps bound hubs.
-    const enclosing = (id) => {
-      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
+  // Resolve the named function/class that lexically encloses a call site. Shared by
+  // the single-hop and the transitive path. An anonymous callback (`.map(x => <Foo/>)`,
+  // an IIFE, `startTransition(async () => …)`) is NOT an answer — it has no name worth
+  // printing and no findReferences-able node to recurse on — so keep walking OUTWARD
+  // until a named owner appears rather than giving up at the first anonymous ancestor.
+  // `node` is the findReferences-able node for the BFS to recurse on (null when the
+  // owner cannot be recursed on); `name` is what gets printed. "<module>" now means
+  // genuinely top-level, not merely "wrapped in a callback".
+  const enclosing = (id) => {
+    let cur = id;
+    for (;;) {
+      const enc = cur.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
       if (!enc) return { name: "<module>", node: null };
       const k = enc.getKindName();
-      let node = enc, name = enc.getName?.();
-      if (k === "Constructor") { const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration); node = cls ?? null; name = cls?.getName?.() ?? name; }
-      else if (/ArrowFunction|FunctionExpression/.test(k)) {
-        const vd = enc.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
-        if (vd && vd.getInitializer?.() === enc && vd.getNameNode?.().getKind?.() === SyntaxKind.Identifier) { node = vd.getNameNode(); name = vd.getName(); }
-        else node = null;
+      if (k === "Constructor") {
+        const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration);
+        if (cls?.getName?.()) return { name: cls.getName(), node: cls };
+      } else if (/ArrowFunction|FunctionExpression/.test(k)) {
+        const p = enc.getParent();
+        const pk = p?.getKind?.();
+        // `const Foo = () => …` / `const Foo = function () {…}`
+        if (pk === SyntaxKind.VariableDeclaration && p.getInitializer?.() === enc
+          && p.getNameNode?.().getKind?.() === SyntaxKind.Identifier) return { name: p.getName(), node: p.getNameNode() };
+        // `{ foo: () => … }`
+        if (pk === SyntaxKind.PropertyAssignment && p.getName?.()) return { name: p.getName(), node: null };
+        // named function expression: `foo(function bar() {…})`
+        if (enc.getName?.()) return { name: enc.getName(), node: null };
+      } else if (enc.getName?.()) {
+        return { name: enc.getName(), node: enc };
       }
-      if (!name) { name = "<module>"; node = null; }
-      return { name, node };
-    };
+      cur = enc; // anonymous / unnamed — keep walking outward
+    }
+  };
+  if (maxDepth > 1) {
+    // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
+    // node for the ENCLOSING symbol of each call site — that is `enclosing().node`
+    // above. Rows dedup by call SITE; expansion dedups by enclosing SYMBOL (the
+    // cycle guard) — two separate concerns. Frontier + total caps bound hubs.
     const seedKey = (d) => `${rel(d.getSourceFile().getFilePath().replace(/\\/g, "/"))}:${d.getName?.() ?? symbolName}:${d.getStartLineNumber?.() ?? 0}`;
     const visitedSym = new Set(decls.map(seedKey)); // enclosing-symbol expansion dedup (cycle guard)
     const seenSite = new Set();                     // global row dedup by call site
@@ -3727,9 +3749,7 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
       const dedupe = `${file}:${line}`;
       if (seen.has(dedupe)) continue;
       seen.add(dedupe);
-      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
-      const caller = enc?.getName?.() || enc?.getParentIfKind?.(SyntaxKind.VariableDeclaration)?.getName?.() || "<module>";
-      sites.push({ file, line, caller });
+      sites.push({ file, line, caller: enclosing(id).name });
     }
   }
   // Rank by the CALLING file's PageRank so important callers survive the cap (same

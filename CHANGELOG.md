@@ -6,6 +6,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`<Foo.Bar />` was never a call site — the whole branch was dead code since 0.17.0.**
+  `invocationOf()` reached for the tag holder with
+  `id.getParentIfKind(SyntaxKind.JsxMemberExpression)`, but **TypeScript has no
+  `JsxMemberExpression` SyntaxKind** — that is a Babel/ESTree node type, so the
+  lookup read `undefined` off the enum, `getParentIfKind(undefined)` never matched,
+  and `tagHolder` fell back to the bare identifier. `getTagNameNode()` returns the
+  member expression, so the identity check failed and every dotted tag was dropped.
+  TypeScript models a dotted JSX tag name as a plain `PropertyAccessExpression`,
+  which the function already computes one line earlier as `pa`. Now `tagHolder =
+  pa ?? id`. `import * as UI from "./widget"` + `<UI.Widget />` is found;
+  `--callers` on a namespace-imported component went 10 → 11 sites on the JSX
+  fixture, with no change to any other pattern.
+
+  Still not resolved (a ts-morph limitation, not this bug): aliasing a component
+  through an object literal — `const UI = { Widget }` then `<UI.Widget />`.
+  `findReferences` returns only the import and the shorthand property for that
+  file, never the render site.
+
+- **Call sites inside anonymous callbacks reported `<module>` instead of the
+  component that owns them.** The enclosing-scope lookup stopped at the *first*
+  function ancestor. For `{items.map(x => <Row key={x.id} />)}` that ancestor is the
+  anonymous `.map()` arrow, which has no name and is not the initializer of a
+  variable declaration — so the caller degraded to `<module>` even though a named
+  component plainly encloses it. Same for IIFEs and `startTransition(async () => …)`.
+  Measured on two real React repos: **11 of 43** JSX call sites in one, **6 of 95**
+  across another, all in this one shape; the non-JSX control had zero.
+
+  `enclosing()` now walks *outward* through anonymous ancestors until a named owner
+  appears (variable-declared arrow/function expression, object-literal property,
+  named function expression, function/method/class declaration), and is hoisted so
+  the single-hop `--callers` path shares it with the transitive `--depth > 1` path
+  instead of keeping a weaker copy. `<module>` now means genuinely top-level rather
+  than "wrapped in a callback". Across 65 call sites in two repos: **0 remaining
+  `<module>`**, recall unchanged.
+
 - **A file that failed to parse vanished from the map, and the map said nothing.**
   Per-file parse errors are caught so one bad file cannot abort the build — correct,
   and unchanged. But the file never reached `files[path]`, so `map.json` reported a
