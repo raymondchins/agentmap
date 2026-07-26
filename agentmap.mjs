@@ -38,7 +38,12 @@ const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for 
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
 // persisted for --find/--any discovery. Old caches (which lack `locals`) rebuild
 // on upgrade so a private helper becomes findable without waiting for the next commit.
-const SCHEMA_VERSION = 5;
+// Bumped 5 → 6: per-export `definedIn`/`external` (the real declaration site behind
+// a re-export barrel) and per-file `typeOnlyImports`/`typeOnlyDependents` (edges a
+// fully `import type` declaration used to drop on the floor). Both are spread
+// conditionally, so a repo with no barrels and no type-only imports serialises
+// byte-identically to schema 5; caches rebuild once on upgrade.
+const SCHEMA_VERSION = 6;
 
 // --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
 // The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
@@ -317,6 +322,27 @@ const tokEst = (s) => Math.ceil((s || "").length / 4); // rough chars/4 estimate
 // get-or-init a Map value (readable replacement for the dense `m.get(k) ?? m.set(...)` idiom).
 const getOrSet = (m, k, make) => { let v = m.get(k); if (v === undefined) { v = make(); m.set(k, v); } return v; };
 
+// Project a stored export entry into a --find/--any match. Barrel provenance rides
+// along so an agent is sent to the file it can actually edit rather than to the
+// index.ts that only forwards the name. Defined once because --find and --any each
+// have a CLI copy AND an MCP copy, and a four-way copy-paste is how a fix lands in
+// one path and silently misses the other three.
+const symMatch = (file, e) => ({
+  file, name: e.name, kind: e.kind,
+  ...(e.definedIn ? { definedIn: e.definedIn } : {}),
+  ...(e.external ? { external: true } : {}),
+});
+
+// Human-readable suffix for a match/export entry that came through a barrel.
+const originNote = (e) => (e.definedIn ? ` → defined in ${e.definedIn}` : e.external ? " → defined outside the repo" : "");
+
+// Compile-time-only relationships, emitted next to (never merged into) the runtime
+// ones. Omitted entirely when empty so a repo without type imports is unchanged.
+const typeOnlyOut = (f) => ({
+  ...(f.typeOnlyImports?.length ? { typeOnlyImports: f.typeOnlyImports } : {}),
+  ...(f.typeOnlyDependents?.length ? { typeOnlyDependents: f.typeOnlyDependents } : {}),
+});
+
 // Rank symbol matches ({file,name,kind}) by their containing file's PageRank
 // (desc), tie-broken by path then name for a stable order. A broad --find/--any
 // on a large repo can match thousands of exports; showing them all defeats the
@@ -421,7 +447,7 @@ function dirtyFingerprint(sha, list, configList = []) {
     let tok = _cfg ? "c:" : "";
     try { const st = lstatSync(path); tok += `${path}:${st.mtimeMs}:${st.size}`; }
     catch { tok += `${(code || "").trim() || "?"}:${path}`; }   // deleted / unstattable
-    if (oldPath) tok += ` R:${oldPath}->${path}`;         // rename ≠ add+delete
+    if (oldPath) tok += `\0R:${oldPath}->${path}`;         // rename ≠ add+delete
     toks.push(tok);
   }
   toks.sort();
@@ -638,7 +664,7 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
 }
 
 // vite.config / webpack config file names we probe for a `resolve.alias` literal.
-const VITE_CONFIG_RE = /(^|\/)(vite|vitest|webpack)\.config\.(js|ts|mjs|cjs)$/;
+const VITE_CONFIG_RE = /(^|\/)(vite|vitest|webpack)\.config\.(js|ts|mts|cts|mjs|cjs)$/; // .mts/.cts are valid config extensions and were silently skipped
 // Extract STRING→STRING `resolve.alias` object-literal entries from a bundler config
 // WITHOUT executing it (untrusted repo code). ts-morph parses the file to an AST and
 // we read only string-literal keys/values off the `alias` object literal — no eval,
@@ -733,7 +759,7 @@ function packageImportsToPaths(imports) {
   };
   // strip a leading ./ (package-dir-relative anyway) + a trailing code ext for the
   // source-preferred extensionless twin. Keeps a `*` intact (`src/x/*.js`→`src/x/*`).
-  const stripExt = (t) => t.replace(/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/, "");
+  const stripExt = (t) => t.replace(CODE_EXT_RE, ""); // derive from CODE_EXT (:158) — a second hand-written copy silently stops matching the day a 9th extension is added
   const paths = {};
   for (const key of Object.keys(imports)) {
     if (typeof key !== "string" || !key.startsWith("#")) continue; // "imports" keys are always #-prefixed
@@ -815,6 +841,38 @@ function discoverPackageAliasConfigs(rootAbs, listed) {
 
 // Collect workspace cross-package resolution targets from every tracked
 // package.json that declares a "name" (pnpm/npm/yarn workspaces). Maps the
+// Look up a requested subpath in a package's declared `exports` map. An exact key
+// wins; otherwise Node's subpath PATTERNS apply ("./wild/*": "./src/wild/*.ts"),
+// where the matched text replaces every `*` in the target. Without this the lookup
+// was exact-match only, so every wildcard subpath in a workspace package silently
+// produced no edge at all.
+//
+// Selection follows Node's own patternKeyCompare, verified against Node v26:
+// longest prefix before the `*` wins, and on a TIE the longer FULL key wins —
+// declaration order never decides. That tie is not exotic: Node's own docs use
+// `"./lib/*"` alongside `"./lib/*.js"` for extension-optional exports, and picking
+// by key order there resolves to the wrong file.
+//
+// An EMPTY fill is rejected. Node raises ERR_PACKAGE_PATH_NOT_EXPORTED when the
+// specifier is exactly prefix+suffix with nothing between, so accepting it would
+// invent an edge for an import that throws at runtime.
+function matchSubpath(subpaths, sub) {
+  if (subpaths[sub] !== undefined) return subpaths[sub];
+  let best = null, bestPre = -1, bestKey = -1;
+  for (const key in subpaths) {
+    const star = key.indexOf("*");
+    if (star < 0) continue;
+    const pre = key.slice(0, star), post = key.slice(star + 1);
+    if (sub.length <= pre.length + post.length) continue; // no empty match
+    if (!sub.startsWith(pre) || !sub.endsWith(post)) continue;
+    if (pre.length < bestPre || (pre.length === bestPre && key.length <= bestKey)) continue;
+    bestPre = pre.length; bestKey = key.length;
+    const fill = sub.slice(pre.length, sub.length - post.length);
+    best = subpaths[key].map((t) => t.split("*").join(fill));
+  }
+  return best;
+}
+
 // package NAME → { dir, entries, subpaths } where `dir` is the package's absolute
 // posix directory, `entries` are the raw "." source-entry candidates in
 // preference order (SOURCE over dist): "exports"["."] → "module" → "main" →
@@ -856,10 +914,25 @@ function discoverWorkspacePackages(rootAbs, listed) {
     // checked first for the same reason as above — TypeScript resolves the
     // "types" export condition ahead of "import"/"require"/"default", and in a
     // source repo that condition is the one pointing at code that exists.
-    const condLeaf = (c) => {
-      if (typeof c === "string") return c;
-      if (c && typeof c === "object") { for (const k of ["types", "typings", "import", "default"]) if (typeof c[k] === "string") return c[k]; for (const k in c) if (typeof c[k] === "string") return c[k]; }
-      return null;
+    // Recursive: Node allows conditions to nest to any depth ({"node":{"import":…}}),
+    // and only reading one level down made a nested map resolve to nothing at all.
+    // Returns EVERY candidate in precedence order, not just the first, because an
+    // array target is Node's fallback list ("try each until one resolves") and only
+    // the caller knows what exists on disk. The "." entry already worked this way
+    // via `entries`; subpaths held a single string and so could never fall back.
+    // Walks SOURCE-first (`types`/`typings` before `import`/`default`), which is
+    // deliberately NOT Node's runtime precedence: this tool never executes the
+    // package, and a published `require`/`import` target usually points at a
+    // gitignored dist/. Same reasoning as 05ef8dc.
+    const condTargets = (c, depth = 0, out = []) => {
+      if (typeof c === "string") { if (c && !out.includes(c)) out.push(c); return out; }
+      if (depth > 8) return out; // pathological nesting; no real package goes near this
+      if (Array.isArray(c)) { for (const v of c) condTargets(v, depth + 1, out); return out; }
+      if (c && typeof c === "object") {
+        for (const k of ["types", "typings", "import", "default"]) if (k in c) condTargets(c[k], depth + 1, out);
+        for (const k in c) condTargets(c[k], depth + 1, out);
+      }
+      return out; // `null` (a deliberately blocked subpath) falls through to []
     };
     // Ahead of `exports`/`module`/`main` below.
     push(pkg.types);
@@ -868,13 +941,13 @@ function discoverWorkspacePackages(rootAbs, listed) {
     if (typeof exp === "string") push(exp);
     else if (exp && typeof exp === "object") {
       for (const key of Object.keys(exp)) {
-        const leaf = condLeaf(exp[key]);
-        if (!leaf) continue;
-        if (key === ".") push(leaf);
-        else if (key.startsWith("./")) subpaths[key.slice(2)] = leaf; // "./button" → "button"
+        const targets = condTargets(exp[key]);
+        if (!targets.length) continue;
+        if (key === ".") for (const t of targets) push(t);
+        else if (key.startsWith("./")) subpaths[key.slice(2)] = targets; // "./button" → "button"
       }
       // A bare conditions object (no "." and no "./x" keys) is itself the "." entry.
-      if (!Object.keys(exp).some((k) => k === "." || k.startsWith("."))) { const leaf = condLeaf(exp); if (leaf) push(leaf); }
+      if (!Object.keys(exp).some((k) => k === "." || k.startsWith("."))) for (const t of condTargets(exp)) push(t);
     }
     push(pkg.module);
     push(pkg.main);
@@ -1074,12 +1147,19 @@ function makeProject(inc = null) {
 // producer of this same shape (the Batch 2 seam). Operates on process.cwd().
 //
 // Returns { [relPath]: {
-//   exports:         [{ name, kind }],
+//   exports:         [{ name, kind, definedIn?, external? }], // definedIn = the real
+//                      declaration site when this entry only re-exports the name
+//                      (checker-resolved through any number of barrel hops);
+//                      external = the origin is outside the repo. Both absent for
+//                      a genuine local definition, so non-barrel repos are unchanged.
 //   locals:          [{ name, kind }],                  // non-exported top-level decls — discovery-only (--find/--any), NOT ranked
 //   imports:         [targetPath…],                    // = Object.keys(importedSymbols)
 //   importedSymbols: { [targetPath]: [names…] },        // "default"/"*" still literal
 //   defaultExportName: string | null,                   // resolved default-export name
 //   reExports:       [names…],                          // pass-through re-exports (barrels)
+//   typeOnlyImports: [targetPath…],                    // compile-time-only deps — disjoint
+//                      from `imports`, never fed to PageRank/edgeCoverage/ranking
+//   typeOnlyDependents: [sourcePath…],                 // the inverse; absent when empty
 //   rsc:             'client' | 'server',                // React Server/Client boundary directive — absent if none
 // } }
 // A single pathological file is skipped + warned, never fatal (graceful degrade).
@@ -1199,9 +1279,14 @@ function extractFacts(inc = null) {
         // Prefer a declared "exports" subpath target ("./button" → src/…); else
         // fall back to the naive package-dir + subpath (source mirroring the
         // import path, the layout when there's no "exports" map).
-        const mapped = subpaths[sub];
-        const hit = mapped ? tryResolveAt(joinPosix(dir, mapped)) : null;
-        return hit || tryResolveAt(joinPosix(dir, sub));
+        // Declared targets first, in precedence order, each tried until one exists
+        // on disk; then the naive package-dir + subpath (the layout when a package
+        // declares no "exports" map at all).
+        for (const m of matchSubpath(subpaths, sub) || []) {
+          const hit = tryResolveAt(joinPosix(dir, m));
+          if (hit) return hit;
+        }
+        return tryResolveAt(joinPosix(dir, sub));
       }
     }
     return null;
@@ -1246,10 +1331,32 @@ function extractFacts(inc = null) {
     // exports, remembering which exported name was the file's DEFAULT export so
     // default-import edges can later resolve "default" → the real symbol name.
     let defaultExportName = null;
+    // getExportedDeclarations() resolves through re-export barrels transitively via
+    // the checker, so d[0] is ALREADY the origin declaration — `export *`, named,
+    // renamed and multi-hop all land on the true site. Recording where it lives
+    // costs one pointer read on a node we just materialised, and it is the only
+    // signal that distinguishes a barrel's pass-through entry from a real
+    // definition: `reExports` is built from named specifiers alone, so a star
+    // barrel looks identical to a definer without this.
     const exports = [...sf.getExportedDeclarations()].map(([name, d]) => {
       const resolved = name === "default" ? (d[0]?.getName?.() ?? "default") : name;
       if (name === "default") defaultExportName = resolved;
-      return { name: resolved, kind: d[0]?.getKindName?.() ?? "?" };
+      const originAbs = d[0]?.getSourceFile?.()?.getFilePath?.().replace(/\\/g, "/") ?? null;
+      let via = {};
+      if (originAbs) {
+        // "Inside the repo" is decided by whether rel() actually stripped the cwd
+        // prefix, not by re-deriving the test here — a second copy of that rule
+        // could disagree with the one every other path in the map is built from
+        // (Windows drive-letter casing being the obvious way).
+        const op = rel(originAbs);
+        const inRepo = op !== originAbs;
+        // A dependency's declaration is not a place an agent may edit, and the
+        // graph holds no node there — say "external", never a node_modules path.
+        // `path` is rel(sf.getFilePath()) — for a Vue SFC both sides map back
+        // through vueMap, so a file never reports itself as its own origin.
+        if (op !== path) via = (!inRepo || excluded(op)) ? { external: true } : { definedIn: op };
+      }
+      return { name: resolved, kind: d[0]?.getKindName?.() ?? "?", ...via };
     });
     // Non-exported TOP-LEVEL declarations → `locals`, so --find/--any can surface a
     // private helper for reuse-before-rebuild. These NEVER enter rankSymbols/--map/
@@ -1285,8 +1392,32 @@ function extractFacts(inc = null) {
       if (!tp || excluded(tp)) return;
       (importedSymbols[tp] ??= []).push(...names);
     };
+    // A fully `import type` / `export type` declaration is not a runtime edge and
+    // must stay out of PageRank — but dropping it outright made the file it points
+    // at look unused. Measured on vercel/chatbot@c2f8235: lib/types.ts has 23
+    // importers, every one of them type-only, and --relates reported `dependents
+    // (0)` — indistinguishable from an orphan. These land in a SEPARATE field so
+    // the runtime graph, edgeCoverage and symbol ranking are all untouched.
+    const typeOnly = new Set();
+    const addTypeEdge = (tp) => { if (tp && !excluded(tp)) typeOnly.add(tp); };
     for (const imp of sf.getImportDeclarations()) {
-      if (imp.isTypeOnly()) continue; // type-only modules must not inflate runtime PageRank
+      // Fully erased at compile time — either `import type {…}`, or a plain import
+      // whose every named specifier is individually `type` with no default or
+      // namespace binding. `import { type A } from "./x"` emits NOTHING, so it is
+      // not a runtime dependency; the `["*"]` fallback further down cannot tell,
+      // because once the type specifiers are filtered out it looks identical to a
+      // side-effect `import "./x"` — which does run. The specifier COUNT separates
+      // them. This shape is what @typescript-eslint's consistent-type-imports
+      // writes under fixStyle:"inline-type-imports", so it is common, and it was
+      // fabricating a runtime edge and inflating the target's PageRank.
+      const named = imp.getNamedImports();
+      const erased = imp.isTypeOnly()
+        || (named.length > 0 && named.every((n) => n.isTypeOnly()) && !imp.getDefaultImport() && !imp.getNamespaceImport());
+      if (erased) {
+        const t0 = imp.getModuleSpecifierSourceFile();
+        addTypeEdge(t0 ? rel(t0.getFilePath()) : resolveSpec(fromDir, imp.getModuleSpecifierValue()));
+        continue; // type-only modules must not inflate runtime PageRank
+      }
       // Map-health: a repo-local-looking specifier is one edgeCoverage counts.
       const local = expectedLocal(imp.getModuleSpecifierValue());
       if (local) localSites++;
@@ -1314,8 +1445,26 @@ function extractFacts(inc = null) {
       }
     }
     for (const exp of sf.getExportDeclarations()) {
-      if (exp.isTypeOnly()) continue; // type-only re-exports excluded from edges
       const t = exp.getModuleSpecifierSourceFile();
+      // `export { X } from "<spec>"` forwards X; it never declares it. That is true
+      // of the syntax alone, so ownership must not hinge on <spec> resolving —
+      // a workspace package with no node_modules installed resolves to nothing,
+      // and the file was then scored as a rival DEFINITION of every name it merely
+      // forwards, which made --callers fail the whole query as "ambiguous".
+      // A bare `export { local }` (no `from`) does declare, hence the specifier
+      // check. `export * from "<unresolvable>"` stays uncovered — its names are
+      // unknowable without resolving the target.
+      if (!t && exp.getModuleSpecifierValue()) {
+        for (const n of exp.getNamedExports()) reExports.add(n.getName());
+      }
+      // Same erasure rule as imports. `export { type X } from "./z"` re-exports
+      // nothing at runtime, but note `export * from "./z"` DOES — and it also has
+      // zero named specifiers, so the count is again what distinguishes them.
+      const namedExp = exp.getNamedExports();
+      if (exp.isTypeOnly() || (namedExp.length > 0 && namedExp.every((n) => n.isTypeOnly()))) {
+        if (t) addTypeEdge(rel(t.getFilePath()));
+        continue; // type-only re-exports excluded from RUNTIME edges
+      }
       if (t) {
         const tp = rel(t.getFilePath());
         const names = exp.getNamedExports().filter((n) => !n.isTypeOnly()).map((n) => n.getName());
@@ -1341,7 +1490,11 @@ function extractFacts(inc = null) {
     }
     const imports = Object.keys(importedSymbols);
     const rsc = rscBoundary(sf, SyntaxKind);
-    files[path] = { exports, locals, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom], ...(rsc ? { rsc } : {}) };
+    // Disjoint from `imports`: when a file also pulls something at runtime from the
+    // same target, the runtime edge is the stronger claim and the weaker one would
+    // just double-count the target in two arrays.
+    const typeOnlyImports = [...typeOnly].filter((tp) => !importedSymbols[tp]).sort();
+    files[path] = { exports, locals, imports, importedSymbols, defaultExportName, reExports: [...reExports], reExportsFrom: [...reExportsFrom], ...(rsc ? { rsc } : {}), ...(typeOnlyImports.length ? { typeOnlyImports } : {}) };
     } catch (e) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
@@ -1397,6 +1550,11 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   const dependents = {};
   for (const [p, f] of Object.entries(files)) for (const tp of f.imports) (dependents[tp] ??= []).push(p);
   for (const p in files) files[p].dependents = dependents[p] ?? [];
+  // Same inversion for the compile-time-only edges, kept in its own field so
+  // `dependents` keeps meaning exactly "would break at runtime".
+  const typeDependents = {};
+  for (const [p, f] of Object.entries(files)) for (const tp of (f.typeOnlyImports || [])) (typeDependents[tp] ??= []).push(p);
+  for (const p in files) if (typeDependents[p]?.length) files[p].typeOnlyDependents = typeDependents[p];
 
   // Group files into features (first real app/ route segment) from their paths.
   const features = {};
@@ -1825,9 +1983,13 @@ function resolveFile(keys, filesObj, q) {
 }
 
 function fileBlock(key, f) {
-  console.log(`exports (${f.exports.length}): ${f.exports.map((e) => `${e.name}(${e.kind})`).join(", ") || "—"}`);
+  console.log(`exports (${f.exports.length}): ${f.exports.map((e) => `${e.name}(${e.kind})${originNote(e)}`).join(", ") || "—"}`);
   console.log(`imports (${f.imports.length}): ${f.imports.join(", ") || "—"}`);
   console.log(`dependents (${f.dependents.length}): ${f.dependents.join(", ") || "—"}`);
+  // Compile-time-only relationships, listed apart from the runtime ones: renaming
+  // or deleting an export breaks these files, but nothing here fails at runtime.
+  if (f.typeOnlyImports?.length) console.log(`type-only imports (${f.typeOnlyImports.length}): ${f.typeOnlyImports.join(", ")}`);
+  if (f.typeOnlyDependents?.length) console.log(`type-only dependents (${f.typeOnlyDependents.length}): ${f.typeOnlyDependents.join(", ")}`);
   if (f.rsc) console.log(`boundary: ${f.rsc === "client" ? "'use client' (client component)" : "'use server' (server module/actions)"}`);
 }
 
@@ -2764,7 +2926,7 @@ async function main() {
       const symAll = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+          if (e.name.toLowerCase().includes(q)) symAll.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
           if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
@@ -2772,13 +2934,13 @@ async function main() {
       const symObjs = rankMatches(data.files, symAll).slice(0, SYMBOL_MATCH_LIMIT);
       const symTrunc = symTotal > symObjs.length;
       const symFoot = symTrunc ? ` (showing top ${symObjs.length} of ${symTotal} by pagerank — narrow your query)` : "";
-      const symHits = symObjs.map((s) => `  ${s.file} → ${s.name} (${s.kind})`);
+      const symHits = symObjs.map((s) => `  ${s.file} → ${s.name} (${s.kind})${originNote(s)}`);
       const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
       if (fileKey) {
         // A file resolved — but ALSO surface symbol/feature hits (fix #3) so a
         // loose path match (e.g. "auth") can't shadow a symbol the user wanted.
         const f = data.files[fileKey];
-        out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
+        out({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, ...typeOnlyOut(f), symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) }, () => {
           console.log(`[structure:file] ${fileKey}  (pr ${f.pagerank ?? "—"})`);
           fileBlock(fileKey, f);
           if (symHits.length) { console.log(`[structure] ${symTotal} symbol match for "${raw}"${symFoot}:`); console.log(symHits.join("\n")); }
@@ -2844,7 +3006,7 @@ async function main() {
       const all = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+          if (e.name.toLowerCase().includes(q)) all.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
           if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
@@ -2854,7 +3016,7 @@ async function main() {
       const truncated = ranked.length > matches.length;
       out({ command: "find", query: raw, total: ranked.length, shown: matches.length, truncated, matches }, () => {
         console.log(`find "${raw}": ${ranked.length} match${truncated ? ` (showing top ${matches.length} by pagerank — narrow your query)` : ""}`);
-        if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})`).join("\n"));
+        if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})${originNote(m)}`).join("\n"));
       });
     }
   } else if (has("--relates")) {
@@ -2879,7 +3041,7 @@ async function main() {
           for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
         const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
         const top = Object.entries(rel).filter(([k]) => k !== key).sort((a, b) => b[1] - a[1]).slice(0, RELATED_LIMIT);
-        out({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
+        out({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, ...typeOnlyOut(f), related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) }, () => {
           console.log(`relates: ${key}  (pr ${f.pagerank ?? "—"})`);
           fileBlock(key, f);
           console.log(`related (random-walk relevance):`);
@@ -3206,8 +3368,19 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   const exportOwners = [];
   const localOwners = [];
   for (const [path, f] of Object.entries(data.files)) {
-    const reExported = (f.reExports || []).includes(symbolName);
-    if (f.exports.some((e) => e.name === symbolName) && !reExported) exportOwners.push(path);
+    // `definedIn`/`external` is the precise per-symbol answer to "does this file
+    // actually declare the name": the checker resolved it. `reExports` is the
+    // older, name-list approximation built from NAMED specifiers only, so it
+    // cannot see `export * from` — one star barrel used to be scored as a rival
+    // definition and made this whole query fail with error:"ambiguous". Keep it as
+    // the fallback so nothing regresses where the newer field is absent, but do
+    // NOT widen `reExports` itself: rankSymbols reads it to discount pass-through
+    // names, and broadening it there would quietly move symbol ranking.
+    const own = f.exports.find((e) => e.name === symbolName);
+    const reExported = own
+      ? (!!own.definedIn || !!own.external || (f.reExports || []).includes(symbolName))
+      : false;
+    if (own && !reExported) exportOwners.push(path);
     else if ((f.locals || []).some((e) => e.name === symbolName)) localOwners.push(path);
   }
   const owners = inFilter
@@ -3469,7 +3642,7 @@ function mcpQuery(name, args) {
       const symAll = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind });
+          if (e.name.toLowerCase().includes(q)) symAll.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
           if (e.name.toLowerCase().includes(q)) symAll.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
@@ -3479,7 +3652,7 @@ function mcpQuery(name, args) {
       const featNames = Object.keys(data.features || {}).filter((k) => k.toLowerCase().includes(q));
       if (fileKey) {
         const f = data.files[fileKey];
-        return ok({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) });
+        return ok({ command: "any", query: raw, kind: "file", file: fileKey, pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, ...typeOnlyOut(f), symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) });
       } else if (symObjs.length || featNames.length) {
         return ok({ command: "any", query: raw, kind: "structure", symbols: symObjs, symbolsTotal: symTotal, symbolsTruncated: symTrunc, features: featNames.map((n) => ({ name: n, count: data.features[n].length })) });
       } else if (candidates && candidates.length > 1) {
@@ -3509,7 +3682,7 @@ function mcpQuery(name, args) {
       const all = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind });
+          if (e.name.toLowerCase().includes(q)) all.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
           if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
@@ -3532,7 +3705,7 @@ function mcpQuery(name, args) {
         for (const tp of ff.imports) if (data.files[tp]) { biEdges.push({ from: p, to: tp, weight: 1 }); biEdges.push({ from: tp, to: p, weight: 1 }); }
       const rel = pagerank(keys, biEdges, { personalization: { [key]: 1 } });
       const top = Object.entries(rel).filter(([k]) => k !== key).sort((x, y) => y[1] - x[1]).slice(0, RELATED_LIMIT);
-      return ok({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
+      return ok({ command: "relates", file: key, ...(f.rsc ? { rsc: f.rsc } : {}), pagerank: f.pagerank ?? null, exports: f.exports, imports: f.imports, dependents: f.dependents, ...typeOnlyOut(f), related: top.map(([file, score]) => ({ file, score: +score.toFixed(6) })) });
     }
     case "callers": {
       const raw = String(a.symbol ?? "");
@@ -3629,7 +3802,10 @@ function mcpQuery(name, args) {
 // below), so these pure building blocks can be used in-process by the MCP
 // server, tests, and any future library caller without spawning a subprocess.
 // ---------------------------------------------------------------------------
-export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache, bm25Search, splitIdent, isDirectRun };
+// SCHEMA_VERSION and CODE_EXT are exported for the test suite: a test that
+// hardcodes either one is just another copy that can drift out of sync — which is
+// exactly the failure both constants exist to prevent.
+export { pagerank, rankSymbols, identMul, resolveFile, extractVueScripts, stripJsonComments, extractFacts, build, ensureFresh, readPackageVersion, dirtyFiles, dirtyFingerprint, buildDirty, buildIncremental, mcpQuery, mcpResetCache, bm25Search, splitIdent, isDirectRun, SCHEMA_VERSION, CODE_EXT };
 
 // True when this module IS the process entry point, false when imported.
 //

@@ -3,9 +3,135 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.18.0] - 2026-07-26
+
+Map `SCHEMA_VERSION` bumped **5 → 6** (adds per-export `definedIn`/`external` and
+per-file `typeOnlyImports`/`typeOnlyDependents`); caches rebuild once on upgrade.
+Every new field is emitted only when it carries information, so a repo with no
+barrels and no type-only imports serialises byte-identically to schema 5.
+
+**Cost, measured rather than asserted.** Build and query time are unchanged: every
+cold-build delta across three pinned repos fell inside a 7–15% run-to-run noise
+floor with the sign flipping repo to repo, and peak RSS moved +0.49% against its
+own 0.72% spread. The barrel work is genuinely free at build time because
+`getExportedDeclarations()` already materialises the declaration node. The
+fast-path invariant holds — `--relates` still never constructs a Project, verified
+across 30 warm runs with zero reparses. What does grow is the map on disk, and on
+barrel-heavy repos it is not negligible: `map.json` **+1.8% to +6.0%**,
+`facts.json` **+2.6% to +17.0%** (chatbot / primitives / headlessui).
+
+### Added
+- **The real definition site behind a re-export barrel.** `getExportedDeclarations()`
+  already walks barrel chains through the type checker, so the origin declaration
+  was being materialised on every build and then discarded. It is now kept: an
+  export reached through a barrel carries `definedIn` (the file that actually
+  declares it, through any number of hops) or `external: true` when the origin
+  lies outside the repo. `--find`, `--any` and `--relates` all surface it, in JSON
+  and in prose, so "which file do I actually edit?" has an answer instead of two
+  undifferentiated hits.
+
+  On **radix-ui/primitives@579c5b84**, where **62 of 62 `index.ts` files are pure
+  re-export barrels** and 47.2% of imports arrive through one:
+
+  ```
+  packages/react/primitive/src/index.ts → Primitive (VariableDeclaration) → defined in packages/react/primitive/src/primitive.tsx
+  packages/react/primitive/src/primitive.tsx → Primitive (VariableDeclaration)
+  ```
+
+  A node_modules path is never emitted — the graph holds no node there, so a
+  dependency origin reports `external: true` and nothing else.
+
+- **Type-only edges, kept out of the runtime graph but no longer discarded.**
+  `import type { T } from "./x"` was skipped outright, correctly reasoning that a
+  type import has no runtime existence and must not inflate PageRank. The cost was
+  invisible: the imported file's `dependents` came back **empty**, so a file every
+  consumer depends on read exactly like an orphan. On
+  **vercel/chatbot@c2f8235e**, `lib/types.ts` has 23 importers, all 23 type-only,
+  and `--relates` reported `dependents (0): —`. It now reports all 23 under
+  `typeOnlyDependents`, while `dependents` keeps meaning "breaks at runtime".
+  22.4% of that repo's import statements are type-only.
+
+  `imports`/`dependents`, PageRank, `edgeCoverage`, symbol ranking and
+  `--export dot|mermaid` are all deliberately unchanged — the new fields are
+  disjoint from `imports` and never enter the ranking graph.
 
 ### Fixed
+- **One `export *` barrel made `--callers` refuse the whole query.** Ownership
+  ("which file DEFINES this symbol") read `reExports`, which is built only from
+  NAMED export specifiers — `export * from "./x"` has none to iterate, so a pure
+  pass-through barrel was scored as a competing DEFINITION and the flagship
+  compiler-accurate command returned `error: "ambiguous"` rather than an answer.
+  `export *` is the most common barrel form in TypeScript. Reproduced before the
+  fix: `--callers Thing` → `candidates: ["src/mid.ts","src/thing.ts"]`, where
+  `src/mid.ts` contains nothing but `export * from "./thing"`.
+
+  Ownership now reads the per-symbol `definedIn`/`external`, which the checker
+  resolved. `reExports` itself is deliberately **not** widened: `rankSymbols`
+  reads it to discount pass-through names, so broadening it would have quietly
+  moved symbol ranking.
+
+- **An import whose specifiers were all inline-`type` fabricated a runtime edge.**
+  `import { type A, type B } from "./x"` emits nothing at all, but filtering the
+  type specifiers left an empty name list, which the edge builder could not
+  distinguish from a side-effect `import "./x"` — which does run. It fell through
+  to the `["*"]` fallback, created a runtime dependency that does not exist, and
+  inflated the target's PageRank. The specifier *count* is what separates the two
+  cases. Same bug on `export { type X } from "./z"`, where `export * from "./z"`
+  also has zero named specifiers but IS a real runtime dependency. This shape is
+  what `@typescript-eslint/consistent-type-imports` writes under
+  `fixStyle: "inline-type-imports"`, so it is common. Predates this release;
+  found by an adversarial pass over the type-only work above.
+
+- **An unresolvable re-export was scored as a definition.** Found on
+  radix-ui/primitives: `export { useComposedRefs } from '@radix-ui/react-compose-refs'`
+  in a workspace with no `node_modules` installed resolves to nothing, so neither
+  signal fired and the forwarding file was counted as a definer. Whether a
+  specifier resolves is a fact about the environment; whether the syntax declares
+  a name is not. A bare `export { local }` (no `from`) is unaffected — it does
+  declare, and is still treated as a definition.
+
+- **`exports` subpath patterns formed no edge at all.** `"./wild/*": "./src/wild/*.ts"`
+  was looked up by exact key only, so every wildcard subpath in a workspace
+  package silently produced nothing — exit 0, no warning. Node's pattern rules now
+  apply, checked against a real Node v26 rather than a reading of the docs:
+  longest prefix before the `*` wins, and on a tie the longer FULL key wins
+  (declaration order never decides — Node's own docs pair `"./lib/*"` with
+  `"./lib/*.js"`, where ordering by key resolves to the wrong file). A pattern
+  whose wildcard would match the empty string is rejected, because Node raises
+  `ERR_PACKAGE_PATH_NOT_EXPORTED` there and claiming otherwise would invent an
+  edge for an import that throws.
+
+- **Nested `exports` conditions resolved to nothing.** `{"node": {"import": "./src/x.ts"}}`
+  was read one level deep and abandoned when no top-level value was a string.
+  Conditions are now walked recursively, and an array target is treated as Node's
+  fallback list — each candidate tried in order until one exists on disk, which is
+  what the `.` entry already did and subpaths could not.
+
+  Condition precedence stays deliberately source-first (`types` → `typings` →
+  `import` → `default`) rather than Node's runtime precedence: this tool never
+  executes the package, and the published runtime target usually points at a
+  gitignored `dist/`. That is the same reasoning as `05ef8dc`.
+
+- **A raw NUL byte made `agentmap.mjs` unsearchable.** `dirtyFingerprint` used a
+  literal `\x00` as a rename delimiter in a cache-key token. The delimiter is the
+  right choice — it is the one byte no path can contain, which is why `git status -z`
+  uses it — but writing it as a raw byte rather than the `\0` escape made `file`
+  classify the whole 3.7k-line module as binary, after which grep suppresses
+  matches. Two independent audits hit it and one silently got zero results. The
+  token hashes identically; only the source encoding changed. A test now fails on
+  any raw NUL in a shipped file.
+
+- **A second extension ladder in `packageImportsToPaths`**, and a third in
+  `eval/eval.mjs`'s git-grep pathspec (which was missing `*.cjs`, so the grep
+  baseline searched fewer files than agentmap mapped). Both now derive from the
+  canonical list. The guard is a test that iterates the live `CODE_EXT` constant
+  rather than restating it, so a ninth extension is covered the day it is added —
+  proven to fail when the two are forced apart. `vite.config.mts`/`.cts` were also
+  being skipped by a subset ladder.
+
+- **`test/doctor.test.mjs` hand-synced the schema number**, which went stale on
+  this very bump. It reads the live constant now.
+
 - **The post-commit rebuild could orphan itself and burn a core.** The refresh is
   backgrounded so it outlives the commit shell — which also means a run that hangs
   is reparented to init with nothing left to reap it. Observed in the wild at **21
@@ -802,7 +928,13 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/raymondchins/agentmap/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/raymondchins/agentmap/compare/v0.16.1...v0.17.0
+[0.16.1]: https://github.com/raymondchins/agentmap/compare/v0.16.0...v0.16.1
+[0.16.0]: https://github.com/raymondchins/agentmap/compare/v0.15.1...v0.16.0
+[0.15.1]: https://github.com/raymondchins/agentmap/compare/v0.15.0...v0.15.1
+[0.15.0]: https://github.com/raymondchins/agentmap/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/raymondchins/agentmap/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/raymondchins/agentmap/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/raymondchins/agentmap/compare/v0.12.3...v0.13.0

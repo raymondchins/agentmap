@@ -810,6 +810,15 @@ This is the content of the waiting window. Capacity goes here, not to idling.
 Every item is genuinely underserved and structurally beyond a tree-sitter tool,
 because it needs the checker or the resolver.
 
+**Status: 6 of 7 closed, 1 partial.** Worth recording what the closures actually
+were, because it is not what this section predicted. Two items closed as NOT-A-GAP
+once measured. Of the four built, **three turned out to be repairs rather than
+additions** — `--callers` failing outright on `export *`, type-only dependents
+missing entirely rather than merely unlabelled, and wildcard/nested `exports`
+resolving to nothing. Each was a shipped command answering confidently and wrongly
+under a "compiler-accurate" label. The depth frontier this section set out to
+extend was, in three of four cases, a floor that needed fixing first.
+
 - [x] **tsconfig `references` (project references).** **CLOSED — NOT A GAP.**
   The premise was wrong on both halves, and measuring it is what showed that.
   (a) Project references are not a module-resolution mechanism — they govern
@@ -850,20 +859,80 @@ because it needs the checker or the resolver.
   `test/workspace-entry-resolution.test.mjs`. Original spec:
   `discoverWorkspacePackages` (`:767–808`) / `resolveWorkspace` (`:1106–1124`).
   Verified: **zero occurrences** of either protocol string in `agentmap.mjs`.
-- [ ] **Broaden conditional exports**, and fix the latent bug at `:674` —
-  `packageImportsToPaths` carries a second hardcoded extension ladder that does
-  not derive from `CODE_EXT` (`:153–157`), so adding an extension silently fails
-  to update it.
-- [ ] **Type-only edges as a first-class attribute.** `isTypeOnly()` is already
-  read at `:1204`, `:1211`, `:1223`, `:1232`, `:1236` — purely to *exclude* — and
-  the information is then discarded. Letting an agent distinguish a type import
-  from a runtime dependency is a real blast-radius correctness feature that no
-  tree-sitter tool can produce, because it requires the checker.
-- [ ] **Barrel resolution as the headline.** `getExportedDeclarations()` at
-  `:1164` already follows re-export barrels transitively through the type checker.
-  Surface "the real definition site behind the barrel" as an explicit output.
-  **This is the single most legible demonstration that compiler-grade beats
-  name-matching** and should lead the depth story.
+- [x] **Broaden conditional exports**, and fix the latent bug at `:674` — **DONE,
+  and the item was understated: two LIVE resolution bugs were found next to the
+  latent one.** (a) `exports` subpath PATTERNS (`"./wild/*": "./src/wild/*.ts"`)
+  were looked up by exact key only, so every wildcard subpath in a workspace
+  package produced no edge at all — exit 0, no warning. (b) NESTED conditions
+  (`{"node":{"import":"./src/x.ts"}}`) were read one level deep and abandoned when
+  no top-level value was a string. Both now resolve: `condLeaf` became
+  `condTargets`, walking recursively and returning every candidate in precedence
+  order, and a new `matchSubpath` implements Node's pattern rules with
+  longest-prefix-wins. Array targets are now Node's fallback list — tried in order
+  until one exists on disk, which the `.` entry already did and subpaths could not.
+  Precedence stays source-first (`types`→`typings`→`import`→`default`), not Node's
+  runtime order, for `05ef8dc`'s reason: this tool never executes the package.
+  (c) The named latent bug was confirmed **latent, not live** — the ladders agreed
+  today, so it was a regression waiting rather than a break. The census also found
+  **8 hardcoded extension lists, not the 2 this roadmap named** — `VITE_CONFIG_RE`
+  was silently skipping `vite.config.mts`/`.cts`, and `eval/eval.mjs`'s git-grep
+  pathspec was missing `*.cjs`, meaning the grep BASELINE searched fewer files
+  than agentmap mapped. The guard is a test that iterates the live `CODE_EXT`
+  constant instead of restating it (restating would just be a ninth copy), proven
+  to fail when the two are forced apart.
+
+  An adversarial pass checked the new pattern matcher against a real Node v26
+  rather than against the prose of the spec, and caught two conformance defects
+  in the first cut: the equal-prefix TIE-BREAK resolved by JSON declaration order
+  where Node ranks by longer full key (Node's own docs pair `"./lib/*"` with
+  `"./lib/*.js"`, so the tie is an idiom, and getting it wrong both missed the
+  right dependent and misattributed the edge), and an EMPTY wildcard fill was
+  accepted where Node raises `ERR_PACKAGE_PATH_NOT_EXPORTED`. Both fixed and
+  pinned by tests proven to fail against the first cut. Reading the spec was not
+  enough; running the runtime was.
+- [x] **Type-only edges as a first-class attribute.** **DONE — and the framing was
+  too gentle.** The information wasn't merely unlabelled: a fully `import type` /
+  `export type` declaration was dropped before any edge was recorded, so the
+  imported file's `dependents` came back EMPTY. Measured on
+  **vercel/chatbot@c2f8235e**: `lib/types.ts` has 23 importers, all 23 type-only,
+  and `--relates` reported `dependents (0): —` — a file the whole app depends on,
+  indistinguishable from an orphan. 22.4% of that repo's import statements are
+  type-only. They now land in `typeOnlyImports`/`typeOnlyDependents`, disjoint from
+  `imports` and absent when empty. The exclusion from PageRank was CORRECT and is
+  preserved — the original comment (*"type-only modules must not inflate runtime
+  PageRank"*) was right about the graph and wrong about throwing the fact away.
+  PageRank, `edgeCoverage`, `rankSymbols` and `--export` are all provably
+  unchanged, asserted by a same-file-count control repo rather than assumed.
+
+  An adversarial pass over the finished work then found the inverse bug next door:
+  `import { type A, type B }` — every specifier inline-`type`, the declaration
+  itself not — fabricated a RUNTIME edge and inflated the target's PageRank,
+  because after filtering the type specifiers it was indistinguishable from a
+  side-effect `import "./x"`. The specifier count separates them. Same shape on
+  `export { type X } from`, with the trap reversed: `export * from` also has zero
+  named specifiers and IS a real runtime dependency. This is what
+  `@typescript-eslint/consistent-type-imports` emits under
+  `fixStyle: "inline-type-imports"`, so it is common in the wild.
+- [x] **Barrel resolution as the headline.** **DONE — and it was a FIX, not just a
+  surfacing.** `d[0]` from `getExportedDeclarations()` is already the checker-resolved
+  origin declaration; only its name and kind were read, and its source file — the
+  answer to "where is this really defined" — was dropped. Now emitted as
+  `definedIn` (or `external: true` for an origin outside the repo; a node_modules
+  path is never surfaced). Verified on **radix-ui/primitives@579c5b84**, where
+  **62 of 62 `index.ts` files are pure barrels** and 47.2% of imports arrive
+  through one.
+
+  The bigger find was underneath: ownership in `callGraph()` read `reExports`,
+  built from NAMED specifiers only, so `export * from "./x"` was invisible and a
+  pure pass-through barrel was scored as a rival DEFINITION — **one star barrel
+  made `--callers` fail the entire query with `error:"ambiguous"`.** That is the
+  flagship compiler-accurate command failing hard on the most common barrel form
+  in TypeScript, and `test/call-graph.test.mjs` never covered it. A second variant
+  followed from the same root: an UNRESOLVABLE re-export (a workspace package with
+  no `node_modules` installed) fired neither signal and was likewise counted as a
+  definer. Ownership now reads the per-symbol `definedIn`; `reExports` is
+  deliberately NOT widened, because `rankSymbols` reads it to discount pass-through
+  names and broadening it would have quietly moved symbol ranking.
 - [x] **Fix `--callers` on JSX, or make it state its limitation in the payload.**
   **DONE — resolved, not labelled.** JSX elements are now call sites in BOTH
   directions, via one shared `invocationOf()` helper (the filter was duplicated,

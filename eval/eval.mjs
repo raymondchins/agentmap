@@ -312,7 +312,7 @@ function evalDeps(fx, repoDir, importerIndex, srcFilesRepoWide) {
     const rawBase = basename(mod).replace(/\.[cm]?[jt]sx?$/, "");
     const term = rawBase === "index" ? basename(dirname(mod)) : rawBase;
     const termRe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const g = runCap("git", ["-C", repoDir, "grep", "-l", "-P", "-e", `(?:from|require\\(|import\\()\\s*['"][^'"]*/?${termRe}(?:/index)?(?:\\.[cm]?[jt]sx?)?['"]`, "--", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.mjs", "*.jsx"]);
+    const g = runCap("git", ["-C", repoDir, "grep", "-l", "-P", "-e", `(?:from|require\\(|import\\()\\s*['"][^'"]*/?${termRe}(?:/index)?(?:\\.[cm]?[jt]sx?)?['"]`, "--", ...[...SRC_EXT].map((e) => "*" + e)]);  // derive: the hand-typed copy this replaced was missing *.cjs, so the grep baseline searched fewer files than agentmap mapped
     const gFiles = g.stdout.split("\n").map((s) => s.trim()).filter((s) => s && s !== mod && !isTestPath(s));
     const gS = setStats(gFiles, truth);
     const amTok = tokEst(amHuman(repoDir, ["--relates", mod]));
