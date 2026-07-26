@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "agentmap",
   "displayName": "agentmap",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "description": "The repo map your coding agent is forced to use — a queryable, PageRank-ranked ts-morph import/symbol map for TS/JS repos. Bundles the PreToolUse grep nudge, the navigation skill, and a stdio MCP server exposing 11 query tools including a compiler-accurate call graph, BM25 lexical search, plus CLI-only Mermaid/DOT export.",
   "author": {
     "name": "Raymond Surya Chin"
@@ -10,13 +10,27 @@
   "homepage": "https://github.com/raymondchins/agentmap#readme",
   "repository": "https://github.com/raymondchins/agentmap",
   "license": "MIT",
-  "keywords": ["agentmap", "repo-map", "ts-morph", "typescript", "pagerank", "code-graph", "context"],
-  "skills": ["./skills"],
+  "keywords": [
+    "agentmap",
+    "repo-map",
+    "ts-morph",
+    "typescript",
+    "pagerank",
+    "code-graph",
+    "context"
+  ],
+  "skills": [
+    "./skills"
+  ],
   "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "agentmap": {
       "command": "npx",
-      "args": ["-y", "@raymondchins/agentmap", "--mcp"]
+      "args": [
+        "-y",
+        "@raymondchins/agentmap",
+        "--mcp"
+      ]
     }
   }
 }

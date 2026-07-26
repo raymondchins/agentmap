@@ -1,11 +1,11 @@
 {
   "name": "@raymondchins/agentmap",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "mcpName": "io.github.raymondchins/agentmap",
   "publishConfig": {
     "access": "public"
   },
-  "description": "The TS/JS-accurate repo map for coding agents \u2014 a compiler-grade ts-morph import/symbol graph (resolves tsconfig paths, vite/webpack alias, #imports subpaths, workspaces) that answers where-is / what-breaks / does-this-exist in ~98% fewer context tokens (up to ~99.9% per task, chars/4 estimate). Ranked, queryable, honestly eval'd: PageRank hubs, Aider-style symbol ranking, token-budgeted digest, a single --any router (file \u2192 symbol \u2192 feature \u2192 live git-grep), a compiler-accurate call graph (--callers/--calls, transitive --depth), BM25 lexical search (--search) for vague queries, and Mermaid/DOT export (--export), with post-commit auto-refresh + a PreToolUse hook.",
+  "description": "The TS/JS-accurate repo map for coding agents — a compiler-grade ts-morph import/symbol graph (resolves tsconfig paths, vite/webpack alias, #imports subpaths, workspaces) that answers where-is / what-breaks / does-this-exist in ~98% fewer context tokens (up to ~99.9% per task, chars/4 estimate). Ranked, queryable, honestly eval'd: PageRank hubs, Aider-style symbol ranking, token-budgeted digest, a single --any router (file → symbol → feature → live git-grep), a compiler-accurate call graph (--callers/--calls, transitive --depth), BM25 lexical search (--search) for vague queries, and Mermaid/DOT export (--export), with post-commit auto-refresh + a PreToolUse hook.",
   "type": "module",
   "bin": {
     "agentmap": "agentmap.mjs"
