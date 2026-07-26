@@ -2836,7 +2836,10 @@ Usage: agentmap [command] [--json]
 
 Query commands:
   --any <q>            route a query: file → symbol → feature → live git-grep
-  --find <sym>         find symbols by (sub)name (exports + non-exported top-level)
+  --find <sym> [--kind <k>]
+                       find symbols by (sub)name (exports + non-exported top-level)
+                       --kind filters by declaration kind, matched loosely:
+                       function / interface / type / class / variable
   --search <q>         rank symbols by BM25 lexical relevance (vague NL queries)
   --relates <path>     a file's exports/imports/dependents + related files
   --callers <sym> [--in <path>] [--depth N]
@@ -2855,6 +2858,8 @@ Query commands:
                        layout chain, and re-export shim aliases
   --route <url|file>   what serves this URL (or which URL a file serves):
                        matched file, methods, layout chain, RSC boundary
+  --affected <path>    test files that transitively import this file — what to
+                       re-run after changing it (and what has NO cover at all)
   --hubs               top files by PageRank importance
   --print              dump the full cached map as JSON
   --export <mermaid|dot> [--focus <p>]
@@ -2906,6 +2911,12 @@ async function main() {
   // codes are identical in both modes.
   const wantJson = has("--json");
   const out = (obj, prose) => { if (wantJson) console.log(JSON.stringify(obj)); else prose(); };
+  // --kind: filter symbol results by declaration kind. Matched LOOSELY and
+  // case-insensitively against the ts-morph kind name, so `--kind function`
+  // finds FunctionDeclaration and `--kind type` finds TypeAliasDeclaration —
+  // nobody should have to know ts-morph's enum spelling to narrow a search.
+  const kindFilter = arg("--kind");
+  const kindOk = (k) => !kindFilter || String(k || "").toLowerCase().includes(kindFilter.toLowerCase());
 
   // --include-dts is a GLOBAL modifier (like --json), valid with any query
   // command or none: it flips the module-scoped INCLUDE_DTS so extractFacts keeps
@@ -2926,14 +2937,14 @@ async function main() {
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
     "--dry-run", "--setup-mcp", "--mcp", "--build-edges",
     "--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--export", "--focus", "--tokens",
-    "--symbols", "--feature", "--features", "--hubs", "--routes", "--route",
+    "--symbols", "--feature", "--features", "--hubs", "--routes", "--route", "--affected", "--kind",
   ]);
 
   // A token consumed as the VALUE of a value-taking flag is never itself a flag —
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform", "--route"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform", "--route", "--affected", "--kind"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2968,9 +2979,10 @@ async function main() {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
     "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"], "--build-edges": [],
-    "--any": [], "--find": [], "--search": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
+    "--any": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
-    "--routes": [], "--route": [],
+    "--find": ["--kind"], "--search": ["--kind"],
+    "--routes": [], "--route": [], "--affected": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
   if (presentCommands.length > 1) {
@@ -3148,10 +3160,11 @@ async function main() {
     else {
       const data = ensureFresh();
       const lex = bm25Search(data.lexical, data.files, raw);
+      if (kindFilter) { lex.matches = lex.matches.filter((m) => kindOk(m.kind)); lex.total = lex.matches.length; }
       if (!lex.matches.length) process.exitCode = 1;
       const trunc = lex.total > lex.matches.length;
-      out({ command: "search", query: raw, total: lex.total, shown: lex.matches.length, truncated: trunc, matches: lex.matches }, () => {
-        console.log(`search "${raw}": ${lex.total} match${trunc ? ` (showing top ${lex.matches.length} by relevance)` : ""}`);
+      out({ command: "search", query: raw, ...(kindFilter ? { kind: kindFilter } : {}), total: lex.total, shown: lex.matches.length, truncated: trunc, matches: lex.matches }, () => {
+        console.log(`search "${raw}"${kindFilter ? ` kind~${kindFilter}` : ""}: ${lex.total} match${trunc ? ` (showing top ${lex.matches.length} by relevance)` : ""}`);
         if (lex.matches.length) console.log(lex.matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})  [${m.score}]`).join("\n"));
       });
     }
@@ -3164,16 +3177,16 @@ async function main() {
       const all = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) all.push(symMatch(path, e));
+          if (e.name.toLowerCase().includes(q) && kindOk(e.kind)) all.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
-          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
+          if (e.name.toLowerCase().includes(q) && kindOk(e.kind)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
       if (!all.length) process.exitCode = 1;
       const ranked = rankMatches(data.files, all);
       const matches = ranked.slice(0, SYMBOL_MATCH_LIMIT);
       const truncated = ranked.length > matches.length;
-      out({ command: "find", query: raw, total: ranked.length, shown: matches.length, truncated, matches }, () => {
-        console.log(`find "${raw}": ${ranked.length} match${truncated ? ` (showing top ${matches.length} by pagerank — narrow your query)` : ""}`);
+      out({ command: "find", query: raw, ...(kindFilter ? { kind: kindFilter } : {}), total: ranked.length, shown: matches.length, truncated, matches }, () => {
+        console.log(`find "${raw}"${kindFilter ? ` kind~${kindFilter}` : ""}: ${ranked.length} match${truncated ? ` (showing top ${matches.length} by pagerank — narrow your query)` : ""}`);
         if (matches.length) console.log(matches.map((m) => `  ${m.file} → ${m.name} (${m.kind})${originNote(m)}`).join("\n"));
       });
     }
@@ -3405,6 +3418,45 @@ async function main() {
       console.log(`features (${list.length}):`);
       for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
     });
+  } else if (has("--affected")) {
+    const raw = arg("--affected");
+    if (!raw) { console.error("--affected needs a file path, e.g. `--affected lib/auth.ts`"); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      // Accept a suffix so `--affected auth.ts` works without the full path, but
+      // refuse to guess when it is ambiguous — silently picking one of two files
+      // would answer a question the user did not ask.
+      const exact = data.files[raw] ? [raw] : Object.keys(data.files).filter((p) => p === raw || p.endsWith(`/${raw}`));
+      if (!exact.length) {
+        out({ command: "affected", query: raw, error: "no match", candidates: [], _code: 1 },
+          () => console.log(`affected "${raw}": no such file in the map`));
+        process.exitCode = 1;
+      } else if (exact.length > 1) {
+        out({ command: "affected", query: raw, error: "ambiguous", candidates: exact, _code: 1 }, () => {
+          console.log(`affected: "${raw}" matches ${exact.length} files — name one:`);
+          for (const c of exact) console.log(`  ${c}`);
+        });
+        process.exitCode = 1;
+      } else {
+        const file = exact[0];
+        const reach = transitiveDependents(data, file);
+        const tests = [...reach].filter(([p]) => TEST_FILE_RE.test(p))
+          .sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))
+          .map(([p, hop]) => ({ file: p, hop }));
+        const selfIsTest = TEST_FILE_RE.test(file);
+        out({
+          command: "affected", query: raw, file,
+          dependents: reach.size, tests: tests.length, covered: tests.length > 0 || selfIsTest,
+          affected: tests,
+        }, () => {
+          console.log(`affected by ${file}: ${tests.length} test file${tests.length === 1 ? "" : "s"} (of ${reach.size} transitive dependents)`);
+          for (const t of tests) console.log(`  ${t.file}  [${t.hop} hop${t.hop === 1 ? "" : "s"}]`);
+          // An empty list is the ANSWER, not a failure — and it is the answer that
+          // matters most before a risky edit, so say it in words.
+          if (!tests.length && !selfIsTest) console.log("  (none — this file has no test coverage reachable through imports)");
+        });
+      }
+    }
   } else if (has("--routes")) {
     const data = ensureFresh();
     const routes = buildRouteTable(data);
@@ -3564,6 +3616,35 @@ function invocationOf(id, SyntaxKind) {
     if (el && el.getTagNameNode() === tagHolder) return el;
   }
   return null;
+}
+
+// A test file, by the conventions every JS test runner actually uses. Kept
+// deliberately narrow: `/test/` as a bare path segment (not a substring, or
+// `src/latest/x.ts` matches), and a `.test.`/`.spec.` infix before the extension.
+const TEST_FILE_RE = /(^|\/)(__tests__|__mocks__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+
+// Transitive reverse dependency closure — every file that reaches `start` through
+// import edges, at any depth. BFS with a visited set: an import cycle is normal in
+// real code (barrels, type-only round-trips) and must terminate, not recurse.
+// Returns a Map of file -> hop distance so a caller can report how far away a
+// dependent is, which is what makes a long list triageable.
+function transitiveDependents(data, start) {
+  const seen = new Map();
+  let frontier = [start];
+  let hop = 0;
+  while (frontier.length) {
+    hop++;
+    const next = [];
+    for (const f of frontier) {
+      for (const d of data.files[f]?.dependents || []) {
+        if (seen.has(d) || d === start) continue;
+        seen.set(d, hop);
+        next.push(d);
+      }
+    }
+    frontier = next;
+  }
+  return seen;
 }
 
 // ---------------------------------------------------------------------------
