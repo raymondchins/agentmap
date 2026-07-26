@@ -206,22 +206,59 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
   dirty build now writes `map.dirty.json` instead of clobbering `map.json`, so the
   clean `map.json` (dirty:0) stays valid and the dirty→clean transition serves it
   with no extra rebuild. *(performance/medium)*
-- [ ] **Build wall-clock budget + visible skips** — `agentmap.mjs:638`: deep
-  import chains cause superlinear blowup (16+ min at 5k files) with files silently
-  dropped via stack overflow. Add a time budget (degrade to a partial map marked
-  `incomplete`), count + surface skipped files in the map/summary (not stderr
-  only), and prefer the iterative hand-rolled `resolveSpec`/`tryResolveAt` over
-  ts-morph's `getModuleSpecifierSourceFile` for the edge pass. *(performance/high)*
+- [~] **Build wall-clock budget + visible skips** — **visible skips DONE; budget not
+  taken; the resolver swap REFUTED.** The `:638` anchor was stale (real sites: the
+  `extractFacts` catch and `assemble`'s emit).
+  - *Visible skips (shipped).* The silent drop was real and reproduced on 0.18.1: a
+    4-file repo with one bad module specifier → `fileCount: 3`, `degraded: false`,
+    exit 0, and `facts.json` seeded from the truncated build so the loss would
+    persist into later dirty queries. Now recorded as `incomplete` / `skippedCount` /
+    `skipped` in `map.json`, a stderr warning, and a `--doctor` `incomplete` check
+    that flips `overall` off `ok`; schema 6 → 7 forces caches written before the fix
+    to rebuild. Conditional spread ⇒ byte-identical for repos that index everything.
+    `test/incomplete-map.test.mjs`.
+  - *Budget (deliberately NOT taken).* A default wall-clock ceiling silently
+    truncates maps on slow-but-healthy repos — a behavior change that needs its own
+    decision, not a ride-along. The trigger is also narrower than assumed: the
+    stack-overflow path needs ~3500–4000 `export * from` links at the default V8
+    stack. An independent re-measure saw **zero** drops at 250/500/1000 files, and a
+    5000-file chain ran >401s / 2.77GB **without** crashing. The everyday trigger is
+    an ordinary unparseable file, which the skips work above already covers.
+  - *`getModuleSpecifierSourceFile` → `resolveSpec` swap: REFUTED, do not do it.*
+    Measured at 17ms of a 175s build (0.01%) and linear. The real cost is
+    `getExportedDeclarations()`, measured independently at ~O(N^2.7) and ~O(N^2.9).
+    The swap is a pure correctness regression: the hand-rolled ladder returns `null`
+    for `./x.js` → `x.ts` (the normative ESM TS style under NodeNext/Bundler), for
+    `./types` → `types.d.ts`, and for directory imports resolving via a nested
+    `package.json` `"main"`. Trying ts-morph first with `resolveSpec` as fallback is
+    already the correct design. *(performance/high)*
 - [ ] **Incremental post-commit rebuild + lock** — `hooks/post-commit:67`: the
   hook re-parses the entire repo on every commit and concurrent rebuilds duplicate
   work with no locking. Diff `HEAD~1..HEAD` and re-parse only changed files + their
   direct dependents; add a lockfile / compare-and-skip on in-progress HEAD build.
   *(performance/medium — depends on Batch 2 incremental machinery)*
-- [ ] **Memory ceiling** — `agentmap.mjs:563`: whole-repo ts-morph AST held in RAM
-  (~90KB/file → ~443MB at 5k files). Process in batches and forget consumed ASTs
-  (`project.removeSourceFile` / `forgetNodesCreatedInBlock`) since `build()` only
-  needs per-file exports/imports; warn near heap limits; document a file-count
-  envelope. *(performance/medium)*
+- [ ] **Memory ceiling** — ⚠ **THE REMEDY IN THE ORIGINAL ITEM IS REFUTED. Do not
+  implement it.** Measured on content-os (393 files), four loop variants doing
+  identical work: current = **411MB** peak / 0.96s; `forgetNodesCreatedInBlock` per
+  file = 428MB / 0.96s (+2%, i.e. recovers nothing); `sf.forget()` per file =
+  **1,420MB / 59s**; `project.removeSourceFile` per file = **1,722MB / 89s** — 3.4×
+  WORSE peak, 93× slower, **and it changed the map** (3 files flipped their
+  `next/cache` resolution). Dropping a file invalidates the `ts.Program`, so the next
+  `getModuleSpecifierSourceFile()` rebuilds the whole ~300MB `.d.ts` closure: O(n)
+  rebuilds. It is also structurally wrong here — `tryResolveAt` uses
+  `project.getSourceFile()` as the repo-wide resolution index, and
+  `getExportedDeclarations()` resolves through barrels, so a consumed file must stay
+  resolvable for every file parsed after it.
+  The premise was wrong too: nothing is **held**. `heapUsed` falls to ~30MB the
+  instant `extractFacts()` returns, on all 5 repos measured — it is a peak, not a
+  leak. And **file count is the wrong axis**: a 252-file Next.js app peaks at 683MB
+  while 4,000 dependency-free files peak at 756MB, because the dependency `.d.ts`
+  closure (~300MB, ~1,800 extra program files on content-os) dominates and is
+  independent of repo size. A file-count envelope would cry wolf on small dep-heavy
+  repos and stay silent on the big repo it exists for.
+  **Still open, rescoped:** sample real `heapUsed` during the parse and print one
+  actionable warning (with the `--max-old-space-size` fix) before an OOM kills the
+  build with no map at all; document the measured envelope. *(performance/medium)*
 - [x] **Cap unbounded symbol matches** — DONE. `--find`/`--any` symbol matches are
   ranked by the containing file's PageRank and capped to `SYMBOL_MATCH_LIMIT` (50),
   with a "showing top N of M by pagerank — narrow your query" footer in prose and
@@ -406,10 +443,20 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   determinism/set-membership, never *order*. Add fixtures with known in-degrees
   (hubs[0] = most-imported; leaf never outranks it); add a CI step running
   `eval/eval.mjs` with a min-accuracy threshold. *(tests/medium)*
-- [ ] **Concurrency + e2e hook tests** — `test/helpers.mjs:48`: no parallel-build
-  race test; the shipped post-commit hook never runs e2e. Add both (parallel
-  `--find` on a dirty repo → valid JSON; `--install-hooks` without the hooksPath
-  override → commit → `generatedSha === HEAD`). *(tests/medium)*
+- [~] **Concurrency + e2e hook tests** — parallel-build half DONE, hook e2e still
+  open. Writing the test found a real bug rather than confirming safety:
+  `assemble()` used a FIXED tmp name (`map.json.tmp` / `map.dirty.json.tmp` /
+  `facts.json.tmp`) — the same literal path in every process — and nothing on the
+  CLI/MCP query path locks. Two concurrent queries → the winner renames the shared
+  tmp away and the loser's `renameSync` throws an uncaught ENOENT out through
+  `main()`. Measured 2/18 processes pre-fix, 7/8 under a barrier. Fixed with
+  per-writer `<target>.<pid>.tmp`; `test/concurrent-build.test.mjs` covers it with
+  a timing-free guard (squat the legacy shared paths with directories → pre-fix
+  `EISDIR`) plus a 6-way concurrency smoke test. Torn JSON — the hypothesised
+  failure — did NOT reproduce (0 tears at 6MB and 96MB payloads); the crash was
+  the defect. Still open: the shipped post-commit hook never runs e2e
+  (`--install-hooks` without the hooksPath override → commit → `generatedSha ===
+  HEAD`). *(tests/medium)*
 - [ ] **Lint/typecheck gate** — add `jsconfig.json` (checkJs+strict) +
   `npx tsc --noEmit` (typescript already comes via ts-morph) + ESLint flat config;
   fail CI on either. *(tests/medium)*

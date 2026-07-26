@@ -43,7 +43,13 @@ const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for 
 // fully `import type` declaration used to drop on the floor). Both are spread
 // conditionally, so a repo with no barrels and no type-only imports serialises
 // byte-identically to schema 5; caches rebuild once on upgrade.
-const SCHEMA_VERSION = 6;
+// Bumped 6 → 7: truncation accounting (`incomplete` / `skippedCount` / `skipped` /
+// `skippedTruncated`). Spread conditionally, so a repo that indexes every file
+// serialises byte-identically to schema 6. The bump is what forces a rebuild of
+// caches written BEFORE this feature — those could already be missing files with no
+// way to tell, which is the exact bug being fixed, so serving them unchanged would
+// leave the lie in place until HEAD happened to move.
+const SCHEMA_VERSION = 7;
 
 // --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
 // The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
@@ -137,6 +143,7 @@ const RELATED_LIMIT = 10;        // # of related files shown by --relates
 const SYMS_PER_FILE = 8;         // per-file symbol cap in the --map digest
 const EXPORT_NODE_CAP = 60;      // max nodes in --export dot/mermaid (top-N by pagerank) so a big repo stays readable
 const DEFAULT_SYMBOLS = 30;      // default count for --symbols with no n
+const SKIPPED_LIST_LIMIT = 100;  // max per-file skip records persisted (skippedCount stays exact)
 const MAXBUF = 64 * 1024 * 1024; // child_process maxBuffer — avoid ENOBUFS on big git output
 
 // ---------------------------------------------------------------------------
@@ -1320,6 +1327,10 @@ function extractFacts(inc = null) {
   // empty resolution stubs. Extract facts for the changed set only (stubs would
   // otherwise overwrite good cached facts with empty ones).
   const only = inc ? new Set(inc.changed) : null;
+  // Every file that threw during parse and so never made it into `files`. Handed to
+  // assemble() on a non-enumerable property (see the stash below) so a truncated map
+  // can declare itself instead of reporting a truthful-looking count over survivors.
+  const skipped = [];
   process.stderr.write(`# agentmap: parsing ${only ? only.size : sourceFiles.length} source files${inc ? " (incremental)" : ""}…\n`);
   for (const sf of sourceFiles) {
     const path = rel(sf.getFilePath());
@@ -1512,7 +1523,21 @@ function extractFacts(inc = null) {
       // #1 fix: a single pathological file (malformed import specifier, ts-morph
       // edge case) must NOT abort the whole map — skip it + warn, preserving the
       // graceful-degradation contract agentmap advertises.
-      process.stderr.write(`# agentmap: skipped ${path} (parse error: ${e?.message ?? e})\n`);
+      //
+      // Warning alone was not enough, and that was the bug: the file never reached
+      // `files[path]`, so map.json reported a fileCount over the SURVIVORS with
+      // degraded:false and exit 0, while --relates/--find answered confidently about
+      // a graph the file had never been in. The only trace was one stderr line that
+      // scrolls away (run() in test/helpers.mjs discards stderr on a zero exit, so
+      // even the suite could not see it). Record every skip so the map can say so.
+      //
+      // A RangeError is classified apart because it is not a malformed file:
+      // getExportedDeclarations() (:1354) recurses through `export * from` barrel
+      // chains and blows the JS stack at ~3500-4000 links. The user-facing fix is
+      // different — flatten the barrel chain, not fix a typo.
+      const msg = String(e?.message ?? e);
+      skipped.push({ file: path, reason: (e instanceof RangeError || /call stack/i.test(msg)) ? "stack-overflow" : "parse-error" });
+      process.stderr.write(`# agentmap: skipped ${path} (parse error: ${msg})\n`);
     }
   }
   // Stash map-health counters on a NON-ENUMERABLE property so assemble() can read
@@ -1521,6 +1546,10 @@ function extractFacts(inc = null) {
   // on a full parse: an incremental run parses just the changed files, so its
   // counts would be partial and are recomputed as null downstream instead.
   if (!inc) Object.defineProperty(files, "__edgeStats", { value: { localSites, resolvedSites }, enumerable: false, configurable: true });
+  // Same carrier, same byte-safety argument, for the skip ledger. Set unconditionally
+  // (an incremental parse can throw too); assemble() decides what to EMIT, gated on
+  // target the same way edgeCoverage is.
+  Object.defineProperty(files, "__skipped", { value: skipped, enumerable: false, configurable: true });
   return files;
 }
 
@@ -1637,10 +1666,30 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   // coverage<0.15) so a normal healthy repo (coverage near 1) never trips it.
   const degraded = edgeCoverage !== null && nodes.length > 10 && edgeCoverage < 0.15;
 
+  // Truncation accounting. `degraded` says "the edges are bad"; `incomplete` says
+  // "files are MISSING" — strictly worse, because --relates/--find then answer
+  // confidently about a graph that never contained the file.
+  // Same `target === MAP` gate as edgeCoverage, for the same reason: a Tier-2
+  // incremental parse sees only the changed files, so its ledger would be a strict
+  // subset of a full dirty build's. Gating keeps BOTH map.dirty.json producers
+  // emitting nothing, preserving the byte-identity invariant test/incremental.test.mjs
+  // asserts. Every field is spread CONDITIONALLY (same idiom as `rsc`), so a repo that
+  // indexed every file serialises byte-identically to schema 6.
+  const skips = (target === MAP && files.__skipped) || [];
+  const skippedList = skips.slice(0, SKIPPED_LIST_LIMIT);
+  const truncation = skips.length
+    ? {
+        incomplete: true,
+        skippedCount: skips.length,          // always exact, even when the list is capped
+        skipped: skippedList,
+        ...(skips.length > skippedList.length ? { skippedTruncated: true } : {}),
+      }
+    : {};
+
   const sha = currentSha();
   const out = {
     schema: SCHEMA_VERSION, generatedSha: sha, dirty: dirtyCount(), fileCount: nodes.length,
-    edgeCoverage, degraded,
+    edgeCoverage, degraded, ...truncation,
     // fingerprint lets non-git repos (sha === "") trust the cache across runs.
     fingerprint: sha ? undefined : sourceFingerprint(),
     hubs, features, rankedSymbols: rankedSymbols.slice(0, RANKED_SYMBOLS_LIMIT), lexical, files,
@@ -1651,20 +1700,43 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   mkdirSync(".claude/agentmap", { recursive: true });
   // Atomic write: tmp + rename so a concurrent background rebuild can never
   // expose a torn/truncated map to a reader.
-  const tmp = target + ".tmp";
+  //
+  // The tmp name is PID-SUFFIXED, and that is load-bearing, not cosmetic. A fixed
+  // `target + ".tmp"` is the SAME literal path in every process, and nothing on the
+  // CLI/MCP query path holds a lock (only hooks/post-commit does, and only for its
+  // own invocations) — so two agent sessions querying one repo at the same time
+  // both land here. Measured on 150 files x 6 concurrent processes: the winner
+  // renames the shared tmp away, and every loser's renameSync then throws an
+  // uncaught `ENOENT: rename '.claude/agentmap/map.json.tmp'`, which propagates
+  // out of assemble() -> build() -> ensureFresh() -> main() and hard-crashes an
+  // ordinary query (there is no top-level catch). Per-writer tmp paths remove the
+  // shared name entirely; renameSync stays atomic per writer and the last rename
+  // to land wins, which is the same "last build wins" outcome as before — just
+  // without the crash. (Torn output was the hypothesised failure and did NOT
+  // reproduce: 0 tears in 8 synthetic rounds at 6MB and 96MB payloads. The crash
+  // is the real one, and it is near-deterministic under a synchronized barrier.)
+  const tmp = `${target}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(out));
   renameSync(tmp, target);
   // Tier 2: persist the raw facts snapshot for CLEAN git builds so a later dirty
   // query can reparse only the changed files instead of the whole repo. Never
   // fatal — the snapshot is a pure optimization.
-  if (rawFacts && sha) {
+  // NOT written from a TRUNCATED build: buildIncremental() merges cached facts for
+  // every file it does not re-parse, so a partial snapshot would make later dirty
+  // queries inherit the missing files as permanent absences. An older COMPLETE
+  // snapshot at the same sha survives untouched and stays usable.
+  if (rawFacts && sha && !skips.length) {
     try {
-      const ftmp = FACTS + ".tmp";
+      // PID-suffixed for the same reason as the map write above. This one is
+      // already inside a catch-all, so the shared path did not crash the query —
+      // it silently lost the snapshot instead, making the next dirty query fall
+      // back to a full reparse for no visible reason.
+      const ftmp = `${FACTS}.${process.pid}.tmp`;
       writeFileSync(ftmp, JSON.stringify({ schema: SCHEMA_VERSION, generatedSha: sha, facts: rawFacts }));
       renameSync(ftmp, FACTS);
     } catch {}
   }
-  process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms\n`);
+  process.stderr.write(`# agentmap: built ${nodes.length} files in ${Date.now() - t0}ms${skips.length ? ` (${skips.length} skipped — map is INCOMPLETE)` : ""}\n`);
   // Map-health signal — clean full build only (target === MAP), so a dirty query's
   // map.dirty.json rebuild never repeats it. One honest line when the map is empty
   // or almost nothing connected, so a stranger doesn't read "built 0 files" / a
@@ -1682,6 +1754,18 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
         + `agentmap is TS/JS-only today — ${census.lang} is not indexed.\n`
         + `  Want ${census.lang}? React to ${VOTE_URL} — reactions are how this gets prioritized.\n`
         + `  (silence: AGENTMAP_NO_CENSUS=1)\n`,
+      );
+    }
+    // Truncation gets its OWN block, not a branch of the degraded chain: a build can
+    // be both truncated and degraded, and truncation is the more actionable of the
+    // two (files missing outright, not just edges unresolved).
+    if (skips.length) {
+      const nStack = skips.filter((s) => s.reason === "stack-overflow").length;
+      process.stderr.write(
+        `⚠ INCOMPLETE map: ${skips.length} of ${nodes.length + skips.length} files were not indexed`
+        + `${nStack ? ` — ${nStack} blew the JS stack (usually a very deep \`export * from\` barrel chain)` : ""}`
+        + `. --relates / --find / --hubs will under-report.\n`
+        + `  \`agentmap --doctor\` lists the skipped files.\n`,
       );
     }
     if (nodes.length === 0) {
@@ -2529,6 +2613,24 @@ function collectMapStatus() {
   //
   // Guarded on typeof, not truthiness: caches written before schema 5 lack these
   // fields, and `undefined` must read as "unknown", never as 0/degraded.
+  // Checked ahead of BOTH the 0-file and degraded branches: a map that dropped files
+  // is the most severe of the three, and it also EXPLAINS a 0-file map (everything
+  // threw) that would otherwise be reported as "repo not git-tracked?". Guarded on
+  // `=== true` so pre-schema-7 caches (field absent) read as "not truncated".
+  if (cache.incomplete === true) {
+    const list = Array.isArray(cache.skipped) ? cache.skipped : [];
+    const n = typeof cache.skippedCount === "number" ? cache.skippedCount : list.length;
+    const why = [...new Set(list.map((s) => s?.reason).filter(Boolean))].join(", ") || "unknown";
+    const sample = list.slice(0, 5).map((s) => s?.file).filter(Boolean).join(", ");
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "incomplete",
+      detail: `map is missing ${n} source file${n === 1 ? "" : "s"} (${why})${sample ? ` — e.g. ${sample}` : ""}; --relates/--find/--hubs will under-report`,
+      path: selectedPath,
+      suggestion: "agentmap",
+    }];
+  }
   if (typeof cache.fileCount === "number" && cache.fileCount === 0) {
     return [{
       name: "map-cache",
@@ -2607,7 +2709,10 @@ async function collectDoctorReport() {
   // exactly the state --doctor exists to surface. Omitting it would reproduce the
   // bug this list is meant to catch — a real problem reported with exit 0.
   const needsAttention = all.some((c) =>
-    ["missing", "stale", "invalid", "degraded"].includes(c.status)
+    // "incomplete" belongs here for the same reason "degraded" does, one severity
+    // higher: files are missing outright, and the whole point of --doctor is to stop
+    // a real problem being reported with exit 0.
+    ["missing", "stale", "invalid", "degraded", "incomplete"].includes(c.status)
   );
   const overall = !insideGit ? "degraded" : (needsAttention ? "needs attention" : "ok");
 

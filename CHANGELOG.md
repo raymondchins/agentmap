@@ -3,6 +3,64 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **A file that failed to parse vanished from the map, and the map said nothing.**
+  Per-file parse errors are caught so one bad file cannot abort the build — correct,
+  and unchanged. But the file never reached `files[path]`, so `map.json` reported a
+  `fileCount` over the **survivors** with `degraded: false` and exit 0, while
+  `--relates` / `--find` / `--hubs` answered confidently about a graph the file had
+  never been in. The only trace was one stderr line that scrolls away.
+  Reproduced on 0.18.1: a 4-file repo with one bad module specifier produced
+  `fileCount: 3`, `degraded: false`, exit 0 — and seeded `facts.json` from the
+  truncated build, so later dirty queries would inherit the missing file as a
+  permanent absence.
+
+  Skips are now recorded and surfaced: `incomplete`, `skippedCount`, `skipped`
+  (capped at 100, with `skippedTruncated`) in `map.json`; a `⚠ INCOMPLETE map: N of
+  M files were not indexed` line on stderr; a `status: "incomplete"` check in
+  `--doctor` that names the files and flips `overall` off `ok`. A truncated build no
+  longer writes the Tier-2 facts snapshot. Stack-overflow skips are classified apart
+  from parse errors — those come from `getExportedDeclarations()` recursing through
+  very deep `export * from` barrel chains, where the fix is to flatten the chain, not
+  fix a typo.
+
+  Every field is spread conditionally, so a repo that indexes every file serialises
+  **byte-identically to schema 6** — asserted by a test. `map.dirty.json` is
+  unaffected (same `target === MAP` gate as `edgeCoverage`).
+
+### Changed
+- **`SCHEMA_VERSION` 6 → 7**, forcing a one-time cache rebuild. Deliberate: a
+  `map.json` written before this change may *already* be missing files with no way to
+  tell, and without the bump it would keep being served until HEAD happened to move.
+- **Two concurrent queries on one repo could hard-crash one of them.**
+  `assemble()` wrote its output through a FIXED tmp name — `map.json.tmp`,
+  `map.dirty.json.tmp`, `facts.json.tmp` — i.e. the same literal path in every
+  process. Nothing on the CLI/MCP query path holds a lock (`hooks/post-commit`
+  has one, but only for its own invocations), so two agent sessions querying the
+  same repo on a dirty or freshly-committed tree both reach the write. The winner
+  renames the shared tmp away and the loser's `renameSync` throws an uncaught
+  `ENOENT: … rename '.claude/agentmap/map.json.tmp'`, which propagates out of
+  `assemble()` → `build()` → `ensureFresh()` → `main()`. There is no top-level
+  catch, so the query dies with a stack trace. Measured pre-fix: **2 of 18**
+  processes across 3 rounds of 6 concurrent queries on a 150-file repo; **7 of 8**
+  per round under a synchronized barrier.
+
+  Tmp names are now per-writer (`<target>.<pid>.tmp`). `renameSync` stays atomic
+  per writer and the last rename to land still wins — the same "last build wins"
+  outcome as before, minus the crash. The `facts.json` sibling write had the same
+  shared path; it sits inside a catch-all, so instead of crashing it silently lost
+  the Tier-2 snapshot and made the next dirty query re-parse the whole repo for no
+  visible reason.
+
+  Scope note: **torn/interleaved JSON was the hypothesised failure and did not
+  reproduce** — 0 tears across 8 synthetic rounds at 6MB and 96MB payloads and
+  every real-repo round. The crash is the actual defect. Post-fix: 0 crashes in 36
+  concurrent processes. Regression coverage in `test/concurrent-build.test.mjs` —
+  one timing-free test that occupies the legacy shared tmp paths with directories
+  (pre-fix: `EISDIR`, exit 1) plus a 6-way concurrency smoke test.
+
 ## [0.18.1] - 2026-07-26
 
 ### Fixed
