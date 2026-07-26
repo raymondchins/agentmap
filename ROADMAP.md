@@ -831,7 +831,22 @@ because it needs the checker or the resolver.
   references, **the** defining monorepo primitive, are absent. Verified: the only
   occurrence of the word in the file is the comment at `:824` noting that
   solution-style configs index 0 files.
-- [ ] **pnpm `workspace:*` and `catalog:` protocols** in
+- [x] **pnpm `workspace:*` and `catalog:` protocols** — **CLOSED as written; a
+  REAL gap found next door.** The protocols themselves are a non-issue:
+  `discoverWorkspacePackages` maps package-NAME -> source dir by scanning every
+  `package.json` with a `name`, and never reads the dependent's dependency
+  specs — so `workspace:*`, `workspace:^`, `catalog:` and a plain semver range
+  all resolve identically (measured, 4 shapes).
+  What DID break was entry selection. A workspace package declares its
+  PUBLISHED entry (`main: "dist/index.js"`) and `dist/` is gitignored, so
+  resolution landed on a file not in the repo and the cross-package edge
+  vanished silently. Three shapes returned ZERO dependents, including
+  `main: dist + types: src` — a plain correctness bug, since TypeScript resolves
+  `types`/`typings` AHEAD of `main` and agentmap read neither. Fixed: `types` /
+  `typings` and the `types` export condition now come first, plus a
+  `./src/index` last resort for packages whose only declared entry is unbuilt.
+  A declared entry that resolves always wins — asserted. 7 tests in
+  `test/workspace-entry-resolution.test.mjs`. Original spec:
   `discoverWorkspacePackages` (`:767–808`) / `resolveWorkspace` (`:1106–1124`).
   Verified: **zero occurrences** of either protocol string in `agentmap.mjs`.
 - [ ] **Broaden conditional exports**, and fix the latent bug at `:674` —

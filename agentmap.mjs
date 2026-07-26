@@ -840,16 +840,30 @@ function discoverWorkspacePackages(rootAbs, listed) {
     if (!name) continue;                              // unnamed / root shell → not a resolution target
     const dir = join(root, dirname(rel)).replace(/\\/g, "/");
     // "." entry candidates, SOURCE-first & deduped, plus a subpath map from any
-    // declared "exports" subpaths. condLeaf() pulls a string target out of a
-    // string OR a conditions object (prefer import/default, then any leaf).
+    // declared "exports" subpaths.
+    //
+    // Order matters and mirrors TypeScript's own preference: the `types` /
+    // `typings` field wins over `main`. In a monorepo the published entry
+    // (`main`) points at BUILT output that usually isn't in the repo, while
+    // `types` points at source or at a .d.ts next to it — so consulting `main`
+    // first resolved a workspace import to a `dist/` path that does not exist
+    // and dropped the cross-package edge entirely. Measured: a package declaring
+    // `main: "dist/index.js", types: "src/index.ts"` reported ZERO dependents.
     const entries = [];
     const subpaths = Object.create(null);
     const push = (v) => { if (typeof v === "string" && v && !entries.includes(v)) entries.push(v); };
+    // Pull a string target out of a string OR a conditions object. `types` is
+    // checked first for the same reason as above — TypeScript resolves the
+    // "types" export condition ahead of "import"/"require"/"default", and in a
+    // source repo that condition is the one pointing at code that exists.
     const condLeaf = (c) => {
       if (typeof c === "string") return c;
-      if (c && typeof c === "object") { for (const k of ["import", "default"]) if (typeof c[k] === "string") return c[k]; for (const k in c) if (typeof c[k] === "string") return c[k]; }
+      if (c && typeof c === "object") { for (const k of ["types", "typings", "import", "default"]) if (typeof c[k] === "string") return c[k]; for (const k in c) if (typeof c[k] === "string") return c[k]; }
       return null;
     };
+    // Ahead of `exports`/`module`/`main` below.
+    push(pkg.types);
+    push(pkg.typings);
     const exp = pkg.exports;
     if (typeof exp === "string") push(exp);
     else if (exp && typeof exp === "object") {
@@ -864,7 +878,16 @@ function discoverWorkspacePackages(rootAbs, listed) {
     }
     push(pkg.module);
     push(pkg.main);
+    // Conventional last resorts, tried only after every DECLARED entry has failed
+    // to land on an indexed file. `./index` was already here; `./src/index` earns
+    // its place the same way. In a monorepo `main`/`exports` name the PUBLISHED
+    // artifact — `dist/index.js` — and `dist/` is normally gitignored, so a
+    // package with no `types` field resolved to a path that is not in the repo and
+    // the cross-package edge vanished. The source it was built from is right
+    // there. This cannot outrank a declared entry, so a package that really does
+    // ship its source from somewhere else is unaffected.
     push("./index");
+    push("./src/index");
     pkgs[name] = { dir, entries, subpaths };
   }
   return pkgs;
