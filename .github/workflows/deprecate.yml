@@ -1,0 +1,111 @@
+name: Deprecate
+
+# Manually-triggered `npm deprecate`, because deprecating needs a registry
+# credential and the maintainer's local ~/.npmrc token is expired — the repo's
+# NPM_TOKEN secret (already used by publish.yml) is the only working path.
+#
+# Also un-deprecates: pass an empty `message` and npm clears the flag, so a
+# mistaken run is reversible from this same workflow.
+#
+# Range expansion goes through `npm view <pkg>@<range>`, which resolves semver
+# ranges registry-side. Do NOT reach for the `semver` package here — it is not
+# resolvable in this repo (ts-morph is the only dependency), so `require("semver")`
+# throws MODULE_NOT_FOUND and the step dies after the deprecate has already run.
+on:
+  workflow_dispatch:
+    inputs:
+      range:
+        description: 'semver range to mark, e.g. ">=0.10.0 <0.16.1"'
+        required: true
+        type: string
+      message:
+        description: "deprecation message; EMPTY un-deprecates the range"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deprecate:
+    name: npm deprecate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      # Read the package name from package.json rather than hardcoding it, so a
+      # rename cannot silently point this at the wrong package.
+      - name: Resolve package name
+        run: echo "PKG=$(node -p "require('./package.json').name")" >> "$GITHUB_ENV"
+
+      - name: Show what will be marked
+        env:
+          RANGE: ${{ inputs.range }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          echo "package: $PKG"
+          echo "range:   $RANGE"
+          if [ -z "$MESSAGE" ]; then
+            echo "action:  UN-deprecate (empty message)"
+          else
+            echo "action:  deprecate"
+            echo "message: $MESSAGE"
+          fi
+          echo "--- versions matching ---"
+          # `npm view pkg@range version --json` prints a JSON array for multi-match
+          # and a bare JSON string for a single match — normalize both.
+          MATCHED="$(npm view "$PKG@$RANGE" version --json)"
+          echo "$MATCHED" | node -e '
+            let raw = ""; process.stdin.on("data", (d) => (raw += d)).on("end", () => {
+              const parsed = JSON.parse(raw || "null");
+              const list = parsed === null ? [] : [].concat(parsed);
+              if (!list.length) { console.error("::error::range matched NOTHING — check the syntax"); process.exit(1); }
+              console.log(list.join("\n"));
+              console.log(`\n${list.length} version(s)`);
+            });
+          '
+
+      - name: Apply
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RANGE: ${{ inputs.range }}
+          MESSAGE: ${{ inputs.message }}
+        run: npm deprecate "$PKG@$RANGE" "$MESSAGE"
+
+      # Deprecation is a registry-side flag with no local artifact, so the only
+      # honest confirmation is to read it back.
+      - name: Verify from the registry
+        env:
+          RANGE: ${{ inputs.range }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          sleep 5
+          npm view "$PKG" --json > /tmp/meta.json
+          MATCHED="$(npm view "$PKG@$RANGE" version --json)"
+          echo "$MATCHED" > /tmp/matched.json
+          node -e '
+            const fs = require("node:fs");
+            const meta = JSON.parse(fs.readFileSync("/tmp/meta.json", "utf8"));
+            const parsed = JSON.parse(fs.readFileSync("/tmp/matched.json", "utf8") || "null");
+            const list = parsed === null ? [] : [].concat(parsed);
+            const want = process.env.MESSAGE;
+            let bad = 0;
+            for (const v of list) {
+              const dep = meta.versions[v] && meta.versions[v].deprecated;
+              const ok = want ? dep === want : !dep;
+              if (ok) console.log(`${v}: ${want ? "deprecated" : "clear"}`);
+              else { bad++; console.error(`::error::${v} not in expected state (deprecated=${JSON.stringify(dep)})`); }
+            }
+            if (bad) process.exit(1);
+            console.log(`\nverified ${list.length} version(s)`);
+          '
