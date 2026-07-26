@@ -22,6 +22,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   declaration as, read from the same `getExportedDeclarations()` the query resolves
   through.
 
+- **A corrupt call-edge cache degraded quietly.** A missing or stale sidecar is
+  routine and stays silent, but an unreadable or malformed one still answered
+  correctly from the live walk 20x slower with nothing on stderr to explain why.
+  Now one stderr line naming the file and the rebuild command; still never fatal.
+
+- **An upgrade could serve edge rows written by older logic.** The sidecar key
+  folded in `SCHEMA_VERSION`, which versions `map.json` — not the edge rows — so
+  changing what a row contains did not invalidate it. Since a missing edge is
+  indistinguishable from "no caller", that lands as a confident wrong answer with
+  no symptom. `EDGES_FORMAT` is now part of the key and bumps independently.
+
 - **A reassigned local alias fabricated a call.** For `const wrapped = helper;
   wrapped()`, go-to-definition walks through the trivial reassignment and returns
   BOTH the local binding and `helper`. The sweep emitted an edge for each, crediting
