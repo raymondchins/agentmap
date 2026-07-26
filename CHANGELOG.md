@@ -12,10 +12,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entry guard string-compared the two, concluded "imported, not executed", and
   skipped `main()` — so **`npx @raymondchins/agentmap`, `npm run agentmap`,
   `--install-hooks`, and the MCP Registry's `--mcp` launch all printed nothing
-  and exited 0**. Introduced by the Batch 2 modularization (`a217331`,
-  2026-07-03) and shipped in every release from **v0.12.1 through v0.16.0**.
-  `isDirectRun()` now compares `realpathSync()` on both sides, in `agentmap.mjs`
-  and `mcp.mjs` alike.
+  and exited 0**. Shipped in **12 published versions, 0.10.0 through 0.16.0**;
+  0.9.0 and earlier are unaffected. `isDirectRun()` now compares `realpathSync()`
+  on both sides, in `agentmap.mjs` and `mcp.mjs` alike.
+
+  The affected range is measured against published tarballs, not read off tags:
+  `git tag --contains a217331` (the Batch 2 modularization that introduced the
+  guard) starts at v0.12.1, but 0.10.0 and 0.11.0 were published manually off the
+  same day's work, so tag ancestry understates the blast radius. Installing each
+  version and invoking through `node_modules/.bin/agentmap` is what settles it:
+  0.9.0 prints `0.9.0`, 0.10.0 prints nothing.
+
+  Local installs configured by `--setup-mcp` were unaffected — it writes a direct
+  file path (`agentmap.mjs:2358`). The MCP surface died specifically on the
+  Registry/npx path, which routes through the broken CLI bin.
 
   Exit 0 with empty stdout is why this survived 356 green tests: every test
   invoked `node <abs path>/agentmap.mjs`, the one form that happened to work, and
