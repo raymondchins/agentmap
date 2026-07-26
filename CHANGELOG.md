@@ -6,6 +6,155 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`new Foo()` was not a call site.** `invocationOf()` matched only
+  `CallExpression`, never `NewExpression`, so a class reachable ONLY via `new`
+  reported **zero callers** — silently, exit 1, indistinguishable from genuinely
+  unused. Two lines, but the blast radius was the whole class of
+  instantiated-not-invoked symbols, and it hit the transitive `--depth >= 2` path
+  too since that shares the predicate. Found by diffing the live walk against the
+  new call-edge sweep, which had swept `NewExpression` all along.
+
+- **A symbol exported under a different name than its declaration was invisible to
+  the cached path.** `export { impl as Widget }` binds the export to `Widget` while
+  the node stays named `impl`; the sidecar keyed edges on the declaration's own
+  name, but queries resolve by the EXPORTED name, so `--callers Widget` returned 0
+  from cache and 1 live. Edges now carry every name the defining file exports a
+  declaration as, read from the same `getExportedDeclarations()` the query resolves
+  through.
+
+- **A corrupt call-edge cache degraded quietly.** A missing or stale sidecar is
+  routine and stays silent, but an unreadable or malformed one still answered
+  correctly from the live walk 20x slower with nothing on stderr to explain why.
+  Now one stderr line naming the file and the rebuild command; still never fatal.
+
+- **An upgrade could serve edge rows written by older logic.** The sidecar key
+  folded in `SCHEMA_VERSION`, which versions `map.json` — not the edge rows — so
+  changing what a row contains did not invalidate it. Since a missing edge is
+  indistinguishable from "no caller", that lands as a confident wrong answer with
+  no symptom. `EDGES_FORMAT` is now part of the key and bumps independently.
+
+- **A reassigned local alias fabricated a call.** For `const wrapped = helper;
+  wrapped()`, go-to-definition walks through the trivial reassignment and returns
+  BOTH the local binding and `helper`. The sweep emitted an edge for each, crediting
+  `helper` with a call site that never names it — the live reference walk reports
+  none. Resolution now stops at a local value binding when one is among the targets.
+
+### Known
+- A barrel that BOTH `export * from "./a"` and locally redefines the same name is
+  the one shape where the cached and live paths still disagree — and the cache is
+  the correct one. ES semantics say the local binding shadows the star-export, so
+  `a.ts`'s copy is unreachable; the sweep agrees (0 callers) while
+  `findReferencesAsNodes()` over-reports through the star chain (1). Left as-is
+  rather than teaching the cache to reproduce a wrong answer.
+
+### Added
+- **`--calls` and `--callers --depth N` now read the same cache `--callers` does.**
+  The sidecar always stored both ends of every edge, so the outgoing direction is
+  the same table filtered by an edge's TAIL instead of its head, and the
+  transitive walk is a BFS rejoining tail to head. Both were still paying the full
+  live type-checker walk. **~800-1500ms -> 84ms.**
+
+  Reaching byte-identity took three details worth recording, each found by diffing
+  the two paths rather than assuming: outgoing rows tie-break by callee NAME (not
+  line — the line there is a declaration, which carries no ordering meaning);
+  `via` is user-visible provenance spelled `file:caller:DECLARATION-line`, so edges
+  had to start carrying the caller's own declaration line; and self-recursion is
+  not an outgoing edge. Edge rows also gained the callee's declaration line and
+  kind. Format bumped 2 -> 4, so any sidecar predating these fields is rejected
+  rather than half-read into rows with undefined columns.
+
+- **`--routes` / `--route <url|file>`: a Next.js App Router route table whose URLs
+  are real.** The bar is a URL you can paste into a browser, and that is exactly
+  where a convention-only extractor goes wrong: a `(group)` folder organises the
+  tree and contributes NOTHING to the URL, but it DOES contribute a layout.
+  Measured against a 394-file App Router repo, a competing tool emitted 35 routes
+  of a true 64, and 31 of those 35 carried the route group in the URL
+  (`/(app)/brands/:id` — a path that 404s), leaving 4 usable. It indexed none of
+  the 13 API routes and none of the 16 `export { default } from` shim routes.
+
+  `--routes` gets all 64: groups stripped, `[id]` -> `:id`, `[...rest]` -> `*rest`,
+  `[[...rest]]` -> `*rest?`, `@slot` contributing no segment, the root page as `/`
+  rather than `/page.tsx`, HTTP methods per API route, and shim routes resolved to
+  their target. `--route` answers both directions — a concrete URL
+  (`/brands/123`, matched through dynamic segments) or a file path — and reports
+  the layout chain and RSC boundary.
+
+  A layout chain is reported for pages ONLY: `route.ts` returns a Response and
+  never renders, so claiming layouts wrap it would be a confident falsehood.
+
+  Computed on demand from the map's own file list — no new persisted state, no
+  staleness class, ~80ms on 400 files. Repos without `app/`/`src/app/` say so and
+  exit 1 rather than inventing an empty table.
+
+- **`--build-edges`: a precomputed call-edge index, so `--callers` stops paying the
+  type-checker on every query.** `--callers` was ~1500ms and the reason was not the
+  reference search — profiling put ~750-860ms, about half the total, in the FIRST
+  touch of the type-checker (`getExportedDeclarations()` forcing a full-program
+  bind), a cost that is nearly fixed: a 2-reference symbol pays the same as a
+  119-reference one, and scoping the ts-morph Project to a file's known dependents
+  (251 files -> 50) cut it only ~24%, because the bulk is binding `lib.d.ts` and
+  `@types`, not your code.
+
+  So the checker work moves off the query path entirely. `--build-edges` sweeps
+  every file once, resolves each call/JSX site through the same go-to-definition
+  primitive the live walk uses, and writes `.claude/agentmap/calledges.json`.
+  `--callers` then answers from that file: **1514ms -> 77ms** on a 252-file repo,
+  verified byte-identical to the live walk across 12 symbols there (including `cn`
+  at 119 call sites, and both definitions of an ambiguous `ToggleSwitch`).
+
+  It is a cache, never a second source of truth. The sidecar is keyed to the exact
+  map it was derived from — HEAD, dirty fingerprint, schema — so an edit invalidates
+  it and the query silently falls back to the live walk. Corrupt file, missing file,
+  `--depth >= 2` (which needs findReferences-able nodes a JSON row cannot carry),
+  and `--calls` (different output shape) all fall back the same way. There is no
+  configuration in which a stale sidecar is served.
+
+  Building it costs ~4x a map rebuild (~9s on 252 files) and that is irreducible:
+  the per-site `getDefinitionNodes()` call is 89-94% of it, and a prefilter that
+  skips candidates absent from a file's declared/imported names drops 35-44% of real
+  edges, because React code overwhelmingly calls names bound at nested scope
+  (destructured hook state, nested helpers). A correct prefilter only recovers
+  ~25-35% of the cost. So the step is explicit, never implicit: the post-commit hook
+  runs it detached, lock-guarded and timeout-capped, where nothing waits on it.
+  `AGENTMAP_HOOK_EDGES=0` skips it. `--relates`/`--find`/`--hubs`/`--map` never read
+  or write it and are unchanged.
+
+### Fixed
+- **`<Foo.Bar />` was never a call site — the whole branch was dead code since 0.17.0.**
+  `invocationOf()` reached for the tag holder with
+  `id.getParentIfKind(SyntaxKind.JsxMemberExpression)`, but **TypeScript has no
+  `JsxMemberExpression` SyntaxKind** — that is a Babel/ESTree node type, so the
+  lookup read `undefined` off the enum, `getParentIfKind(undefined)` never matched,
+  and `tagHolder` fell back to the bare identifier. `getTagNameNode()` returns the
+  member expression, so the identity check failed and every dotted tag was dropped.
+  TypeScript models a dotted JSX tag name as a plain `PropertyAccessExpression`,
+  which the function already computes one line earlier as `pa`. Now `tagHolder =
+  pa ?? id`. `import * as UI from "./widget"` + `<UI.Widget />` is found;
+  `--callers` on a namespace-imported component went 10 → 11 sites on the JSX
+  fixture, with no change to any other pattern.
+
+  Still not resolved (a ts-morph limitation, not this bug): aliasing a component
+  through an object literal — `const UI = { Widget }` then `<UI.Widget />`.
+  `findReferences` returns only the import and the shorthand property for that
+  file, never the render site.
+
+- **Call sites inside anonymous callbacks reported `<module>` instead of the
+  component that owns them.** The enclosing-scope lookup stopped at the *first*
+  function ancestor. For `{items.map(x => <Row key={x.id} />)}` that ancestor is the
+  anonymous `.map()` arrow, which has no name and is not the initializer of a
+  variable declaration — so the caller degraded to `<module>` even though a named
+  component plainly encloses it. Same for IIFEs and `startTransition(async () => …)`.
+  Measured on two real React repos: **11 of 43** JSX call sites in one, **6 of 95**
+  across another, all in this one shape; the non-JSX control had zero.
+
+  `enclosing()` now walks *outward* through anonymous ancestors until a named owner
+  appears (variable-declared arrow/function expression, object-literal property,
+  named function expression, function/method/class declaration), and is hoisted so
+  the single-hop `--callers` path shares it with the transitive `--depth > 1` path
+  instead of keeping a weaker copy. `<module>` now means genuinely top-level rather
+  than "wrapped in a callback". Across 65 call sites in two repos: **0 remaining
+  `<module>`**, recall unchanged.
+
 - **A file that failed to parse vanished from the map, and the map said nothing.**
   Per-file parse errors are caught so one bad file cannot abort the build — correct,
   and unchanged. But the file never reached `files[path]`, so `map.json` reported a

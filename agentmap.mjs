@@ -33,6 +33,21 @@ const MAP = ".claude/agentmap/map.json";
 const MAP_LEGACY = ".claude/agentmap.json"; // pre-namespacing path; read for migration
 const MAP_DIRTY = ".claude/agentmap/map.dirty.json"; // dirty-tree build cache, keyed by dirtyFingerprint (Batch 3 Tier 1)
 const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for incremental rebuild (Batch 3 Tier 2)
+// Call-edge index, written ONLY by `--build-edges` (which the post-commit hook
+// runs in the background). Deliberately a SEPARATE file from map.json, not a new
+// field on it: building it costs ~4x a normal build (the type-checker's
+// go-to-definition per call site is irreducible — measured 5.9s vs 1.5s on a
+// 250-file repo even after prefiltering), and every other command
+// (--relates/--find/--hubs/--map) must not pay that. A missing or stale sidecar
+// is never an error: --callers silently falls back to the live ts-morph walk it
+// has always used, so this is a pure speedup with no new failure mode.
+const EDGES = ".claude/agentmap/calledges.json";
+// Version of the EDGE ROW FORMAT, independent of SCHEMA_VERSION (which versions
+// map.json). Bump on any change to what a row means or contains — otherwise an
+// upgrade silently serves a sidecar written by older logic, and since a missing
+// edge just looks like "no caller", the failure is a confident wrong answer with
+// no symptom. Bumped to 2 when rows gained export-alias names.
+const EDGES_FORMAT = 4;
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
@@ -2835,6 +2850,11 @@ Query commands:
   --symbols [n]        top-n Aider-style ranked symbols (default 30)
   --feature <name>     files composing a feature + external dependents
   --features           list all features (route segments) by size
+  --routes             Next.js App Router route table: real URLs (route groups
+                       stripped, [id] -> :id), HTTP methods per API route, the
+                       layout chain, and re-export shim aliases
+  --route <url|file>   what serves this URL (or which URL a file serves):
+                       matched file, methods, layout chain, RSC boundary
   --hubs               top files by PageRank importance
   --print              dump the full cached map as JSON
   --export <mermaid|dot> [--focus <p>]
@@ -2855,6 +2875,11 @@ Maintenance:
                        wire .claude/settings.json (--dry-run = preview, no writes)
   --install-skill [--platform claude|cursor|codex|opencode|gemini|antigravity|copilot|agents|all] [--project|--global] [--dry-run]
                        install skills + always-on docs/hooks per platform
+  --build-edges        precompute the call-edge index so --callers answers from
+                       cache (~35ms) instead of a live type-checker walk (~1.5s).
+                       Costs ~4x a normal build, so it is explicit: the
+                       post-commit hook runs it in the background. Safe to skip —
+                       --callers falls back to the live walk without it.
   --hook-status          report whether agentmap git/nudge wiring is installed
   --doctor             read-only health report: hooks, skills/rules, MCP wiring, map cache
                          (exits 0, suggests fix commands, never writes files)
@@ -2899,16 +2924,16 @@ async function main() {
   const KNOWN = new Set([
     "--json", "--include-dts", "--no-locals", "--print",
     "--help", "-h", "--version", "-v", "--install-hooks", "--hook-status", "--doctor", "--install-skill", "--platform", "--project", "--global",
-    "--dry-run", "--setup-mcp", "--mcp",
+    "--dry-run", "--setup-mcp", "--mcp", "--build-edges",
     "--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--map", "--export", "--focus", "--tokens",
-    "--symbols", "--feature", "--features", "--hubs",
+    "--symbols", "--feature", "--features", "--hubs", "--routes", "--route",
   ]);
 
   // A token consumed as the VALUE of a value-taking flag is never itself a flag —
   // so a dash-leading query like `--any "-O/bin/sh"` is bound as the query, not
   // mistaken for an unknown flag. (arg() already rejects a "--"-leading value, so
   // `--any --foo` still falls through to the missing-arg guard instead.)
-  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform"]);
+  const VALUE_FLAGS = new Set(["--any", "--find", "--search", "--relates", "--callers", "--calls", "--in", "--depth", "--export", "--feature", "--focus", "--tokens", "--symbols", "--platform", "--route"]);
   const valueIdx = new Set();
   for (let i = 0; i < args.length - 1; i++) if (VALUE_FLAGS.has(args[i])) valueIdx.add(i + 1);
 
@@ -2942,9 +2967,10 @@ async function main() {
   const COMMANDS = {
     "--mcp": [], "--install-hooks": ["--dry-run"],
     "--install-skill": ["--platform", "--project", "--global", "--dry-run"],
-    "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"],
+    "--hook-status": [], "--doctor": [], "--setup-mcp": ["--dry-run"], "--build-edges": [],
     "--any": [], "--find": [], "--search": [], "--relates": [], "--callers": ["--in", "--depth"], "--calls": ["--in", "--depth"], "--map": ["--focus", "--tokens"], "--export": ["--focus"],
     "--symbols": [], "--feature": [], "--features": [], "--hubs": [], "--print": [],
+    "--routes": [], "--route": [],
   };
   const presentCommands = Object.keys(COMMANDS).filter(has);
   if (presentCommands.length > 1) {
@@ -3010,6 +3036,20 @@ async function main() {
   else if (has("--hook-status")) {
     try { hookStatus(); process.exit(0); }
     catch (e) { console.error(`agentmap --hook-status failed: ${e?.message || e}`); process.exit(3); }
+  }
+  // --build-edges: precompute the call-edge sidecar that --callers reads. Explicit
+  // (never implicit) because it costs ~4x a normal build — the post-commit hook
+  // runs it in the background so no interactive query ever waits on it.
+  else if (has("--build-edges")) {
+    try {
+      const r = buildCallEdges();
+      if (wantJson) console.log(JSON.stringify({ command: "build-edges", ...r }));
+      else console.log(`agentmap: ${r.edges} call edges from ${r.sites} sites across ${r.files} files → ${EDGES}`);
+      process.exit(0);
+    } catch (e) {
+      console.error(`agentmap --build-edges failed: ${e?.message || e}`);
+      process.exit(3);
+    }
   }
   // --doctor: read-only harness health report (hooks + skills + MCP + map cache).
   // Always exits 0; never writes. --json emits the structured report.
@@ -3365,6 +3405,56 @@ async function main() {
       console.log(`features (${list.length}):`);
       for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
     });
+  } else if (has("--routes")) {
+    const data = ensureFresh();
+    const routes = buildRouteTable(data);
+    if (!routes) {
+      out({ command: "routes", routes: [], reason: "no Next.js App Router directory (app/ or src/app/)", _code: 1 },
+        () => console.log("routes: no app/ or src/app/ directory — not a Next.js App Router project"));
+      process.exitCode = 1;
+    } else {
+      out({ command: "routes", total: routes.length, routes }, () => {
+        const pages = routes.filter((r) => r.kind === "page").length;
+        console.log(`routes (${routes.length}): ${pages} pages, ${routes.length - pages} api`);
+        for (const r of routes) {
+          const m = r.methods?.length ? ` [${r.methods.join(",")}]` : "";
+          const a = r.alias ? `  -> ${r.alias}` : "";
+          const b = r.boundary ? ` (${r.boundary})` : "";
+          console.log(`  ${r.url}${m}${b}  ${r.file}${a}`);
+        }
+      });
+    }
+  } else if (has("--route")) {
+    const raw = arg("--route");
+    if (!raw) { console.error("--route needs a URL or file, e.g. `--route /brands/123` (run --routes to list)"); process.exitCode = 2; }
+    else {
+      const data = ensureFresh();
+      const routes = buildRouteTable(data);
+      const hits = routes ? matchRoute(routes, raw) : [];
+      if (!hits.length) {
+        out({ command: "route", query: raw, matches: [], _code: 1 },
+          () => console.log(`route "${raw}": no match (run --routes to list)`));
+        process.exitCode = 1;
+      } else {
+        // Enrich each hit with what the map already knows: the modules the
+        // handler imports, flagged by RSC boundary — i.e. the server actions a
+        // page can actually reach.
+        const enriched = hits.map((r) => {
+          const f = data.files[r.file] || {};
+          const serverDeps = (f.imports || []).filter((i) => data.files[i]?.rsc === "server");
+          return { ...r, imports: f.imports || [], serverModules: serverDeps };
+        });
+        out({ command: "route", query: raw, total: enriched.length, matches: enriched }, () => {
+          for (const r of enriched) {
+            console.log(`${r.url}${r.methods?.length ? ` [${r.methods.join(",")}]` : ""}  (${r.kind})`);
+            console.log(`  serves: ${r.file}${r.boundary ? `  boundary: '${r.boundary}'` : ""}`);
+            if (r.alias) console.log(`  alias of: ${r.alias}`);
+            if (r.layoutChain.length) console.log(`  layouts (outer->inner): ${r.layoutChain.join(" -> ")}`);
+            if (r.serverModules.length) console.log(`  server modules: ${r.serverModules.join(", ")}`);
+          }
+        });
+      }
+    }
   } else if (has("--hubs")) {
     const data = ensureFresh();
     out({ command: "hubs", fileCount: data.fileCount, sha: data.generatedSha, hubs: data.hubs }, () => {
@@ -3452,19 +3542,317 @@ function mcpResetCache() { _mcpMapCache = null; }
 // module-scope helper against the lazily-loaded ts-morph (same shape as
 // rscBoundary at :450).
 function invocationOf(id, SyntaxKind) {
-  let call = id.getParentIfKind(SyntaxKind.CallExpression);
+  // `new Foo()` is an invocation exactly as much as `foo()` is. Only CallExpression
+  // was matched here, so a class reachable ONLY via `new` reported ZERO callers —
+  // silently, with exit 1, indistinguishable from genuinely-unused. It bit the
+  // transitive --depth path too, since that shares this predicate.
+  let call = id.getParentIfKind(SyntaxKind.CallExpression) ?? id.getParentIfKind(SyntaxKind.NewExpression);
   const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
-  if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
+  if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression) ?? pa.getParentIfKind(SyntaxKind.NewExpression);
   if (call && call.getExpression() === (pa ?? id)) return call;
 
-  // `<Foo.Bar />` puts the identifier under a JsxMemberExpression; the element's
-  // tag-name node is that member expression, not the bare identifier.
-  const tagHolder = id.getParentIfKind(SyntaxKind.JsxMemberExpression) ?? id;
+  // `<Foo.Bar />` puts the identifier under a member expression; the element's
+  // tag-name node is that member expression, not the bare identifier. TypeScript
+  // models a dotted JSX tag as a plain PropertyAccessExpression — there is NO
+  // `SyntaxKind.JsxMemberExpression` (that is a Babel/ESTree node type, and
+  // reading it off SyntaxKind yields `undefined`, so getParentIfKind never
+  // matched and this whole branch was dead from 0.17.0). `pa` above already
+  // holds that node.
+  const tagHolder = pa ?? id;
   for (const kind of [SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxOpeningElement]) {
     const el = tagHolder.getParentIfKind(kind);
     if (el && el.getTagNameNode() === tagHolder) return el;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Next.js App Router route table.
+//
+// Computed on demand from the filesystem rather than persisted: it is pure
+// readdir + string work (single-digit ms even on 400 files), so caching it would
+// buy nothing and add a staleness class. Nothing here touches map.json.
+//
+// The bar is a URL you can paste into a browser. That is precisely where a
+// convention-only extractor goes wrong: a `(group)` folder organises the tree
+// and contributes NOTHING to the URL, but it DOES contribute a layout. Emitting
+// `/(app)/brands/:id` — a path that 404s — is worse than emitting nothing,
+// because it looks authoritative.
+// ---------------------------------------------------------------------------
+const ROUTE_FILE_RE = /(^|\/)(page|route|layout)\.(t|j)sx?$/;
+const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+// One path segment -> its URL contribution, or null when it contributes none.
+function routeSegment(seg) {
+  if (/^\(.+\)$/.test(seg)) return null;               // (group) — organisational only
+  if (/^@/.test(seg)) return null;                     // @slot — parallel route
+  if (/^\[\[\.\.\..+\]\]$/.test(seg)) return `*${seg.slice(5, -2)}?`; // [[...rest]]
+  if (/^\[\.\.\..+\]$/.test(seg)) return `*${seg.slice(4, -1)}`;      // [...rest]
+  if (/^\[.+\]$/.test(seg)) return `:${seg.slice(1, -1)}`;            // [id]
+  return seg;
+}
+
+function buildRouteTable(data) {
+  // Derive the app dir from the MAP's own file list rather than the filesystem:
+  // the map already honours .gitignore and the ignore rules, so a build artefact
+  // or an untracked scratch file under app/ can never become a phantom route.
+  const keys = Object.keys(data.files);
+  const appDir = ["app", "src/app"].find((d) => keys.some((p) => p.startsWith(`${d}/`) && ROUTE_FILE_RE.test(p)));
+  if (!appDir) return null;                            // not an App Router project
+  const files = keys.filter((p) => p.startsWith(`${appDir}/`) && ROUTE_FILE_RE.test(p));
+  const layouts = new Map();
+  for (const f of files) if (/(^|\/)layout\.(t|j)sx?$/.test(f)) layouts.set(f.replace(/(^|\/)layout\.(t|j)sx?$/, ""), f);
+  const routes = [];
+  for (const f of files) {
+    const kind = /(^|\/)page\./.test(f) ? "page" : /(^|\/)route\./.test(f) ? "route" : null;
+    if (!kind) continue;                               // layout.tsx is chain-only, never its own URL
+    const relDir = f.slice(appDir.length + 1).replace(/(^|\/)(page|route)\.(t|j)sx?$/, "");
+    const segs = relDir === "" ? [] : relDir.split("/");
+    const url = "/" + segs.map(routeSegment).filter((s) => s !== null).join("/");
+    let src = ""; try { src = readFileSync(f, "utf8"); } catch {}
+    const methods = kind === "route"
+      ? HTTP_METHODS.filter((m) => new RegExp(`export\\s+(async\\s+)?(function|const)\\s+${m}\\b`).test(src))
+      : null;
+    // `export { default } from "X"` — a shim route that renders another route's
+    // component. A convention-only extractor misses these entirely because there
+    // is no `export default function` to match.
+    const alias = src.match(/export\s*\{\s*default(?:\s+as\s+default)?\s*\}\s*from\s*["']([^"']+)["']/)?.[1] ?? null;
+    // Layout chain: every ancestor dir INCLUDING (group) dirs — the groups that
+    // vanish from the URL are exactly the ones that add a layout.
+    //
+    // PAGES ONLY. A route.ts handler is not wrapped by layout.tsx — layouts are
+    // React components composing a rendered tree, and an API handler returns a
+    // Response, never JSX. Reporting a layout chain for /api/* would be a
+    // confident falsehood about what runs on that request.
+    const chain = [];
+    if (kind === "page") {
+      let cur = f.replace(/(^|\/)(page)\.(t|j)sx?$/, "");
+      for (;;) {
+        if (layouts.has(cur)) chain.unshift(layouts.get(cur));
+        if (!cur || cur === appDir) break;
+        const up = cur.slice(0, cur.lastIndexOf("/"));
+        if (up.length < appDir.length) break;
+        cur = up === cur ? "" : up;
+      }
+    }
+    routes.push({
+      url: url.length > 1 ? url.replace(/\/+$/, "") : "/",
+      kind, file: f,
+      ...(methods ? { methods } : {}),
+      ...(alias ? { alias } : {}),
+      layoutChain: chain,
+      boundary: data.files[f]?.rsc ?? null,
+    });
+  }
+  routes.sort((a, b) => (a.url < b.url ? -1 : a.url > b.url ? 1 : (a.kind < b.kind ? -1 : 1)));
+  return routes;
+}
+
+// Match a concrete URL against the table, honouring dynamic segments.
+function matchRoute(routes, q) {
+  const norm = (u) => ("/" + u.replace(/^\/+|\/+$/g, "")).replace(/\/+/g, "/");
+  const direct = routes.filter((r) => r.url === norm(q) || r.file === q || r.file.endsWith(`/${q}`));
+  if (direct.length) return direct;
+  const parts = norm(q).split("/").filter(Boolean);
+  return routes.filter((r) => {
+    const rp = r.url.split("/").filter(Boolean);
+    if (rp.some((s) => s.startsWith("*"))) {
+      const fixed = rp.filter((s) => !s.startsWith("*"));
+      return fixed.every((s, i) => s.startsWith(":") || s === parts[i]);
+    }
+    if (rp.length !== parts.length) return false;
+    return rp.every((s, i) => s.startsWith(":") || s === parts[i]);
+  });
+}
+
+// Resolve the named function/class that lexically encloses a reference node.
+// Module scope because BOTH the live callGraph() walk and the sidecar sweep must
+// name callers identically — a second copy would drift and make the two paths
+// disagree. An anonymous callback (`.map(x => <Foo/>)`, an IIFE,
+// `startTransition(async () => …)`) is NOT an answer — it has no name worth
+// printing and no findReferences-able node to recurse on — so keep walking OUTWARD
+// until a named owner appears rather than giving up at the first anonymous
+// ancestor. Returns `{name, node}`: `node` is what the transitive BFS recurses on
+// (null when the owner cannot be recursed on); "<module>" means genuinely
+// top-level, not merely "wrapped in a callback".
+function enclosingOwner(id, SyntaxKind) {
+  let cur = id;
+  for (;;) {
+    const enc = cur.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
+    if (!enc) return { name: "<module>", node: null };
+    const k = enc.getKindName();
+    if (k === "Constructor") {
+      const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration);
+      if (cls?.getName?.()) return { name: cls.getName(), node: cls };
+    } else if (/ArrowFunction|FunctionExpression/.test(k)) {
+      const p = enc.getParent();
+      const pk = p?.getKind?.();
+      // `const Foo = () => …` / `const Foo = function () {…}`
+      if (pk === SyntaxKind.VariableDeclaration && p.getInitializer?.() === enc
+        && p.getNameNode?.().getKind?.() === SyntaxKind.Identifier) return { name: p.getName(), node: p.getNameNode() };
+      // `{ foo: () => … }`
+      if (pk === SyntaxKind.PropertyAssignment && p.getName?.()) return { name: p.getName(), node: null };
+      // named function expression: `foo(function bar() {…})`
+      if (enc.getName?.()) return { name: enc.getName(), node: null };
+    } else if (enc.getName?.()) {
+      return { name: enc.getName(), node: enc };
+    }
+    cur = enc; // anonymous / unnamed — keep walking outward
+  }
+}
+const enclosingName = (id, SyntaxKind) => enclosingOwner(id, SyntaxKind).name;
+
+// Identity of the map a sidecar was derived from. ensureFresh() can return a map
+// keyed three different ways (clean HEAD / dirty fingerprint / non-git source
+// fingerprint); fold all of them plus the schema into one string so ANY drift
+// yields a different key and a stale sidecar is simply ignored. Cheap and
+// conservative on purpose: a false "stale" costs one live query, a false "fresh"
+// would serve wrong answers.
+function edgeKey(data) {
+  return [
+    SCHEMA_VERSION,
+    `e${EDGES_FORMAT}`,
+    data.generatedSha || "",
+    data.dirtyFingerprint || "",
+    data.fingerprint || "",
+    data.dirty ?? "",
+  ].join(":");
+}
+
+// Read the sidecar, or null when it is absent / unreadable / keyed to a different
+// map. Never throws: every failure means "fall back to the live walk".
+function readCallEdges(data) {
+  if (!existsSync(EDGES)) return null;          // never built — the normal state
+  let c;
+  try { c = JSON.parse(readFileSync(EDGES, "utf8")); }
+  catch {
+    // Present but unreadable. Staleness is routine and stays quiet; a CORRUPT
+    // cache is not, and answering correctly-but-20x-slower with no explanation is
+    // the kind of silent degradation that never gets diagnosed. One line, stderr,
+    // never fatal — the answer below is still the authoritative live walk.
+    console.error(`# agentmap: ${EDGES} unreadable — using the live walk (rebuild with \`agentmap --build-edges\`)`);
+    return null;
+  }
+  if (c.schema !== SCHEMA_VERSION || c.key !== edgeKey(data)) return null; // stale: expected, silent
+  if (!Array.isArray(c.edges)) {
+    console.error(`# agentmap: ${EDGES} malformed — using the live walk (rebuild with \`agentmap --build-edges\`)`);
+    return null;
+  }
+  return c.edges;
+}
+
+// Sweep every in-project file once and record every resolvable call/JSX site.
+//
+// This is the SAME resolution primitive the live --callers query uses, run from
+// the call-site side instead of per-symbol: "this site resolves to that
+// declaration" and "that declaration's references include this site" describe the
+// same edge, so one whole-repo pass yields what N per-symbol findReferences()
+// walks would, minus the per-query cost. Expensive (getDefinitionNodes() per
+// site) — which is exactly why it is a background/explicit step, never implicit.
+function buildCallEdges() {
+  const data = ensureFresh();
+  const { SyntaxKind } = tsMorph();
+  const { project, vueMap } = makeProject();
+  const cwd = process.cwd().replace(/\\/g, "/");
+  const rel = (p) => { const abs = p.replace(/\\/g, "/"); return (vueMap[abs] || abs).replace(cwd + "/", ""); };
+  const inProject = (k) => Object.prototype.hasOwnProperty.call(data.files, k);
+  // A declaration's own name is NOT always the name callers query by:
+  // `export { impl as Widget }` binds the export to `Widget` while the node is
+  // still named `impl`, and Phase A resolves the query through
+  // getExportedDeclarations() — i.e. by the EXPORTED name. Keying edges on
+  // d.getName() alone therefore made such a symbol look uncalled. Build the
+  // inverse (declaration -> every name its own file exports it as) from the same
+  // API Phase A trusts, memoised per file since the sweep revisits callee files
+  // constantly.
+  const aliasCache = new Map();
+  const exportedNamesOf = (d, tsf) => {
+    const key = tsf.getFilePath();
+    let byNode = aliasCache.get(key);
+    if (!byNode) {
+      byNode = new Map();
+      try {
+        for (const [name, decls] of tsf.getExportedDeclarations()) {
+          for (const dd of decls) {
+            const at = `${dd.getStartLineNumber?.() ?? 0}:${dd.getKindName?.() ?? ""}`;
+            if (!byNode.has(at)) byNode.set(at, new Set());
+            byNode.get(at).add(name);
+          }
+        }
+      } catch { /* unreadable exports — fall back to the declaration's own name */ }
+      aliasCache.set(key, byNode);
+    }
+    const names = new Set();
+    const own = d.getName?.();
+    if (own) names.add(own);
+    for (const n of byNode.get(`${d.getStartLineNumber?.() ?? 0}:${d.getKindName?.() ?? ""}`) ?? []) names.add(n);
+    return names;
+  };
+  const edges = [];
+  let sites = 0;
+  for (const sf of project.getSourceFiles()) {
+    const fp = sf.getFilePath().replace(/\\/g, "/");
+    if (fp.includes("/node_modules/") || fp.includes("/.next/")) continue;
+    const callerFile = rel(fp);
+    if (!inProject(callerFile)) continue;
+    for (const site of [
+      ...sf.getDescendantsOfKind(SyntaxKind.CallExpression),
+      ...sf.getDescendantsOfKind(SyntaxKind.NewExpression),
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+      ...sf.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+    ]) {
+      sites++;
+      const k = site.getKind();
+      const isJsx = k === SyntaxKind.JsxSelfClosingElement || k === SyntaxKind.JsxOpeningElement;
+      const callee = isJsx ? site.getTagNameNode() : site.getExpression();
+      // Same shapes invocationOf() accepts: a bare identifier, or the name half of
+      // a dotted access (`ns.foo()` and `<UI.Widget />` alike — TypeScript models
+      // both as PropertyAccessExpression).
+      let idNode = null;
+      if (callee.getKind() === SyntaxKind.Identifier) idNode = callee;
+      else if (callee.getKind() === SyntaxKind.PropertyAccessExpression) idNode = callee.getNameNode();
+      if (!idNode) continue; // computed / parenthesized / dynamic — the same honest limit --calls has
+      let targets;
+      try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
+      // `const wrapped = helper; wrapped()` — go-to-definition helpfully walks
+      // THROUGH the trivial reassignment and returns BOTH the local `wrapped`
+      // binding and `helper` itself. Emitting every target made `helper` look
+      // called from a site that never names it, which the live reference walk
+      // rightly does not report (the reference there is `wrapped`, not `helper`).
+      // A local value binding is where resolution stops: keep only it.
+      const rebind = targets.find((d) => {
+        const k = d.getKindName?.();
+        return (k === "VariableDeclaration" || k === "BindingElement" || k === "Parameter")
+          && d.getSourceFile().getFilePath() === sf.getFilePath();
+      });
+      const resolved = rebind ? [rebind] : targets;
+      const callerLine = idNode.getStartLineNumber();
+      // Keep the owner NODE too, not just its name: the transitive walk's `via`
+      // key is `file:caller:declLine`, and declLine is the enclosing symbol's own
+      // declaration line — not the call-site line.
+      const owner = enclosingOwner(idNode, SyntaxKind);
+      const callerName = owner.name;
+      const callerDeclLine = owner.node?.getStartLineNumber?.() ?? callerLine;
+      for (const d of resolved) {
+        const tsf = d.getSourceFile();
+        if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue;
+        const calleeFile = rel(tsf.getFilePath().replace(/\\/g, "/"));
+        if (!inProject(calleeFile)) continue;
+        // The callee's OWN declaration line/kind — what --calls prints for each
+        // outgoing row, and what lets the transitive walk rejoin an edge's head
+        // to the next hop's tail.
+        const calleeLine = d.getStartLineNumber?.() ?? 0;
+        const calleeKind = d.getKindName?.() ?? "";
+        for (const calleeName of exportedNamesOf(d, tsf)) {
+          edges.push({ callerFile, callerLine, callerName, callerDeclLine, calleeFile, calleeName, calleeLine, calleeKind, kind: isJsx ? "jsx" : "call" });
+        }
+      }
+    }
+  }
+  mkdirSync(".claude/agentmap", { recursive: true });
+  const tmp = `${EDGES}.${process.pid}.tmp`; // PID-suffixed for the same reason assemble() is
+  writeFileSync(tmp, JSON.stringify({ schema: SCHEMA_VERSION, key: edgeKey(data), edges }));
+  renameSync(tmp, EDGES);
+  return { files: Object.keys(data.files).length, sites, edges: edges.length };
 }
 
 function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1 } = {}) {
@@ -3507,6 +3895,119 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   if (!owners.length) return { command: direction, query: symbolName, error: "no match", candidates: [], _code: 1 };
   if (owners.length > 1) return { command: direction, query: symbolName, error: "ambiguous", candidates: owners, _code: 1 };
   const fileKey = owners[0];
+  // Phase B FAST PATH — answer from the prebuilt call-edge sidecar when one exists
+  // for exactly this map. Skips tsMorph() + makeProject() + the checker's
+  // full-program bind entirely (~1.5s -> ~35ms measured on a 250-400 file repo).
+  // Deliberately narrow: single-hop --callers only. --calls has a different output
+  // shape and --depth >= 2 needs findReferences-able NODES to recurse on, which a
+  // JSON row cannot carry; both keep the live walk. A missing/stale sidecar just
+  // falls through, so this can only ever be faster, never wrong.
+  {
+    const cached = readCallEdges(data);
+    if (cached && direction === "callers" && maxDepth === 1) {
+      const seen = new Set();
+      const sites = [];
+      for (const e of cached) {
+        if (e.calleeFile !== fileKey || e.calleeName !== symbolName) continue;
+        const dedupe = `${e.callerFile}:${e.callerLine}`; // same key the live walk dedupes on
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        sites.push({ file: e.callerFile, line: e.callerLine, caller: e.callerName });
+      }
+      sites.sort((x, y) =>
+        ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+      const shown = sites.slice(0, SYMBOL_MATCH_LIMIT);
+      return {
+        command: "callers", query: symbolName, symbol: symbolName, file: fileKey,
+        total: sites.length, shown: shown.length, truncated: sites.length > shown.length,
+        callers: shown, _code: sites.length ? 0 : 1,
+      };
+    }
+    // OUTGOING from cache: the same table read from the other end. An edge's tail
+    // is (callerFile, callerName) — the enclosing named owner of the call site —
+    // so "what does X call" is just the rows whose tail is X.
+    if (cached && direction === "calls" && maxDepth === 1) {
+      const seen = new Set();
+      const targets = [];
+      for (const e of cached) {
+        if (e.callerFile !== fileKey || e.callerName !== symbolName) continue;
+        if (e.calleeFile === fileKey && e.calleeName === symbolName) continue; // self-recursion isn't an outgoing edge
+        const dedupe = `${e.calleeFile}:${e.calleeLine}:${e.calleeName}`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        targets.push({ file: e.calleeFile, line: e.calleeLine, name: e.calleeName, kind: e.calleeKind });
+      }
+      // Outgoing rows tie-break by callee NAME, not line — matching the live walk.
+      // (Incoming rows tie-break by line, because there the line IS the call site;
+      // here it is the callee's declaration line, which carries no ordering
+      // meaning to a reader scanning "what does this call".)
+      targets.sort((x, y) =>
+        ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : (x.name < y.name ? -1 : x.name > y.name ? 1 : 0)));
+      const shown = targets.slice(0, SYMBOL_MATCH_LIMIT);
+      return {
+        command: "calls", query: symbolName, symbol: symbolName, file: fileKey,
+        total: targets.length, shown: shown.length, truncated: targets.length > shown.length,
+        calls: shown, _code: targets.length ? 0 : 1,
+      };
+    }
+    // TRANSITIVE from cache. The live walk recurses on findReferences-able NODES;
+    // here the equivalent is rejoining an edge's tail (callerFile, callerName) to
+    // the next hop's head (calleeFile, calleeName). Rows dedup by call SITE,
+    // expansion dedups by enclosing SYMBOL — the same two-concern split, and the
+    // same frontier/total caps, so a hub cannot blow the result open.
+    if (cached && direction === "callers" && maxDepth > 1) {
+      const byCallee = new Map();
+      for (const e of cached) {
+        const k = `${e.calleeFile}\x00${e.calleeName}`;
+        (byCallee.get(k) ?? byCallee.set(k, []).get(k)).push(e);
+      }
+      const seenSite = new Set();
+      const visitedSym = new Set([`${fileKey}\x00${symbolName}`]);
+      const out = [];
+      let frontier = [{ file: fileKey, name: symbolName, key: null }];
+      let hop = 0, capped = false;
+      while (frontier.length && hop < maxDepth && !capped) {
+        hop++;
+        const next = [];
+        for (const fr of frontier) {
+          for (const e of byCallee.get(`${fr.file}\x00${fr.name}`) ?? []) {
+            const siteKey = `${e.callerFile}:${e.callerLine}`;
+            if (seenSite.has(siteKey)) continue;
+            seenSite.add(siteKey);
+            out.push({ file: e.callerFile, line: e.callerLine, caller: e.callerName, depth: hop, via: fr.key });
+            if (out.length >= CLOSURE_TOTAL_CAP) { capped = true; break; }
+            if (e.callerName === "<module>") continue;   // module scope has no symbol to recurse on
+            // TWO different keys, deliberately. The dedup key is internal cycle-
+            // guard identity — (file, name), NUL-separated so a path can never
+            // forge a collision. `via` is user-visible and must reproduce the live
+            // walk byte-for-byte, which spells it file:caller:DECLARATION-line —
+            // the enclosing symbol's own line, not the call-site line.
+            const dedupK = `${e.callerFile}\x00${e.callerName}`;
+            if (!visitedSym.has(dedupK)) {
+              visitedSym.add(dedupK);
+              next.push({
+                file: e.callerFile, name: e.callerName,
+                key: `${e.callerFile}:${e.callerName}:${e.callerDeclLine ?? e.callerLine}`,
+                pr: data.files[e.callerFile]?.pagerank ?? 0,
+              });
+            }
+          }
+          if (capped) break;
+        }
+        next.sort((a, b) => b.pr - a.pr);
+        frontier = next.slice(0, CLOSURE_FRONTIER_CAP);
+      }
+      out.sort((x, y) => (x.depth - y.depth)
+        || ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+      return {
+        command: "callers", query: symbolName, symbol: symbolName, file: fileKey, depth: maxDepth,
+        total: out.length, shown: out.length, truncated: capped, callers: out, _code: out.length ? 0 : 1,
+      };
+    }
+  }
   // Phase B — LAZY full Project (inc=null ⇒ language service live; NEVER the
   // incremental branch, which loads other files as empty stubs and would hide
   // cross-file callers). tsMorph() is the ~105ms init, fired only here.
@@ -3654,27 +4155,13 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   // is. This is the compiler-accuracy line — a type-position mention, a re-export, a
   // bare value reference, or a same-named local in another file binds to a DIFFERENT
   // symbol and never reaches here.
+  // Shared with the sidecar sweep — see enclosingOwner() at module scope.
+  const enclosing = (id) => enclosingOwner(id, SyntaxKind);
   if (maxDepth > 1) {
     // Transitive INCOMING BFS: to recurse UP one hop we need a findReferences-able
-    // node for the ENCLOSING symbol of each call site. `enclosing()` returns that
-    // node (a FunctionDeclaration/Method/Class directly; the VariableDeclaration
-    // name node for an arrow-const; null for a module-level or anonymous caller =
-    // a leaf). Rows dedup by call SITE; expansion dedups by enclosing SYMBOL (the
+    // node for the ENCLOSING symbol of each call site — that is `enclosing().node`
+    // above. Rows dedup by call SITE; expansion dedups by enclosing SYMBOL (the
     // cycle guard) — two separate concerns. Frontier + total caps bound hubs.
-    const enclosing = (id) => {
-      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
-      if (!enc) return { name: "<module>", node: null };
-      const k = enc.getKindName();
-      let node = enc, name = enc.getName?.();
-      if (k === "Constructor") { const cls = enc.getFirstAncestorByKind(SyntaxKind.ClassDeclaration); node = cls ?? null; name = cls?.getName?.() ?? name; }
-      else if (/ArrowFunction|FunctionExpression/.test(k)) {
-        const vd = enc.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
-        if (vd && vd.getInitializer?.() === enc && vd.getNameNode?.().getKind?.() === SyntaxKind.Identifier) { node = vd.getNameNode(); name = vd.getName(); }
-        else node = null;
-      }
-      if (!name) { name = "<module>"; node = null; }
-      return { name, node };
-    };
     const seedKey = (d) => `${rel(d.getSourceFile().getFilePath().replace(/\\/g, "/"))}:${d.getName?.() ?? symbolName}:${d.getStartLineNumber?.() ?? 0}`;
     const visitedSym = new Set(decls.map(seedKey)); // enclosing-symbol expansion dedup (cycle guard)
     const seenSite = new Set();                     // global row dedup by call site
@@ -3727,9 +4214,7 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
       const dedupe = `${file}:${line}`;
       if (seen.has(dedupe)) continue;
       seen.add(dedupe);
-      const enc = id.getFirstAncestor((an) => /Function|Method|Constructor|ClassDeclaration/.test(an.getKindName()));
-      const caller = enc?.getName?.() || enc?.getParentIfKind?.(SyntaxKind.VariableDeclaration)?.getName?.() || "<module>";
-      sites.push({ file, line, caller });
+      sites.push({ file, line, caller: enclosing(id).name });
     }
   }
   // Rank by the CALLING file's PageRank so important callers survive the cap (same
