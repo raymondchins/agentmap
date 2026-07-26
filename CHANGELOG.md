@@ -3,7 +3,7 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.20.0] - 2026-07-27
 
 ### Added
 - **`--affected <path>`: which tests cover this file.** Walks the transitive
