@@ -5,38 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-26
+
 ### Added
 - **CI now exercises the shipped command.** A new `install-smoke` job (Node
   20/22/24) packs the tarball, installs it into a scratch consumer project, and
   drives the real binary: bin symlink, `npx`, a global install, `--mcp`
   JSON-RPC `initialize`, and `--install-hooks` followed by a real commit that must
   **measurably rewrite `map.json`'s `generatedSha`**. Every step asserts on
-  OUTPUT — exit 0 with empty stdout was the 0.16.1 bug's own signature, so exit
+  OUTPUT — exit 0 with empty stdout was the bin bug's own signature, so exit
   status alone proves nothing. The previous suite never touched the bin path
   (`npm pack --dry-run` executes nothing), which is why 356 green tests and a
   green CI badge sat on top of 12 broken releases.
-
-### Fixed
-- **`--doctor` no longer greenlights an unusable map.** `build()` has always
-  persisted `fileCount` / `edgeCoverage` / `degraded` and warned on stderr, but
-  `collectMapStatus()` read none of them — so a map containing **zero source
-  files** reported `Map cache: ok` once the build-time warning scrolled past. It
-  now reports `invalid` for an empty map and `degraded` (with the measured edge
-  coverage) when most imports failed to resolve, and both roll up into
-  `overall`. Fresh-and-empty is worse than stale: stale tells you to rebuild, `ok`
-  tells you nothing is wrong. `--doctor` still always exits 0 — that is the
-  documented contract (`README.md:761`); the report was the broken part, not the
-  exit code. Caches written before schema 5 lack these fields and still read as
-  `ok`, so older installs are not falsely flagged.
-- **Corrected a false build warning.** The degraded-map message told users
-  "Aliases from vite.config/webpack aren't read yet; mirror them into tsconfig
-  paths" — work agentmap already does: `VITE_CONFIG_RE` (`agentmap.mjs:579`)
-  probes vite/vitest/webpack configs and `readBundlerAliasEntries()` (`:587`)
-  AST-parses their `resolve.alias`, covered by `test/vite-alias.test.mjs`. It now
-  names the real gaps: tsconfig `references` (solution-style configs) and
-  computed alias idioms (function/regex/URL), which are genuinely skipped.
-
-## [0.16.1] - 2026-07-26
 
 ### Fixed
 - **The CLI never ran through its own `bin`.** npm links
@@ -67,7 +47,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   covering `--version`, a query, `--install-hooks` (asserts the hook file is
   actually written), `--mcp`, `mcp.mjs` standalone, and that importing the module
   still executes nothing.
-
+- **`--doctor` no longer greenlights an unusable map.** `build()` has always
+  persisted `fileCount` / `edgeCoverage` / `degraded` and warned on stderr, but
+  `collectMapStatus()` read none of them — so a map containing **zero source
+  files** reported `Map cache: ok` once the build-time warning scrolled past. It
+  now reports `invalid` for an empty map and `degraded` (with the measured edge
+  coverage) when most imports failed to resolve, and both roll up into
+  `overall`. Fresh-and-empty is worse than stale: stale tells you to rebuild, `ok`
+  tells you nothing is wrong. `--doctor` still always exits 0 — that is the
+  documented contract (`README.md:761`); the report was the broken part, not the
+  exit code. Caches written before schema 5 lack these fields and still read as
+  `ok`, so older installs are not falsely flagged.
+- **Corrected a false build warning.** The degraded-map message told users
+  "Aliases from vite.config/webpack aren't read yet; mirror them into tsconfig
+  paths" — work agentmap already does: `VITE_CONFIG_RE` (`agentmap.mjs:579`)
+  probes vite/vitest/webpack configs and `readBundlerAliasEntries()` (`:587`)
+  AST-parses their `resolve.alias`, covered by `test/vite-alias.test.mjs`. It now
+  names the real gaps: tsconfig `references` (solution-style configs) and
+  computed alias idioms (function/regex/URL), which are genuinely skipped.
 ## [0.16.0] - 2026-07-26
 
 ### Changed
