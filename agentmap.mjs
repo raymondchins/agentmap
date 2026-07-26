@@ -47,7 +47,7 @@ const EDGES = ".claude/agentmap/calledges.json";
 // upgrade silently serves a sidecar written by older logic, and since a missing
 // edge just looks like "no caller", the failure is a confident wrong answer with
 // no symptom. Bumped to 2 when rows gained export-alias names.
-const EDGES_FORMAT = 2;
+const EDGES_FORMAT = 4;
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
@@ -3826,14 +3826,24 @@ function buildCallEdges() {
       });
       const resolved = rebind ? [rebind] : targets;
       const callerLine = idNode.getStartLineNumber();
-      const callerName = enclosingName(idNode, SyntaxKind);
+      // Keep the owner NODE too, not just its name: the transitive walk's `via`
+      // key is `file:caller:declLine`, and declLine is the enclosing symbol's own
+      // declaration line — not the call-site line.
+      const owner = enclosingOwner(idNode, SyntaxKind);
+      const callerName = owner.name;
+      const callerDeclLine = owner.node?.getStartLineNumber?.() ?? callerLine;
       for (const d of resolved) {
         const tsf = d.getSourceFile();
         if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue;
         const calleeFile = rel(tsf.getFilePath().replace(/\\/g, "/"));
         if (!inProject(calleeFile)) continue;
+        // The callee's OWN declaration line/kind — what --calls prints for each
+        // outgoing row, and what lets the transitive walk rejoin an edge's head
+        // to the next hop's tail.
+        const calleeLine = d.getStartLineNumber?.() ?? 0;
+        const calleeKind = d.getKindName?.() ?? "";
         for (const calleeName of exportedNamesOf(d, tsf)) {
-          edges.push({ callerFile, callerLine, callerName, calleeFile, calleeName, kind: isJsx ? "jsx" : "call" });
+          edges.push({ callerFile, callerLine, callerName, callerDeclLine, calleeFile, calleeName, calleeLine, calleeKind, kind: isJsx ? "jsx" : "call" });
         }
       }
     }
@@ -3892,9 +3902,9 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
   // shape and --depth >= 2 needs findReferences-able NODES to recurse on, which a
   // JSON row cannot carry; both keep the live walk. A missing/stale sidecar just
   // falls through, so this can only ever be faster, never wrong.
-  if (direction === "callers" && maxDepth === 1) {
+  {
     const cached = readCallEdges(data);
-    if (cached) {
+    if (cached && direction === "callers" && maxDepth === 1) {
       const seen = new Set();
       const sites = [];
       for (const e of cached) {
@@ -3912,6 +3922,89 @@ function callGraph(symbolName, { inFilter = "", direction = "callers", depth = 1
         command: "callers", query: symbolName, symbol: symbolName, file: fileKey,
         total: sites.length, shown: shown.length, truncated: sites.length > shown.length,
         callers: shown, _code: sites.length ? 0 : 1,
+      };
+    }
+    // OUTGOING from cache: the same table read from the other end. An edge's tail
+    // is (callerFile, callerName) — the enclosing named owner of the call site —
+    // so "what does X call" is just the rows whose tail is X.
+    if (cached && direction === "calls" && maxDepth === 1) {
+      const seen = new Set();
+      const targets = [];
+      for (const e of cached) {
+        if (e.callerFile !== fileKey || e.callerName !== symbolName) continue;
+        if (e.calleeFile === fileKey && e.calleeName === symbolName) continue; // self-recursion isn't an outgoing edge
+        const dedupe = `${e.calleeFile}:${e.calleeLine}:${e.calleeName}`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        targets.push({ file: e.calleeFile, line: e.calleeLine, name: e.calleeName, kind: e.calleeKind });
+      }
+      // Outgoing rows tie-break by callee NAME, not line — matching the live walk.
+      // (Incoming rows tie-break by line, because there the line IS the call site;
+      // here it is the callee's declaration line, which carries no ordering
+      // meaning to a reader scanning "what does this call".)
+      targets.sort((x, y) =>
+        ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : (x.name < y.name ? -1 : x.name > y.name ? 1 : 0)));
+      const shown = targets.slice(0, SYMBOL_MATCH_LIMIT);
+      return {
+        command: "calls", query: symbolName, symbol: symbolName, file: fileKey,
+        total: targets.length, shown: shown.length, truncated: targets.length > shown.length,
+        calls: shown, _code: targets.length ? 0 : 1,
+      };
+    }
+    // TRANSITIVE from cache. The live walk recurses on findReferences-able NODES;
+    // here the equivalent is rejoining an edge's tail (callerFile, callerName) to
+    // the next hop's head (calleeFile, calleeName). Rows dedup by call SITE,
+    // expansion dedups by enclosing SYMBOL — the same two-concern split, and the
+    // same frontier/total caps, so a hub cannot blow the result open.
+    if (cached && direction === "callers" && maxDepth > 1) {
+      const byCallee = new Map();
+      for (const e of cached) {
+        const k = `${e.calleeFile}\x00${e.calleeName}`;
+        (byCallee.get(k) ?? byCallee.set(k, []).get(k)).push(e);
+      }
+      const seenSite = new Set();
+      const visitedSym = new Set([`${fileKey}\x00${symbolName}`]);
+      const out = [];
+      let frontier = [{ file: fileKey, name: symbolName, key: null }];
+      let hop = 0, capped = false;
+      while (frontier.length && hop < maxDepth && !capped) {
+        hop++;
+        const next = [];
+        for (const fr of frontier) {
+          for (const e of byCallee.get(`${fr.file}\x00${fr.name}`) ?? []) {
+            const siteKey = `${e.callerFile}:${e.callerLine}`;
+            if (seenSite.has(siteKey)) continue;
+            seenSite.add(siteKey);
+            out.push({ file: e.callerFile, line: e.callerLine, caller: e.callerName, depth: hop, via: fr.key });
+            if (out.length >= CLOSURE_TOTAL_CAP) { capped = true; break; }
+            if (e.callerName === "<module>") continue;   // module scope has no symbol to recurse on
+            // TWO different keys, deliberately. The dedup key is internal cycle-
+            // guard identity — (file, name), NUL-separated so a path can never
+            // forge a collision. `via` is user-visible and must reproduce the live
+            // walk byte-for-byte, which spells it file:caller:DECLARATION-line —
+            // the enclosing symbol's own line, not the call-site line.
+            const dedupK = `${e.callerFile}\x00${e.callerName}`;
+            if (!visitedSym.has(dedupK)) {
+              visitedSym.add(dedupK);
+              next.push({
+                file: e.callerFile, name: e.callerName,
+                key: `${e.callerFile}:${e.callerName}:${e.callerDeclLine ?? e.callerLine}`,
+                pr: data.files[e.callerFile]?.pagerank ?? 0,
+              });
+            }
+          }
+          if (capped) break;
+        }
+        next.sort((a, b) => b.pr - a.pr);
+        frontier = next.slice(0, CLOSURE_FRONTIER_CAP);
+      }
+      out.sort((x, y) => (x.depth - y.depth)
+        || ((data.files[y.file]?.pagerank ?? 0) - (data.files[x.file]?.pagerank ?? 0))
+        || (x.file < y.file ? -1 : x.file > y.file ? 1 : x.line - y.line));
+      return {
+        command: "callers", query: symbolName, symbol: symbolName, file: fileKey, depth: maxDepth,
+        total: out.length, shown: out.length, truncated: capped, callers: out, _code: out.length ? 0 : 1,
       };
     }
   }

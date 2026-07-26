@@ -48,6 +48,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rather than teaching the cache to reproduce a wrong answer.
 
 ### Added
+- **`--calls` and `--callers --depth N` now read the same cache `--callers` does.**
+  The sidecar always stored both ends of every edge, so the outgoing direction is
+  the same table filtered by an edge's TAIL instead of its head, and the
+  transitive walk is a BFS rejoining tail to head. Both were still paying the full
+  live type-checker walk. **~800-1500ms -> 84ms.**
+
+  Reaching byte-identity took three details worth recording, each found by diffing
+  the two paths rather than assuming: outgoing rows tie-break by callee NAME (not
+  line — the line there is a declaration, which carries no ordering meaning);
+  `via` is user-visible provenance spelled `file:caller:DECLARATION-line`, so edges
+  had to start carrying the caller's own declaration line; and self-recursion is
+  not an outgoing edge. Edge rows also gained the callee's declaration line and
+  kind. Format bumped 2 -> 4, so any sidecar predating these fields is rejected
+  rather than half-read into rows with undefined columns.
+
 - **`--routes` / `--route <url|file>`: a Next.js App Router route table whose URLs
   are real.** The bar is a URL you can paste into a browser, and that is exactly
   where a convention-only extractor goes wrong: a `(group)` folder organises the

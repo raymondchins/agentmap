@@ -159,17 +159,75 @@ test("a CORRUPT sidecar falls back to the live walk instead of crashing", () => 
   } finally { cleanup(dir); }
 });
 
-test("query shapes the sidecar cannot represent still use the live walk", () => {
+// The sidecar stores BOTH ends of every edge, so the same table answers the
+// opposite direction and the transitive walk — not just single-hop --callers.
+// Each of these must stay byte-identical to the live walk, which is the only
+// thing that makes serving them from cache legitimate.
+test("--calls is served from cache, byte-identical to the live walk", () => {
   const dir = makeRepo(repo());
   try {
     gitInit(dir, { commit: true });
     run(dir, "--build-edges");
-    // --depth >= 2 needs findReferences-able NODES to recurse on; --calls is the
-    // opposite direction with a different output shape. Both must keep working.
-    const [d2c, d2l] = bothPaths(dir, "--callers", "target", "--in", "src/target.ts", "--depth", "2", "--json");
-    assert.equal(d2c, d2l, "--depth 2 must not be served from the sidecar");
-    const [cc, cl] = bothPaths(dir, "--calls", "runA", "--in", "src/callers.ts", "--json");
-    assert.equal(cc, cl, "--calls must not be served from the sidecar");
+    for (const q of [
+      ["--calls", "runA", "--in", "src/callers.ts"],
+      ["--calls", "Mapped", "--in", "src/Uses.tsx"],
+      ["--calls", "useDecoy", "--in", "src/decoy.ts"],
+    ]) {
+      const [cached, live] = bothPaths(dir, ...q, "--json");
+      assert.equal(cached, live, `--calls diverged for: ${q.join(" ")}`);
+    }
+  } finally { cleanup(dir); }
+});
+
+test("--callers --depth N is served from cache, byte-identical (incl. the `via` chain)", () => {
+  const dir = makeRepo(repo());
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    for (const d of ["2", "3", "5"]) {
+      const [cached, live] = bothPaths(dir, "--callers", "target", "--in", "src/target.ts", "--depth", d, "--json");
+      assert.equal(cached, live, `--depth ${d} diverged`);
+    }
+    // `via` is user-visible provenance: file:caller:DECLARATION-line. An internal
+    // dedup key leaking into it here would be invisible to a shape-only assertion.
+    const j = JSON.parse(run(dir, "--callers", "target", "--in", "src/target.ts", "--depth", "2", "--json").stdout);
+    for (const c of j.callers) {
+      if (c.via === null) continue;
+      assert.match(c.via, /^[^\s]+:[^:]+:\d+$/, `via must be file:caller:line, got ${JSON.stringify(c.via)}`);
+    }
+  } finally { cleanup(dir); }
+});
+
+test("outgoing rows tie-break by callee NAME, matching the live walk", () => {
+  const dir = makeRepo({
+    "src/z.ts": "export function alpha(){return 1;}\nexport function beta(){return 2;}\nexport function gamma(){return 3;}\n",
+    // Declared gamma-first so insertion order can't accidentally satisfy the sort.
+    "src/caller.ts":
+      'import { alpha, beta, gamma } from "./z";\n' +
+      "export function run(){ return gamma() + beta() + alpha(); }\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    const [cached, live] = bothPaths(dir, "--calls", "run", "--in", "src/caller.ts", "--json");
+    assert.equal(cached, live);
+    assert.deepEqual(JSON.parse(cached).calls.map((c) => c.name), ["alpha", "beta", "gamma"]);
+  } finally { cleanup(dir); }
+});
+
+test("a sidecar predating these fields is rejected, not half-read", () => {
+  const dir = makeRepo(repo());
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    const p = join(dir, EDGES);
+    const c = JSON.parse(readFileSync(p, "utf8"));
+    // Old format: rows without calleeLine/calleeKind/callerDeclLine. Serving these
+    // would silently produce rows with `undefined` fields rather than falling back.
+    writeFileSync(p, JSON.stringify({ ...c, key: c.key.replace(/e\d+/, "e2") }));
+    const [_, live] = [null, run(dir, "--calls", "runA", "--in", "src/callers.ts", "--json").stdout];
+    assert.ok(JSON.parse(live).calls.every((x) => x.line !== undefined && x.kind !== undefined),
+      "an old-format sidecar must be ignored so the live walk fills these in");
   } finally { cleanup(dir); }
 });
 
