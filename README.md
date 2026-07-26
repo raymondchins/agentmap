@@ -4,19 +4,33 @@
 
 # agentmap
 
-**The TS/JS-accurate repo map for your coding agent — a compiler-grade `ts-morph` import/symbol graph that answers "where is it / what breaks / does this already exist" in ~98% fewer context tokens.**
+**Stop your coding agent from reading the wrong files.**
 
-Your AI coding agent re-learns your codebase every session — opening files and grepping to find
-what connects to what, burning tokens before it writes a line. agentmap gives it a **queryable,
-ranked code-relationship map for TypeScript/JavaScript repos** instead — a `ts-morph` import/symbol
-graph (the real TypeScript compiler, so aliases, `vite`/`webpack` `resolve.alias`, package.json
-`#imports` subpaths, and workspace cross-package imports all resolve) ranked by personalized
-PageRank. Ask it to *"add a field"* or *"fix the login bug"* and it
-finds the right files, their imports, and what already exists in
-**~98% fewer context tokens on average** (up to **~99.9% per task**; figures are chars/4 estimates applied equally to both sides) — kept current by a post-commit
-auto-refresh and actually used via a `PreToolUse(Grep)` hook.
+Ask "what breaks if I change this?" and `grep` hands back a pile where **40% of the
+files don't actually depend on it**. agentmap answers the same question at **100%
+precision** — measured, on public repos, [reproducibly](./EVAL.md).
 
-> **agentmap's wedge in one line:** it's the **TS/JS-*accurate*** repo map — a real TypeScript-compiler graph, not a tree-sitter approximation — with a published, honest [accuracy eval](./EVAL.md) to back it. That precision is the point; the auto-refresh/nudge wiring below is convenience, not the moat.
+```bash
+npx @raymondchins/agentmap --relates src/lib/auth.ts
+```
+
+Your agent re-learns your codebase every session, grepping to find what connects to
+what and burning tokens before it writes a line. agentmap gives it a queryable,
+PageRank-ranked import/symbol map instead — built with `ts-morph`, the real
+TypeScript compiler, so it resolves what string matching cannot.
+
+| Question | agentmap | `git grep` |
+|---|---|---|
+| What depends on this file? | **100%** precision, 99.2% recall | 59.9% precision |
+| Where is this symbol defined? | **53.3%** top-1, 93.3% top-3 | 32% top-1, 80% top-3 |
+| Tokens to find a definition | **~2.4× fewer** | — |
+
+<sub>n=42 dependents / n=75 definitions across [zod](https://github.com/colinhacks/zod), [zustand](https://github.com/pmndrs/zustand) and [hono](https://github.com/honojs/hono) at pinned commits. Ground truth is derived at runtime by an independent resolver, not hand-authored. Re-run it yourself: `npm run eval`. Full method + per-repo numbers: [EVAL.md](./EVAL.md).</sub>
+
+Precision is the point: every wrong file your agent opens is context spent being
+misled. `--relates` returns the full blast radius, so it costs *more* tokens than a
+bare `grep -l` file list — and that trade is [stated plainly in the eval](./EVAL.md),
+not hidden.
 
 [![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
 [![CI](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg)](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml)
@@ -34,6 +48,34 @@ auto-refresh and actually used via a `PreToolUse(Grep)` hook.
 > (unscoped) runs an **unrelated** package by a different author — this project is
 > **`@raymondchins/agentmap`**, and the scoped name is required in every install and command.
 > [`npmjs.com/package/@raymondchins/agentmap`](https://www.npmjs.com/package/@raymondchins/agentmap)
+
+---
+
+## Quickstart
+
+No install needed:
+
+```bash
+npx @raymondchins/agentmap --any <query>
+```
+
+…or run it directly from a checkout:
+
+```bash
+node agentmap.mjs --any <query>
+```
+
+The first run builds and caches the map to `.claude/agentmap/map.json` (add
+`.claude/agentmap/` to `.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
+unchanged, and silently rebuild from disk when there are uncommitted `.ts/.tsx/.js/...`
+edits — so queries always reflect your in-flight work.
+
+Run with no flag to build + print a one-line summary:
+
+```
+$ node agentmap.mjs
+agentmap: 154 files | 4 features | top hub: lib/utils.ts (deg 52, pr 0.105171)
+```
 
 ---
 
@@ -82,9 +124,11 @@ on a single whole-repo map. Reproducible at pinned shas; full per-scenario table
 **Fewer tokens, but are they the _right_ tokens?** Token efficiency is only half the story — a
 separate [`EVAL.md`](./EVAL.md) (`npm run eval`) scores **retrieval accuracy** against ground
 truth derived live from real repos (zod, zustand, hono). Headline: agentmap returns the symbol
-definition in the **top 3 ~95%** of the time (naive grep ~79%) at **~2.6× fewer tokens**, and
-identifies a module's dependents at **~100% precision** (grep ~58%). Honest tradeoffs and method
-in EVAL.md.
+definition in the **top 3 93.3%** of the time (naive grep 80%) at **~2.4× fewer tokens**, and
+identifies a module's dependents at **100% precision / 99.2% recall** (grep 100% recall but 59.9%
+precision). Fixtures are pinned to exact commits, so those numbers are re-derivable rather than
+whatever upstream happened to look like the day they were taken. Honest tradeoffs and method in
+EVAL.md.
 
 **Speed:** a cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm cached query
 returns in **~0.1s** (the lazy-loaded path added in 0.2.2) — the agent has a ranked answer back
@@ -357,34 +401,6 @@ leaves the rest of your `AGENTS.md` / `GEMINI.md` intact.
 | Codex/Gemini nudge never fires | Codex's gate is opt-in — set `[features] hooks = true` in `.codex/config.toml` (`AGENTMAP_CODEX_GATE=0` disables it). Gemini needs the `BeforeTool` hook that `--install-skill` writes. |
 | Installed the wrong `agentmap` | This is **`@raymondchins/agentmap`** (npm scope) — not the unrelated unscoped `agentmap` packages. |
 | Cursor MCP tools missing | `--mcp` doesn't auto-wire Cursor; add the copy-paste `.cursor/mcp.json` from the matrix above and restart Cursor. |
-
----
-
-## Quickstart
-
-No install needed:
-
-```bash
-npx @raymondchins/agentmap --any <query>
-```
-
-…or run it directly from a checkout:
-
-```bash
-node agentmap.mjs --any <query>
-```
-
-The first run builds and caches the map to `.claude/agentmap/map.json` (add
-`.claude/agentmap/` to `.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
-unchanged, and silently rebuild from disk when there are uncommitted `.ts/.tsx/.js/...`
-edits — so queries always reflect your in-flight work.
-
-Run with no flag to build + print a one-line summary:
-
-```
-$ node agentmap.mjs
-agentmap: 154 files | 4 features | top hub: lib/utils.ts (deg 52, pr 0.105171)
-```
 
 ---
 

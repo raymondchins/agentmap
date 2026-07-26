@@ -849,27 +849,40 @@ because it needs the checker or the resolver.
   story wants to sell. Either resolve JSX element references, or have `--callers`
   declare the JSX gap in its result payload. **No depth positioning ships before
   this is resolved or labelled.**
-- [ ] **Extend `eval/eval.mjs` to named public TS monorepos** (pnpm/turbo/nx) and
-  kill its third independent extension list at `eval/eval.mjs:54`.
+- [~] **Extend `eval/eval.mjs` to named public TS monorepos** (pnpm/turbo/nx) and
+  kill its third independent extension list at `eval/eval.mjs:54`. PARTIAL — the
+  bigger problem found while re-measuring was that the eval **pinned nothing**:
+  `git clone --depth 1` took whatever HEAD was that day and merely recorded the
+  sha, so a number moving between runs said nothing about whether agentmap or the
+  upstream repo had changed. Fixtures are now pinned to full 40-char shas (GitHub
+  refuses fetch-by-abbreviated-sha) with a `--repin` escape hatch, and EVAL.md
+  states it. Monorepo fixtures and the extension list are still open.
 
 ### 1C — Positioning reset (~1 d)
 
-- [ ] **Move Quickstart from `README.md:363` to above line 60.** A skimming
+- [x] **Move Quickstart from `README.md:363` to above line 60.** DONE — now at :54,
+  directly under the badges. Original finding: A skimming
   evaluator currently passes auto-refresh, PreToolUse hooks, a 7-platform skill
   matrix, the plugin, an onboarding matrix, an *uninstall* section and a
   troubleshooting table before learning how to run it once.
-- [ ] **Compress `README.md:7–19`** — a 9-line single sentence front-loading
+- [x] **Compress `README.md:7–19`** DONE — the 9-line sentence is replaced by one
+  line, a runnable command, and a 3-row measured comparison table. Original finding: — a 9-line single sentence front-loading
   ts-morph, tsconfig paths, vite/webpack alias, `#imports` subpaths, workspaces,
   PageRank and two hedged percentages with an inline methodology caveat. The
   problem statement lands and is then buried in resolver trivia.
-- [ ] **Lead with `--relates` blast radius.** The baseline competitor is Claude
+- [x] **Lead with `--relates` blast radius.** DONE, and the unverified figure was
+  NOT used. The flagged "28 vs 48" number stays out of the README entirely —
+  instead the headline uses the eval's own **100% precision vs grep's 59.9%**
+  (n=42) on zod/zustand/hono, re-measured at 0.16.1 today. Original finding: The baseline competitor is Claude
   Code's own free, zero-install, always-fresh agentic grep — so every claim must
   beat *"just grep"*, and `--relates` is the one that does. ⚠️ The
   "28 precise dependents vs `rg -l`'s 48 hits" figure is **maintainer-measured on
   one repo (nalarx-ace), not re-verified here** — re-measure on a named public
   repo before it goes in the README.
-- [ ] **Sell depth as fewer wrong files read and fewer tokens burned — never as
-  "compiler-grade accuracy."** Accuracy is the axis this market verifiably does
+- [x] **Sell depth as fewer wrong files read and fewer tokens burned — never as
+  "compiler-grade accuracy."** DONE — the headline is now "Stop your coding agent
+  from reading the wrong files", and the old wedge line that led with
+  compiler-accuracy is gone. Original reasoning: Accuracy is the axis this market verifiably does
   not price (§2). Token savings is the axis every breakout tool headlines.
 
 ### Gate (90 days after Phase 0's working-install release)
