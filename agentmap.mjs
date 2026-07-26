@@ -156,6 +156,68 @@ const extBrace = (list) => `{${list.join(",")}}`;                 // glob brace 
 const CODE_EXT_RE = new RegExp(`\\.(${CODE_EXT.join("|")})$`);    // ts-morph-parseable files
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXT.join("|")})$`); // any source file (incl. .vue)
 
+// ---------------------------------------------------------------------------
+// Language census — the demand instrument.
+//
+// The old plan gated multi-language work on "post-distribution demand actually
+// asks for Python". That gate could never fire: it waited for an ISSUE, and a
+// user whose repo agentmap cannot read gets a useless map and leaves without
+// filing anything. Two people forked to add a language (agentmap-go,
+// agentmap-php) rather than ask for one — the demand was real and the detector
+// was pointed the wrong way.
+//
+// So: count what is actually in the repo, and when a language agentmap does not
+// support dominates, say so plainly and point at one countable place to vote.
+// No telemetry, ever (ROADMAP Phase 1A) — the count is computed locally, printed
+// locally, and never leaves the machine. That is a deliberate trade: the signal
+// is lagging and loudness-biased, and that is still better than the trust cost
+// of phoning home from a dev tool.
+//
+// Not exhaustive, and deliberately so — this is a ballot, not a taxonomy. Only
+// languages a ts-morph-shaped tool could plausibly grow a backend for.
+const FOREIGN_EXT = {
+  py: "Python", pyi: "Python",
+  go: "Go",
+  rs: "Rust",
+  java: "Java",
+  kt: "Kotlin", kts: "Kotlin",
+  rb: "Ruby",
+  php: "PHP",
+  cs: "C#",
+  swift: "Swift",
+  scala: "Scala",
+  dart: "Dart",
+  ex: "Elixir", exs: "Elixir",
+  c: "C", h: "C",
+  cpp: "C++", cc: "C++", cxx: "C++", hpp: "C++", hh: "C++",
+};
+// A single unsupported language must be at least this share of all counted
+// source files before agentmap says anything. Set so a repo with a handful of
+// build scripts in another language stays quiet.
+const CENSUS_MIN_SHARE = 0.3;
+const VOTE_URL = "https://github.com/raymondchins/agentmap/issues/43";
+
+// Bucket the repo's source files by language. Counts ONLY code — a docs- or
+// fixture-heavy repo must not tip the census on .md/.json/.lock/images.
+// Returns null when there is nothing to say.
+function languageCensus(files) {
+  let supported = 0;
+  const foreign = new Map();
+  for (const f of files) {
+    const ext = f.slice(f.lastIndexOf(".") + 1).toLowerCase();
+    if (SOURCE_EXT.includes(ext)) { supported++; continue; }
+    const lang = FOREIGN_EXT[ext];
+    if (lang) foreign.set(lang, (foreign.get(lang) ?? 0) + 1);
+  }
+  let total = supported;
+  for (const n of foreign.values()) total += n;
+  if (!total) return null;
+  let top = null;
+  for (const [lang, count] of foreign) if (!top || count > top.count) top = { lang, count };
+  if (!top || top.count / total < CENSUS_MIN_SHARE) return null;
+  return { ...top, supported, total, share: top.count / total };
+}
+
 const sh = (c) => { try { return execSync(c, { stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).toString().trim(); } catch { return ""; } };
 
 // Live content search for the --any fallback. `git grep` over tracked +
@@ -1414,6 +1476,20 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   // or almost nothing connected, so a stranger doesn't read "built 0 files" / a
   // flat map as success and uninstall.
   if (target === MAP) {
+    // The census runs BEFORE the generic warnings, because "0 source files" is
+    // the least useful thing to tell someone whose repo is 400 Python files —
+    // that reads as a bug in agentmap rather than as "wrong tool, and here is
+    // where to say so". Opt out with AGENTMAP_NO_CENSUS=1.
+    const census = process.env.AGENTMAP_NO_CENSUS ? null : languageCensus(gitListFiles());
+    if (census) {
+      const pct = Math.round(census.share * 100);
+      process.stderr.write(
+        `⚠ ${census.count} ${census.lang} file${census.count === 1 ? "" : "s"} (${pct}% of this repo) vs ${census.supported} TS/JS/Vue. `
+        + `agentmap is TS/JS-only today — ${census.lang} is not indexed.\n`
+        + `  Want ${census.lang}? React to ${VOTE_URL} — reactions are how this gets prioritized.\n`
+        + `  (silence: AGENTMAP_NO_CENSUS=1)\n`,
+      );
+    }
     if (nodes.length === 0) {
       process.stderr.write("⚠ 0 source files found (repo not git-tracked? non-standard dir layout?)\n");
     } else if (degraded) {

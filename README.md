@@ -774,7 +774,10 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
 - **TS/JS (+ Vue SFC), by design.** Built on `ts-morph`. Indexes `.ts/.tsx/.mts/.cts/`
   `.js/.jsx/.mjs/.cjs` and the `<script>` blocks of `.vue` single-file components
   (best-effort). No Python, Go, Rust, etc. — if your repo isn't TypeScript/JavaScript, use a
-  tree-sitter-based tool instead. Support for other languages is a possible future direction.
+  tree-sitter-based tool instead. **Want another language?
+  [Vote in #43](https://github.com/raymondchins/agentmap/issues/43)** — and read
+  [what a non-TS language would actually get](#what-another-language-would-actually-get)
+  first, because it would not be the same product.
 - **The persisted map is a file-level import graph; the call graph is opt-in.** The
   cached map's edges come from static `import` / re-export declarations and the named
   symbols crossing them — `--relates` answers the file-level question ("who imports this
@@ -807,6 +810,55 @@ Honesty first — this is deliberately a small, sharp tool, not a universal code
   `--map`/`--tokens` budgets as approximate (±10%).
 - The PreToolUse hook is **Claude Code-specific** (it speaks Claude Code's hook JSON). The
   post-commit hook is generic git.
+
+---
+
+## What another language would actually get
+
+Published *before* any of it is built, because the cheapest way to find out you're
+being asked for a different product is to describe the product accurately first.
+
+agentmap's accuracy comes from `ts-morph` — a real TypeScript compiler with a type
+checker. Another language would be parsed with tree-sitter: syntax, no types, no
+module resolver. That difference decides what each query can honestly return.
+
+| Query | TS / JS today | Another language |
+|---|---|---|
+| `--relates` (blast radius) | full | **full** — ports best; this is the one to lead with |
+| `--search` (BM25) | full | **full** |
+| `--hubs` / `--map` / `--symbols` (PageRank) | full | **full** |
+| `--print` / `--export` | full | **full** — reads the cached map only |
+| `--find` | full | **partial** — no transitive re-export/barrel chains |
+| `--any` | full | **partial** |
+| `--callers` / `--calls` | full | **none — refuses, explicitly** |
+| `--features` / `--feature` | Next.js App Router | **none** |
+| incremental rebuild | yes | **no — full rebuild every time** |
+
+`--callers` / `--calls` are ~259 lines of TypeScript language-service calls.
+Tree-sitter cannot reproduce them. The options are to refuse loudly or to guess by
+name-matching, and **name-matching will not ship**: a silently mis-wired graph is
+worse than no graph, and it would falsify every accuracy claim here.
+
+Two non-TS languages is the honest ceiling for one part-time maintainer — each one
+is an ongoing tax, not a one-off. Reasoning, including the arguments *against*
+doing this at all, is in [ROADMAP.md Part II](ROADMAP.md#part-ii--make-it-useful-for-the-majority-2026-07-26).
+
+**No telemetry.** agentmap makes zero network calls. When an unsupported language
+dominates your repo it counts the files locally, prints a one-line pointer to the
+vote, and forgets. That count never leaves your machine. Silence it with
+`AGENTMAP_NO_CENSUS=1`.
+
+## Forks & ports
+
+Two people ported agentmap to another language rather than open an issue, which is
+the strongest evidence that the "nobody asked" reading was wrong:
+
+- [`rifanid98/agentmap-go`](https://github.com/rifanid98/agentmap-go) — Go
+- [`dstwn/agentmap-php`](https://github.com/dstwn/agentmap-php) — PHP / Laravel
+
+Neither is affiliated with this repo and neither is endorsed — listed because
+pretending they don't exist would be dishonest about demand. If you maintain one:
+upstreaming beats competing, please open an issue.
 
 ---
 

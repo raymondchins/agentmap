@@ -760,22 +760,34 @@ with one that can — and put the 90 days of waiting to work, not to idling.
 
 ### 1A — The demand instrument (2–3 d)
 
-- [ ] **In-CLI language census.** Count tracked sources by extension over
+- [x] **In-CLI language census.** DONE — `languageCensus()` buckets `git ls-files`
+  by extension and fires when one unsupported language is >=30% of counted SOURCE
+  files (docs/data deliberately excluded, or a markdown-heavy TS repo would trip
+  it). Prints counts, share, and the vote link on **stderr** so `--json` stays a
+  clean contract; `AGENTMAP_NO_CENSUS=1` opts out. 6 tests cover both failure
+  modes — silent on a repo that is the wrong fit, and nagging one that is fine.
+  Original spec: Count tracked sources by extension over
   `git ls-files`, including extensions with no backend. When ≥30% of tracked
   sources are a single unsupported language, replace the generic warning at
   `agentmap.mjs:1418` with a specific one: *"agentmap sees 412 `.py` and 3 `.ts`
   files. agentmap is TS/JS-only today — vote for Python here: `<url>`."* This is
   the only signal in play that **cannot be bot-inflated**, because it takes a
   human GitHub account to react.
-- [ ] **One pinned issue**, reaction-voted, linked from the README, the census
+- [x] **One pinned issue** — DONE: [#43](https://github.com/raymondchins/agentmap/issues/43),
+  pinned, with one comment per language (Python/Go/Java/Rust/C#/PHP/other) so
+  reactions are countable at a glance. Original spec: reaction-voted, linked from the README, the census
   message, and the MCP error text. One issue, not a discussion board — it must be
   countable at a glance.
-- [ ] **Publish the capability matrix (§6) *before* building anything**, and ask
+- [x] **Publish the capability matrix (§6) *before* building anything** — DONE.
+  In the README as *What another language would actually get*, and repeated at the
+  top of #43 with the explicit ask: would you still use it if `--callers`/`--calls`
+  refused and `--features` returned nothing? Original spec: and ask
   voters directly: *would you still use it if `--callers`/`--calls` returned an
   explicit unsupported error and `--features` returned nothing?* The cheapest way
   to discover you are being asked for a different product is to describe the
   product accurately first.
-- [ ] **Add a "Forks & ports" README section** linking **both** language ports.
+- [x] **Add a "Forks & ports" README section** — DONE, both ports listed and
+  linked, marked unaffiliated/unendorsed. Original spec: linking **both** language ports.
   There are two, not one: `dstwn/agentmap-php` (created 2026-06-19, pushed
   2026-06-22) and **`rifanid98/agentmap-go`** (created 2026-06-15) — the Go port
   was missed during research and found by direct enumeration of the fork list.
@@ -783,7 +795,10 @@ with one that can — and put the 90 days of waiting to work, not to idling.
   single strongest refutation of the "zero demand" reading. Converts the best
   existing demand datapoint from invisible to tracked for about an hour of work;
   contacting them about upstreaming is cheaper than competing with them.
-- [ ] **Ship NO telemetry.** For a solo-maintainer OSS dev tool the trust cost
+- [x] **Ship NO telemetry.** DECIDED AND RECORDED — stated in the README next to
+  the matrix and in the census code comment, so it is not relitigated: the census
+  counts locally, prints locally, and nothing leaves the machine. Original
+  reasoning: For a solo-maintainer OSS dev tool the trust cost
   outweighs the data-quality gain. Record it as a decision so it is not
   relitigated — and accept that every gate below is therefore a lagging,
   loudness-biased proxy with wide error bars.
