@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeRepo, gitInit, cleanup } from "./helpers.mjs";
+import { makeRepo, gitInit, cleanup, trackChild, killChild } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENTMAP = join(HERE, "..", "agentmap.mjs");
@@ -20,10 +20,14 @@ const AGENTMAP = join(HERE, "..", "agentmap.mjs");
 // responses (those carrying an id) or the process exits.
 function rpc(cwd, requests, expect) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [AGENTMAP, "--mcp"], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const child = trackChild(spawn(process.execPath, [AGENTMAP, "--mcp"], { cwd, stdio: ["pipe", "pipe", "pipe"] }));
     const responses = [];
     let buf = "", stderr = "";
-    const done = () => { try { child.kill(); } catch {} resolve(responses); };
+    // Every settle path below MUST run through killChild() — the old version
+    // only killed the child in done() (the happy path), so a server that
+    // never answered outlived the test's timeout: the confirmed orphan leak,
+    // re-parented to pid 1 once the runner itself exited.
+    const done = () => { killChild(child); resolve(responses); };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       buf += chunk;
@@ -38,12 +42,17 @@ function rpc(cwd, requests, expect) {
       }
     });
     child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", reject);
+    child.on("error", (e) => { killChild(child); reject(e); });
     child.on("exit", () => resolve(responses));
     for (const r of requests) child.stdin.write(JSON.stringify(r) + "\n");
     // unref so a pending timer never keeps the test's event loop alive after
     // we've already resolved (done() kills the child but not this timer).
-    setTimeout(() => { if (responses.length < expect) reject(new Error(`timeout: got ${responses.length}/${expect} responses; stderr=${stderr}`)); }, 20000).unref();
+    setTimeout(() => {
+      if (responses.length < expect) {
+        killChild(child);
+        reject(new Error(`timeout: got ${responses.length}/${expect} responses; stderr=${stderr}`));
+      }
+    }, 20000).unref();
   });
 }
 

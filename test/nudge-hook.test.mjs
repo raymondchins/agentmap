@@ -44,6 +44,7 @@ function runRaw(payload, spawnCwd) {
       cwd: spawnCwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30_000, // backstop against a wedged hook outliving the test process
     });
     return { stdout, status: 0 };
   } catch (e) {
@@ -355,6 +356,7 @@ test("always exits 0: malformed JSON on stdin — silent, exit 0", () => {
       input: "NOT JSON {{{{",
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30_000,
     });
     // exit 0 — good, stdout is already captured above
   } catch (e) {

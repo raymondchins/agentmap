@@ -54,6 +54,16 @@ export function git(dir, ...args) {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
+// Every synchronous CLI invocation below gets a hard ceiling: if agentmap ever
+// wedges (e.g. a catastrophic-backtracking regex, an infinite loop introduced
+// mid-development), execFileSync/spawnSync's OWN timeout kills it deterministically
+// instead of blocking forever. Generous so normal runs never come close to it —
+// this is a backstop, not a budget. (Confirmed bug: without this, a hung child
+// outlives a runner that gets SIGTERM'd by an external test-timeout, re-parented
+// to pid 1 and spinning forever — see killChild()/trackChild() below for the
+// equivalent guard on the long-running `--mcp` server subprocess tests.)
+const CHILD_TIMEOUT_MS = 60_000;
+
 // Run the CLI: `node agentmap.mjs <args...>` in `dir`. Never throws on a non-zero
 // exit — we capture { stdout, stderr, status } so tests can assert exit codes.
 export function run(dir, ...args) {
@@ -62,11 +72,12 @@ export function run(dir, ...args) {
       cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
       // generous buffer; map output on big repos can be large
       maxBuffer: 64 * 1024 * 1024,
+      timeout: CHILD_TIMEOUT_MS,
     });
     return { stdout, stderr: "", status: 0 };
   } catch (e) {
     // execFileSync attaches stdout/stderr/status on the thrown error for
-    // non-zero exits (and signal/spawn failures).
+    // non-zero exits (and signal/spawn failures) — including a timeout kill.
     return {
       stdout: e.stdout?.toString?.() ?? "",
       stderr: e.stderr?.toString?.() ?? "",
@@ -80,9 +91,31 @@ export function run(dir, ...args) {
 // distinguishes a full rebuild from a cache hit. run() drops stderr on success.
 export function runErr(dir, ...args) {
   const r = spawnSync(process.execPath, [AGENTMAP, ...args], {
-    cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+    cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: CHILD_TIMEOUT_MS,
   });
   return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: typeof r.status === "number" ? r.status : 1 };
+}
+
+// Like run() but with HOME/USERPROFILE pointed at a throwaway dir first — used
+// by --doctor/--setup-mcp tests that must not touch the developer's real global
+// configs. (Was copy-pasted verbatim into doctor/exit-code-contract/setup-mcp
+// tests, each missing a timeout; consolidated here so the guard lives in one
+// place.)
+export function runWithHome(dir, homeDir, ...args) {
+  const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
+  try {
+    const stdout = execFileSync(process.execPath, [AGENTMAP, ...args], {
+      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env,
+      maxBuffer: 64 * 1024 * 1024, timeout: CHILD_TIMEOUT_MS,
+    });
+    return { stdout, stderr: "", status: 0 };
+  } catch (e) {
+    return {
+      stdout: e.stdout?.toString?.() ?? "",
+      stderr: e.stderr?.toString?.() ?? "",
+      status: typeof e.status === "number" ? e.status : 1,
+    };
+  }
 }
 
 // Did this run do a full ts-morph reparse (true) or serve a cache (false)?
@@ -93,6 +126,54 @@ export function cleanup(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 
-// Backstop: remove every temp repo when the test process exits, even if a test
-// forgot to clean up. force:true so a stray lock never crashes the runner.
-process.on("exit", () => { for (const d of _dirs) cleanup(d); });
+// ----------------------------------------------------------------------------
+// Long-running subprocess tracking (the `--mcp` server harnesses in
+// mcp-inprocess/mcp-protocol spawn `agentmap --mcp` and talk to it over stdio
+// for the life of one test). CONFIRMED BUG this fixes: those harnesses only
+// killed the child on the happy path — a timed-out or errored call left the
+// server running, and once the test process itself got torn down (runner
+// timeout, SIGTERM/SIGKILL), the child was re-parented to pid 1 and kept
+// running indefinitely (spinning at full CPU if it was ever wedged, which is
+// exactly why the call hadn't returned in the first place).
+//
+// Every spawn of a long-running agentmap subprocess MUST go through
+// trackChild() and kill it via killChild() on EVERY exit path (success,
+// timeout, error) — not just success.
+const _children = new Set();
+
+export function trackChild(child) {
+  _children.add(child);
+  child.once("exit", () => _children.delete(child));
+  return child;
+}
+
+// Kill a tracked child deterministically. SIGTERM first (lets it shut down
+// cleanly); if it's still alive after a short grace period — e.g. wedged in a
+// synchronous hot loop that can't service the signal yet — escalate to
+// SIGKILL, which the kernel delivers unconditionally. Safe to call more than
+// once, or on a child that has already exited.
+export function killChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try { child.kill("SIGTERM"); } catch {}
+  const t = setTimeout(() => {
+    try { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); } catch {}
+  }, 2000);
+  t.unref();
+}
+
+// Backstop: remove every temp repo AND kill every still-tracked child when the
+// test process exits, even if a test forgot to clean up. force:true so a stray
+// lock never crashes the runner.
+process.on("exit", () => {
+  for (const c of _children) { try { c.kill("SIGKILL"); } catch {} }
+  for (const d of _dirs) cleanup(d);
+});
+
+// The "exit" backstop above only fires on a normal exit / explicit
+// process.exit() — NOT on a raw SIGINT/SIGTERM (e.g. Ctrl-C locally, or a CI
+// runner enforcing its own test timeout by signaling this process). Route
+// those through process.exit() so the same sweep still runs instead of
+// leaking both the fixture dirs and any live `--mcp` server children.
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => process.exit(1));
+}

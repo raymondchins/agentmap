@@ -38,6 +38,7 @@ function runHook(payload) {
     input: JSON.stringify({ cwd: WITH_AGENTMAP, ...payload }),
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
+    timeout: 30_000, // backstop against a wedged hook outliving the test process
   });
   return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: typeof r.status === "number" ? r.status : 1 };
 }
