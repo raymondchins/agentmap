@@ -247,6 +247,23 @@ test("a reassigned local alias does not fabricate a call to the original", () =>
   } finally { cleanup(dir); }
 });
 
+// A sidecar written by an older agentmap whose edge ROWS meant something
+// different must not be served: a missing edge is indistinguishable from "no
+// caller", so the failure would be a confident wrong answer with no symptom.
+test("a sidecar from a different edge format is not served", () => {
+  const dir = makeRepo(repo());
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    const p = join(dir, EDGES);
+    const c = JSON.parse(readFileSync(p, "utf8"));
+    // Same map, older row format — the key must not match.
+    writeFileSync(p, JSON.stringify({ ...c, key: c.key.replace(/e\d+/, "e1"), edges: [] }));
+    const out = JSON.parse(run(dir, "--callers", "target", "--in", "src/target.ts", "--json").stdout);
+    assert.equal(out.total, 2, "an old-format sidecar must be ignored, not believed");
+  } finally { cleanup(dir); }
+});
+
 test("LAZY: normal commands neither read nor write the sidecar", () => {
   const dir = makeRepo(repo());
   try {

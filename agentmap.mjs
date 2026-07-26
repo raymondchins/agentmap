@@ -42,6 +42,12 @@ const FACTS = ".claude/agentmap/facts.json"; // raw per-file facts snapshot for 
 // is never an error: --callers silently falls back to the live ts-morph walk it
 // has always used, so this is a pure speedup with no new failure mode.
 const EDGES = ".claude/agentmap/calledges.json";
+// Version of the EDGE ROW FORMAT, independent of SCHEMA_VERSION (which versions
+// map.json). Bump on any change to what a row means or contains — otherwise an
+// upgrade silently serves a sidecar written by older logic, and since a missing
+// edge just looks like "no caller", the failure is a confident wrong answer with
+// no symptom. Bumped to 2 when rows gained export-alias names.
+const EDGES_FORMAT = 2;
 // Bumped 2 → 3: Vue SFC support. `.vue` files now appear in the map and the
 // source-discovery / freshness checks treat them as first-class source files.
 // Bumped 3 → 4: per-file `locals` (non-exported top-level declarations) now
@@ -3550,6 +3556,7 @@ const enclosingName = (id, SyntaxKind) => enclosingOwner(id, SyntaxKind).name;
 function edgeKey(data) {
   return [
     SCHEMA_VERSION,
+    `e${EDGES_FORMAT}`,
     data.generatedSha || "",
     data.dirtyFingerprint || "",
     data.fingerprint || "",
