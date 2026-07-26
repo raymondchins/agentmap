@@ -83,6 +83,14 @@ jobs:
 
       # Deprecation is a registry-side flag with no local artifact, so the only
       # honest confirmation is to read it back.
+      #
+      # Read the raw packument, NOT `npm view <pkg> --json`: that shape returns
+      # `versions` as an ARRAY OF VERSION STRINGS, so `meta.versions[v].deprecated`
+      # is always undefined and the check fails even on a run that worked (it did,
+      # on the first 0.10.0–0.16.0 run). `npm view <pkg>@<range> deprecated --json`
+      # is no good either — it omits versions that have no message, so the results
+      # cannot be correlated back to versions. The packument has full per-version
+      # metadata and is the only shape that answers this.
       - name: Verify from the registry
         env:
           RANGE: ${{ inputs.range }}
@@ -90,22 +98,24 @@ jobs:
         run: |
           set -euo pipefail
           sleep 5
-          npm view "$PKG" --json > /tmp/meta.json
-          MATCHED="$(npm view "$PKG@$RANGE" version --json)"
-          echo "$MATCHED" > /tmp/matched.json
+          npm view "$PKG@$RANGE" version --json > /tmp/matched.json
           node -e '
             const fs = require("node:fs");
-            const meta = JSON.parse(fs.readFileSync("/tmp/meta.json", "utf8"));
-            const parsed = JSON.parse(fs.readFileSync("/tmp/matched.json", "utf8") || "null");
-            const list = parsed === null ? [] : [].concat(parsed);
-            const want = process.env.MESSAGE;
-            let bad = 0;
-            for (const v of list) {
-              const dep = meta.versions[v] && meta.versions[v].deprecated;
-              const ok = want ? dep === want : !dep;
-              if (ok) console.log(`${v}: ${want ? "deprecated" : "clear"}`);
-              else { bad++; console.error(`::error::${v} not in expected state (deprecated=${JSON.stringify(dep)})`); }
-            }
-            if (bad) process.exit(1);
-            console.log(`\nverified ${list.length} version(s)`);
+            (async () => {
+              const pkg = process.env.PKG, want = process.env.MESSAGE;
+              const res = await fetch(`https://registry.npmjs.org/${pkg.replace("/", "%2F")}`);
+              if (!res.ok) { console.error(`::error::registry returned ${res.status}`); process.exit(1); }
+              const meta = await res.json();
+              const parsed = JSON.parse(fs.readFileSync("/tmp/matched.json", "utf8") || "null");
+              const list = parsed === null ? [] : [].concat(parsed);
+              let bad = 0;
+              for (const v of list) {
+                const dep = meta.versions?.[v]?.deprecated;
+                const ok = want ? dep === want : !dep;
+                if (ok) console.log(`${v}: ${want ? "deprecated" : "clear"}`);
+                else { bad++; console.error(`::error::${v} not in expected state (deprecated=${JSON.stringify(dep)})`); }
+              }
+              if (bad) process.exit(1);
+              console.log(`\nverified ${list.length} version(s)`);
+            })();
           '
