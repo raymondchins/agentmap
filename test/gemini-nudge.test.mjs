@@ -46,6 +46,7 @@ function runRaw(payload, spawnCwd) {
       cwd: spawnCwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30_000, // backstop against a wedged hook outliving the test process
     });
     return { stdout, status: 0 };
   } catch (e) {

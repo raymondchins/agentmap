@@ -1,34 +1,9 @@
 // SPDX-License-Identifier: MIT
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeRepo, gitInit, AGENTMAP, cleanup } from "./helpers.mjs";
-import { execFileSync } from "node:child_process";
+import { makeRepo, gitInit, runWithHome, cleanup } from "./helpers.mjs";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-
-function runWithHome(dir, homeDir, ...args) {
-  const env = {
-    ...process.env,
-    HOME: homeDir,
-    USERPROFILE: homeDir,
-  };
-  try {
-    const stdout = execFileSync(process.execPath, [AGENTMAP, ...args], {
-      cwd: dir,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return { stdout, stderr: "", status: 0 };
-  } catch (e) {
-    return {
-      stdout: e.stdout?.toString?.() ?? "",
-      stderr: e.stderr?.toString?.() ?? "",
-      status: typeof e.status === "number" ? e.status : 1,
-    };
-  }
-}
 
 test("--setup-mcp creates configurations when none exist", () => {
   const dir = makeRepo({ "dummy.ts": "" });

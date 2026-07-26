@@ -23,9 +23,13 @@ const MAP_DIRTY = ".claude/agentmap/map.dirty.json";
 const FACTS = ".claude/agentmap/facts.json";
 
 // Run agentmap in `dir` with optional extra env; always capture stdout+stderr.
+// timeout is a backstop against a wedged run (e.g. the incremental path
+// hanging instead of declining) outliving the test process — see helpers.mjs's
+// CHILD_TIMEOUT_MS for why this matters even for a synchronous spawnSync call.
 function runAM(dir, args, env = {}) {
   const r = spawnSync(process.execPath, [AGENTMAP, ...args], {
     cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...env },
+    timeout: 60_000,
   });
   return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status ?? 1 };
 }

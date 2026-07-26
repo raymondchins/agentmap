@@ -42,6 +42,7 @@ function gate(command, env = {}, payload = {}, spawnCwd = undefined) {
     cwd: spawnCwd,
     encoding: "utf8",
     env: { ...process.env, ...env },
+    timeout: 30_000, // backstop against a wedged hook outliving the test process
   });
   const out = (r.stdout || "").trim();
   let denied = false, reason = "";
@@ -103,6 +104,7 @@ test("ALLOW: a non-Bash tool never fires", () => {
   const r = spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({ tool_name: "Read", tool_input: { file_path: "ProviderCard.tsx" } }),
     encoding: "utf8",
+    timeout: 30_000,
   });
   assert.equal((r.stdout || "").trim(), "", "a non-Bash tool must be allowed silently");
 });

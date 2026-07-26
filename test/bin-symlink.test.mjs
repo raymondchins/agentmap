@@ -44,7 +44,7 @@ test("bin symlink: --version prints the version (not silent exit 0)", () => {
     gitInit(dir, { commit: true });
     const link = linkBin(dir, AGENTMAP, "agentmap");
     const stdout = execFileSync(process.execPath, [link, "--version"], {
-      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000,
     });
     assert.notEqual(stdout.trim(), "", "invoked via bin symlink, agentmap printed NOTHING — the entry guard skipped main()");
     assert.ok(stdout.trim().includes(PKG.version), `expected version ${PKG.version}, got: ${stdout.trim()}`);
@@ -57,7 +57,7 @@ test("bin symlink: a query command produces real output", () => {
     gitInit(dir, { commit: true });
     const link = linkBin(dir, AGENTMAP, "agentmap");
     const stdout = execFileSync(process.execPath, [link, "--hubs"], {
-      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024,
+      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
     });
     assert.notEqual(stdout.trim(), "", "--hubs via bin symlink printed nothing");
     assert.match(stdout, /hubs/i);
@@ -70,7 +70,7 @@ test("bin symlink: --install-hooks actually writes the hook", () => {
     gitInit(dir, { commit: true });
     const link = linkBin(dir, AGENTMAP, "agentmap");
     const r = spawnSync(process.execPath, [link, "--install-hooks"], {
-      cwd: dir, encoding: "utf8",
+      cwd: dir, encoding: "utf8", timeout: 60_000,
     });
     assert.equal(r.status, 0, `--install-hooks exited ${r.status}: ${r.stderr}`);
     assert.notEqual((r.stdout ?? "").trim(), "", "--install-hooks via bin symlink printed nothing");

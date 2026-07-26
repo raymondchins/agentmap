@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeRepo, gitInit, cleanup, run } from "./helpers.mjs";
+import { makeRepo, gitInit, cleanup, run, trackChild, killChild } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENTMAP = join(HERE, "..", "agentmap.mjs");
@@ -43,10 +43,15 @@ const FIXTURE = {
 function mcpCalls(cwd, calls) {
   const requests = calls.map(([name, args], i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name, arguments: args } }));
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [AGENTMAP, "--mcp"], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const child = trackChild(spawn(process.execPath, [AGENTMAP, "--mcp"], { cwd, stdio: ["pipe", "pipe", "pipe"] }));
     const byId = new Map();
     let buf = "", stderr = "";
-    const done = () => { try { child.kill(); } catch {} resolve(requests.map((r) => byId.get(r.id))); };
+    // Every settle path below MUST run through killChild() — a server that
+    // never answers (or answers late, after we've already timed out) must not
+    // outlive this call. The old version only killed on the happy path here,
+    // which is the confirmed orphan leak: a timed-out `--mcp` server kept
+    // running past the test, re-parented to pid 1 once the runner exited.
+    const done = () => { killChild(child); resolve(requests.map((r) => byId.get(r.id))); };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       buf += chunk;
@@ -61,10 +66,15 @@ function mcpCalls(cwd, calls) {
       }
     });
     child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", reject);
+    child.on("error", (e) => { killChild(child); reject(e); });
     child.on("exit", () => resolve(requests.map((r) => byId.get(r.id))));
     for (const r of requests) child.stdin.write(JSON.stringify(r) + "\n");
-    setTimeout(() => { if (byId.size < requests.length) reject(new Error(`timeout: ${byId.size}/${requests.length}; stderr=${stderr}`)); }, 30000).unref();
+    setTimeout(() => {
+      if (byId.size < requests.length) {
+        killChild(child);
+        reject(new Error(`timeout: ${byId.size}/${requests.length}; stderr=${stderr}`));
+      }
+    }, 30000).unref();
   });
 }
 

@@ -79,7 +79,7 @@ test("AGENTMAP_NO_CENSUS=1 silences it", () => {
 
     const quiet = spawnSync(process.execPath, [AGENTMAP, "--hubs"], {
       cwd: dir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, AGENTMAP_NO_CENSUS: "1" },
+      env: { ...process.env, AGENTMAP_NO_CENSUS: "1" }, timeout: 60_000,
     });
     assert.doesNotMatch(quiet.stderr ?? "", /not indexed/, "the documented opt-out did not silence the census");
   } finally { cleanup(dir); }

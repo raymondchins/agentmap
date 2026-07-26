@@ -1,31 +1,10 @@
 // SPDX-License-Identifier: MIT
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative, sep } from "node:path";
-import { makeRepo, gitInit, run, git, cleanup, AGENTMAP } from "./helpers.mjs";
-
-// Same HOME-isolation pattern as test/setup-mcp.test.mjs — doctor scans
-// ~/.config/opencode etc., so MCP tests must override HOME to avoid touching
-// the developer's real global configs.
-function runWithHome(dir, homeDir, ...args) {
-  const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
-  try {
-    const stdout = execFileSync(process.execPath, [AGENTMAP, ...args], {
-      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return { stdout, stderr: "", status: 0 };
-  } catch (e) {
-    return {
-      stdout: e.stdout?.toString?.() ?? "",
-      stderr: e.stderr?.toString?.() ?? "",
-      status: typeof e.status === "number" ? e.status : 1,
-    };
-  }
-}
+import { makeRepo, gitInit, run, runWithHome, git, cleanup } from "./helpers.mjs";
 
 // Recursive file listing under `dir` — for the no-writes invariant.
 function tree(dir) {

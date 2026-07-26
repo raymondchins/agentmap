@@ -6,8 +6,7 @@
 // additive `focusResolved` field in --map --json output.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeRepo, gitInit, run, cleanup, AGENTMAP } from "./helpers.mjs";
-import { execFileSync } from "node:child_process";
+import { makeRepo, gitInit, run, runWithHome, cleanup } from "./helpers.mjs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -16,20 +15,6 @@ const FIXTURE = {
   "src/index.ts": `export function realSymbol() { return 1; }`,
 };
 function repo() { const dir = makeRepo(FIXTURE); gitInit(dir, { commit: true }); return dir; }
-
-// Like helpers.run() but with HOME/USERPROFILE pointed at a throwaway dir so the
-// maintenance-failure case can plant a malformed global config safely.
-function runWithHome(dir, homeDir, ...args) {
-  const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
-  try {
-    const stdout = execFileSync(process.execPath, [AGENTMAP, ...args], {
-      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env, maxBuffer: 64 * 1024 * 1024,
-    });
-    return { stdout, stderr: "", status: 0 };
-  } catch (e) {
-    return { stdout: e.stdout?.toString?.() ?? "", stderr: e.stderr?.toString?.() ?? "", status: typeof e.status === "number" ? e.status : 1 };
-  }
-}
 
 test("--map --focus <nonexistent> → exit 1, still prints a digest, focusResolved:false in --json", () => {
   const dir = repo();
