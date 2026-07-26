@@ -97,7 +97,7 @@ if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -10 2>/dev/null)" ];
 fi
 mkdir "$LOCK" 2>/dev/null || exit 0
 
-# The timeout must kill the whole process GROUP, not just $_am_pid. Runner #4 is
+# The timeout must reach DESCENDANTS, not just $_am_pid. Runner #4 is
 # `npx --no-install @raymondchins/agentmap`, which execs a child `node
 # .../node_modules/.bin/agentmap` — so $_am_pid is the npx wrapper and the real
 # work is a grandchild. Signalling only the wrapper leaves that grandchild
@@ -105,21 +105,42 @@ mkdir "$LOCK" 2>/dev/null || exit 0
 # `npm exec @raymondchins/agentmap` (pid 5361) whose child `node .../bin/agentmap`
 # (pid 7386) survived the wrapper's death and had to be killed by hand.
 #
-# `set -m` enables job control, which puts the background job in its own process
-# group with pgid == pid, so `kill -- -$_am_pid` reaches wrapper AND grandchildren.
-# The plain-$_am_pid fallbacks cover shells that don't honour job control here.
-# SIGTERM first so a healthy run can flush and exit; SIGKILL only if it ignores it.
+# Process GROUPS cannot carry this. Job control is not usable in a git hook:
+# dash (Ubuntu's /bin/sh) leaves a background job in the invoking shell's group
+# even under `set -m` — measured pid 33422 with pgid 33387 — so `kill -- -$_am_pid`
+# there either fails or, worse, signals this hook and git along with it. bash
+# gives pgid == pid and would work, but a fix that only holds on macOS is not a
+# fix. pgrep needs no controlling terminal and behaves the same on both.
+#
+# Collect the tree deepest-first so children are signalled before their parents,
+# and snapshot it BEFORE signalling: once the wrapper dies its children are
+# reparented to init and `pgrep -P` can no longer find them. Where pgrep is
+# absent (Git for Windows) the walk yields just $_am_pid and this degrades to the
+# old single-pid behaviour rather than erroring.
+_am_descendants() {
+  _am_gen="$1" _am_all="$1" _am_depth=0
+  while [ -n "$_am_gen" ] && [ "$_am_depth" -lt 8 ]; do
+    _am_gen=$(for _am_p in $_am_gen; do pgrep -P "$_am_p" 2>/dev/null; done | tr '\n' ' ')
+    [ -n "$_am_gen" ] && _am_all="$_am_gen $_am_all"
+    _am_depth=$((_am_depth + 1))
+  done
+  printf '%s' "$_am_all"
+}
+
 (
   cd "$ROOT" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
-  set -m
   $RUNNER >/dev/null 2>&1 &
   _am_pid=$!
-  set +m
+  # SIGTERM first so a healthy run can flush and exit; SIGKILL only if it ignores
+  # it. A pid could in principle be recycled inside that 5s window; the exposure
+  # is the same as the previous single-pid form and the alternative (re-walking a
+  # tree whose root is already dead) finds nothing at all.
   (
     sleep "${AGENTMAP_HOOK_TIMEOUT:-120}"
-    kill -TERM "-$_am_pid" 2>/dev/null || kill -TERM "$_am_pid" 2>/dev/null
+    _am_tree=$(_am_descendants "$_am_pid")
+    for _am_k in $_am_tree; do kill -TERM "$_am_k" 2>/dev/null; done
     sleep 5
-    kill -9 "-$_am_pid" 2>/dev/null || kill -9 "$_am_pid" 2>/dev/null
+    for _am_k in $_am_tree; do kill -KILL "$_am_k" 2>/dev/null; done
   ) >/dev/null 2>&1 &
   _am_wd=$!
   wait "$_am_pid" 2>/dev/null
