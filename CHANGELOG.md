@@ -38,16 +38,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to init, still spinning a full core with nothing left to reap it. The lock
   stopped orphans *stacking*; this is why one could still be created at all.
 
-  `set -m` puts the background job in its own process group (pgid == pid), so
-  `kill -- -$_am_pid` reaches the wrapper and everything under it. SIGTERM first
-  so a healthy run can flush, SIGKILL only if it ignores it, with plain-pid
-  fallbacks for shells that do not honour job control in this context.
+  Process groups cannot carry this. The first attempt used `set -m` so the
+  background job would land in its own group and `kill -- -$_am_pid` would reach
+  everything under it — that works under bash but **not under dash**, Ubuntu's
+  `/bin/sh`, which leaves the job in the invoking shell's group even with job
+  control on (measured: pid 33422, pgid 33387). There the group kill either fails
+  or, worse, would signal the hook and `git` along with it. The regression test
+  below caught exactly that on Linux CI while passing on macOS.
+
+  The timeout now walks the process tree with `pgrep -P` instead, which needs no
+  controlling terminal and behaves identically on both shells. The tree is
+  collected deepest-first so children are signalled before their parents, and
+  snapshotted *before* signalling — once the wrapper dies its children are
+  reparented to init and `pgrep -P` can no longer find them. SIGTERM first so a
+  healthy run can flush, SIGKILL after a grace period. Where `pgrep` is absent
+  (Git for Windows) the walk yields just the one pid and this degrades to the old
+  single-pid behaviour rather than erroring.
 
   Measured on the machine where this surfaced: **~30 W per orphan**, three at once
   drawing **114.5 W** with the battery falling 2%/min, against a 23.4 W baseline
   with the same applications open. Now covered by a fifth regression test in
   `test/post-commit-hook.test.mjs` that drives a wrapper-plus-grandchild runner
-  and asserts a heartbeat file goes stale; it fails against the single-pid form.
+  and asserts a heartbeat file goes stale; it fails against the single-pid form, and it is what caught the dash gap above.
 
 - **The test suite leaked the MCP server it spawned.** `mcpCalls()` and `rpc()`
   start a long-running `agentmap --mcp` over stdio but called `child.kill()` only
