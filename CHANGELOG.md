@@ -6,6 +6,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **One duplicated `extends` entry could spin a core forever.**
+  `readTsconfigAliasOpts` had no memo and no visited set, so `extends` resolution
+  fanned out as `branch^depth`. The `_depth < 10` cap bounds *depth*, not *work*:
+  since TS 5.0 `extends` may be an **array**, so each level multiplies. A single
+  self-referencing file — `extends: ["./tsconfig.json", ×4]` — is 4¹⁰
+  `readFileSync` + `JSON.parse` calls, and a diamond or a cycle never dedupes.
+
+  Because it is a synchronous loop the process never reaches a signal handler, so
+  `SIGTERM` is ignored and only `SIGKILL` stops it — which is what made it look
+  like an unkillable runaway rather than a slow build. Attribution was confirmed by
+  stack-sampling a hung run: `v8::internal::JsonParser` and
+  `node::fs::ReadFileUtf8` dominate, and TypeScript uses its own scanner rather
+  than `JSON.parse`, so the frames are agentmap's own.
+
+  Each config is now read at most once per top-level call, with the in-flight
+  `null` doubling as the cycle guard. `_memo` defaults to a fresh `Map` per
+  top-level call, so every acyclic, non-duplicated config — i.e. every real repo —
+  behaves byte-identically. Isolated repro: **25s-then-SIGKILL → 0.3s**.
+
+  Known limit, upstream and out of scope: an **acyclic** deep chain (6 wide × 9
+  levels of distinct files) still hangs, because TypeScript itself is exponential
+  there. A pure ts-morph probe with no agentmap involved goes 0.4s at `fanout=2`,
+  13.1s at `fanout=4`, SIGKILL at `fanout=6`.
 - **The post-commit hook's timeout killed the wrapper, not the process it
   wrapped.** 0.18.0 put the backgrounded rebuild under a single-instance lock and
   a 120s watchdog, but the watchdog signalled only the pid it backgrounded. When
