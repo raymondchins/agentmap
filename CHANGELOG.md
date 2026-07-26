@@ -3,6 +3,26 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **`--affected <path>`: which tests cover this file.** Walks the transitive
+  reverse-dependency closure and keeps the test files, reporting hop distance so a
+  long list stays triageable. The more valuable answer is the empty one — before a
+  risky edit, "nothing covers this" is exactly what you want to know, so it is
+  stated in words rather than printed as an empty list that reads like a failed
+  lookup. A bare filename resolves when unambiguous and refuses to guess when not.
+
+  Test detection is deliberately narrow: `__tests__`/`tests?` as a bare path
+  SEGMENT and a `.test.`/`.spec.` infix — a substring check would count
+  `src/latest/helper.ts`, which a test pins.
+
+- **`--kind <k>` on `--find` / `--search`.** Filters by declaration kind, matched
+  loosely and case-insensitively, so `--kind function` finds `FunctionDeclaration`
+  and `--kind type` finds `TypeAliasDeclaration` — nobody should need ts-morph's
+  enum spelling to narrow a search. The active filter is echoed back so an empty
+  result is explicable rather than mysterious.
+
 ## [0.19.0] - 2026-07-26
 
 ### Fixed
