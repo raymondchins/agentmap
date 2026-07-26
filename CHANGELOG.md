@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-26
+
+### Added
+- **Language census on every build.** `languageCensus()` counts `git ls-files`
+  by extension and prints a one-line pointer on **stderr** when a single
+  unsupported language is >=30% of counted SOURCE files — docs and data are
+  deliberately excluded from the count, so a markdown-heavy TS repo doesn't
+  trip it and a repo with one build script in another language stays quiet.
+  Output is stderr specifically so `--json` stays a clean contract for the
+  agents parsing stdout; `AGENTMAP_NO_CENSUS=1` opts out. Points at the pinned
+  voting issue #43.
+
+  Replaces a gate that could never fire: the previous plan was "wait until
+  someone asks for Python," but a user whose repo agentmap can't read gets a
+  useless map and leaves without filing anything — two people forked to add a
+  language (rifanid98/agentmap-go, dstwn/agentmap-php) rather than open an
+  issue. No telemetry: counted locally, printed locally, never leaves the
+  machine.
+
 ### Fixed
 - **`--callers` / `--calls` were blind to JSX.** A JSX element is an invocation in
   every runtime — `<Foo />` compiles to `React.createElement(Foo, …)` (classic) or
@@ -40,6 +59,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `plugin.json` at all, which is how it drifted two minor versions unnoticed —
   and a publish-time gate only fires once a tag is pushed, which costs a
   delete-and-move of a published tag to recover from.
+- **Eval fixtures now pin exact commits.** The eval pinned nothing: `git clone
+  --depth 1` took whatever HEAD was that day and merely recorded the sha
+  afterwards, so published accuracy figures were not re-derivable and a
+  number moving between runs conflated "agentmap changed" with "the upstream
+  repo changed." Fixtures now pin full 40-char shas — GitHub refuses
+  fetch-by-abbreviated-sha, so the abbreviated form fails outright — fetched
+  as a single object so the cost matches the old shallow clone. `--repin`
+  re-pins deliberately and prints the new shas; a mismatched working copy now
+  fails loudly instead of silently measuring something else. `EVAL.md` states
+  it.
+- **Workspace cross-package resolution silently dropped published-entry
+  packages.** A workspace package declares its PUBLISHED entry —
+  `main: "dist/index.js"` — and `dist/` is normally gitignored, so resolution
+  landed on a path not in the repo and the cross-package edge disappeared
+  silently. Three shapes returned **zero** dependents before the fix:
+  `main: dist/index.js` -> 0, `exports: { ".": "./dist/index.js" }` -> 0, and
+  `main: dist/index.js` + `types: src/index.ts` -> 0. The third is a plain
+  correctness bug: TypeScript resolves `types`/`typings` AHEAD of `main`, and
+  agentmap read neither field, nor the `types` export condition (`condLeaf`
+  preferred `import`/`default`).
+
+  Fix: `types`/`typings` and the `types` condition now come first, matching
+  TypeScript's own preference; then a `./src/index` last resort, after every
+  declared entry, for packages whose only declared entry is unbuilt. A
+  declared entry that resolves ALWAYS outranks the fallback (asserted). A
+  bare import of an undeclared package still fabricates nothing. agentmap's
+  own map is byte-identical. 7 tests in
+  `test/workspace-entry-resolution.test.mjs`.
 
 ## [0.16.1] - 2026-07-26
 

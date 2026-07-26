@@ -4,10 +4,13 @@
 
 | Version  | Supported |
 |----------|-----------|
-| 0.14.x   | Yes       |
-| < 0.14   | No        |
+| 0.17.x   | Yes       |
+| < 0.17   | No        |
 
-Only the latest `0.14.x` release receives security fixes. Upgrade before reporting.
+Only the latest `0.17.x` release receives security fixes. Upgrade before reporting.
+
+(Kept in lockstep with `package.json` by `test/version-lockstep.test.mjs` — this table
+sat at `0.14.x` for three minor versions because nothing checked it.)
 
 ---
 

@@ -157,7 +157,7 @@ retrieval accuracy against live ground truth. That compiler-grade precision on T
 
 The self-refreshing side — a post-commit rebuild plus a `PreToolUse` hook that steers the agent
 to the map before it serial-greps — is genuinely useful, but it isn't unique: **CodeGraph**
-([colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), ~57k★) ships a native
+([colbymchenry/codegraph](https://github.com/colbymchenry/codegraph), ~62k★ (2026-07-26)) ships a native
 OS-event file watcher (FSEvents/inotify) with debounced auto-sync and an installer that
 auto-configures eight agent CLIs. agentmap's honest edge over the multi-language graph tools is
 narrower and sharper: **TS/JS resolution the others approximate, with a published accuracy eval.**
@@ -553,6 +553,29 @@ callers of getMessageByErrorCode  [lib/errors.ts]: 3 call sites
   components/chat/message.tsx:57 → PureMessage
 ```
 
+**JSX counts as a call site.** `<Foo />` compiles to `React.createElement(Foo, …)` (classic
+runtime) or `jsx(Foo, …)` (automatic runtime) — either way it's an invocation, so a
+component's callers include everywhere it's rendered, not just plain `foo()` calls.
+`<Foo.Bar />` resolves to `Bar`, not the `Foo` namespace; `<Foo>...</Foo>` counts once (the
+closing tag isn't a second call site); an intrinsic tag (`<div>`) resolves to nothing
+in-project and produces no edge.
+
+```
+$ node agentmap.mjs --callers Button
+callers of Button  [components/ui/button.tsx]: 25 call sites
+  components/ai-elements/message.tsx:93 → MessageAction
+  components/ai-elements/message.tsx:263 → MessageBranchPrevious
+  components/ui/sidebar.tsx:249 → SidebarTrigger
+  components/ui/alert-dialog.tsx:158 → AlertDialogAction
+  components/ui/dialog.tsx:72 → DialogContent
+  …
+```
+
+Before 0.17.0, JSX wasn't a recognized call shape at all, so that same query returned
+**0 call sites** — a plain `rg '<Button'` beat the tool outright. Captured on
+[vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) at `c2f8235`; reproduce it by
+running the query against that commit.
+
 A deliberate **deep query**: it lazily spins up the TS type-checker (a few seconds on a large
 repo) *only* when invoked — the map build and every other query never pay that cost, and
 nothing is persisted. Accurate on statically-resolvable calls; dynamic dispatch, reflection,
@@ -576,8 +599,31 @@ extractFacts calls  [agentmap.mjs]: 15 in-project targets
   …
 ```
 
+**JSX counts as an outgoing call too**, for the mirror-image reason: a component whose body
+is nothing but `return <Container><Sidebar /></Container>` has no `CallExpression` in it, so
+before this fix it reported **zero** outgoing calls even though it clearly depends on both.
+Each `<Foo />` / `<Foo>...</Foo>` in the body now resolves to its target declaration the same
+way a plain call does — the printed `(kind)` is the target's own declaration kind
+(`FunctionDeclaration`, etc.), not "JSX", since resolution is unchanged, only call-site
+detection is:
+
+```
+$ node agentmap.mjs --calls AppSidebar
+AppSidebar calls  [components/chat/app-sidebar.tsx]: 35 in-project targets
+  components/ui/tooltip.tsx:21 → Tooltip (FunctionDeclaration)
+  components/ui/tooltip.tsx:33 → TooltipContent (FunctionDeclaration)
+  components/ui/sidebar.tsx:144 → Sidebar (FunctionDeclaration)
+  components/ui/sidebar.tsx:379 → SidebarContent (FunctionDeclaration)
+  …
+```
+
+Same repo and commit: this returned **6** targets before 0.17.0 — only the plain hook and
+helper calls — and 35 after, because the 29 components it renders now count too.
+
 Same lazy, out-of-band model as `--callers` (builds a Project only on the query, nothing
-persisted). Also the `calls` MCP tool.
+persisted). Also the `calls` MCP tool. JSX closes a real gap here — it doesn't change what's
+still out of reach: the `node_modules`/dynamic-dispatch/computed-member/higher-order limits
+above still apply.
 
 **Going transitive — `--depth N`.** Both `--callers` and `--calls` accept `--depth N`
 (default 1, max 5) for an N-hop closure: `--callers foo --depth 3` is the transitive

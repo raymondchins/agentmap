@@ -8,7 +8,7 @@
 > **How to use:** work the batches top-to-bottom (they're ordered by
 > effort-vs-impact and dependency). Batch 2 is the structural enabler for 3 and
 > 5 — do it before them. Within a batch, land one commit per logical fix with a
-> regression test, and keep `npm test` green (**362 tests** as of 2026-07-26).
+> regression test, and keep `npm test` green (**396 tests** as of 2026-07-26).
 >
 > **[Part II](#part-ii--make-it-useful-for-the-majority-2026-07-26) (2026-07-26)**
 > is a second audit pass answering "make this useful for the majority of people —
@@ -34,7 +34,8 @@
 deliberately disagreed, and the reconciliation is:
 
 - **Competitive report:** multi-language via tree-sitter is the kill-zone of
-  **CodeGraph** (launched Jan 2026, ~57k stars, 20+ languages, 2s auto-sync,
+  **CodeGraph** (launched Jan 2026, ~57k stars at the time — 62,450 and 35 languages
+  as of 2026-07-26, see Part II §1 — 2s auto-sync,
   auto-configures 8 agent CLIs). Entering it = being the 4th-best polyglot. What
   CodeGraph/Serena *can't* match is agentmap's compiler-grade ts-morph accuracy
   (tree-sitter rivals are demonstrably noisy on call graphs), personalized
@@ -482,8 +483,8 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   with source URLs, completeness critique, contradictions) — generated
   2026-07-03. Ask Claude to regenerate from the workflow run, or see the session
   where this roadmap was created.
-- **Key numbers (refreshed 2026-07-26):** single-file CLI (`agentmap.mjs`, **3,470
-  lines**), one runtime dep (`ts-morph`), **Node ≥20**, **362 tests** green across
+- **Key numbers (refreshed 2026-07-26):** single-file CLI (`agentmap.mjs`, **3,669
+  lines**), one runtime dep (`ts-morph`), **Node ≥20**, **396 tests** green across
   92 files. *(Previously recorded here as ~1831 lines / Node ≥18 / 165 tests —
   stale on all three.)*
 - **Competitive north star:** ⚠️ the old note read "CodeGraph (multi-language, 57k
@@ -1163,7 +1164,7 @@ commands + 8 maintenance commands + 11 MCP tools (`agentmap.mjs:2514–2520`,
 | `--hubs`, `--map`, `--symbols` / `hubs`, `map`, `symbols` | full | **full at tier** | `pagerank` `:469`, `rankSymbols` `:1429`, `identMul` `:514` are language-neutral; quality == resolver quality |
 | `--find` / `find` | full | **partial** | TS exports come from `getExportedDeclarations()` `:1164`, which follows barrels *through the checker*. Python's `__all__` is readable by tree-sitter; a transitive re-export chain is not |
 | `--any` / `any` | full | **partial + degraded routing** | content rung is `git grep` `:191` (language-agnostic), but the router short-circuits at the first hit (`:3287–3302`), so a thin symbol index returns a thin `[lexical]` answer and never reaches the rung that would have answered |
-| `--callers` / `callers` | ⚠️ **already lossy on JSX** (verified) | **NONE — hard refuse** | `:3004–3262` is 259 lines of TS language service (`findReferencesAsNodes` `:3199`/`:3235`) |
+| `--callers` / `callers` | full (~~lossy on JSX~~ — RESOLVED in 3748c6b) | **NONE — hard refuse** | `:3004–3262` is 259 lines of TS language service (`findReferencesAsNodes` `:3199`/`:3235`) |
 | `--calls` / `calls` | full | **NONE — hard refuse** | `getDefinitionNodes` → `getDefinitionAtPosition`; ~48% of call sites are `PropertyAccessExpression` receivers needing type inference (measured over agentmap's own JS — ⚠️ recon-measured, not re-run here) |
 | `--features`, `--feature` / `features`, `feature` | Next.js App Router only | **NONE — explicit unsupported** | `featureOf()` `:435–443` matches `app/` route segments only. Today this returns `{}` with exit 0 on every non-Next repo — reads as "no features", not "undefined for your stack" |
 | `--include-dts` | TS only | **n/a** | `.d.ts` is a TypeScript file class; the generalization is "declaration-only artifacts" and does not exist |
@@ -1235,7 +1236,7 @@ budget anywhere in it.
     publish.
 12. **The maintainer's own routing stops using agentmap for structure questions
     across his 8 installed repos.** His private notes already carry carve-outs
-    (`--callers` broken on JSX; `--any` unreliable for content because it
+    (`--callers` broken on JSX — since RESOLVED in 3748c6b; `--any` unreliable for content because it
     short-circuits at the lexical stage). If the "do not use X" exceptions
     outnumber the "use X" routes, the tool is losing its own maintainer, and no
     roadmap survives that.
@@ -1254,7 +1255,10 @@ budget anywhere in it.
   0.10.0 onward carry the guard. `mcp.mjs` has carried it since 0.2.0 (0.1.0
   shipped as `repomap.mjs`, no `mcp.mjs`). **The in-code comment now in the
   working tree says "v0.12.1" — correct it before the deprecate list is written.**
-- **`--callers` misses JSX.** 4-file TSX fixture: `--callers Container` → 1 caller
+- **`--callers` misses JSX.** ⚠️ **RESOLVED the same day, in 3748c6b** — kept here
+  because it is what the measurement found at the time. Post-fix, the same query on
+  vercel/ai-chatbot@c2f8235 returns 25 call sites where it returned 0.
+  Original finding: 4-file TSX fixture: `--callers Container` → 1 caller
   (`src/Direct.ts`); `rg '<Container'` → 2 files (`Page.tsx`, `Other.tsx`) that
   agentmap does not report.
 - **The nudge hook is itself an instance of the bug** — it fired during this
