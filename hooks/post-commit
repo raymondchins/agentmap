@@ -79,9 +79,33 @@ case "$RUNNER" in
 esac
 
 # Rebuild detached + silenced so the commit returns instantly.
+#
+# Single-instance lock + hard timeout. The rebuild is backgrounded and outlives
+# the commit shell, so a run that hangs is reparented to init and keeps burning
+# CPU with nothing left to reap it — observed in the wild as 21 minutes of CPU
+# in 21 minutes of wall time (a full core) before it was killed by hand, with a
+# fresh orphan stacking on every subsequent commit.
+#
+# mkdir is atomic, so it doubles as the lock: if a previous rebuild is still
+# running, this commit skips instead of piling on. Override the cap with
+# AGENTMAP_HOOK_TIMEOUT (seconds); a normal rebuild finishes in 1-3s.
+LOCK="$GITDIR/agentmap.lock"
+# Clear a lock orphaned by a killed run (older than 10 minutes) so a single bad
+# rebuild cannot disable auto-refresh permanently.
+if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -10 2>/dev/null)" ]; then
+  rmdir "$LOCK" 2>/dev/null
+fi
+mkdir "$LOCK" 2>/dev/null || exit 0
+
 (
-  cd "$ROOT" || exit 0
-  $RUNNER >/dev/null 2>&1
+  cd "$ROOT" || { rmdir "$LOCK" 2>/dev/null; exit 0; }
+  $RUNNER >/dev/null 2>&1 &
+  _am_pid=$!
+  ( sleep "${AGENTMAP_HOOK_TIMEOUT:-120}"; kill -9 "$_am_pid" 2>/dev/null ) >/dev/null 2>&1 &
+  _am_wd=$!
+  wait "$_am_pid" 2>/dev/null
+  kill "$_am_wd" 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null
 ) &
 
 exit 0
