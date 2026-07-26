@@ -206,6 +206,72 @@ test("--doctor: dirty working tree marks cache stale", () => {
   cleanup(dir);
 });
 
+// Map HEALTH, not just freshness. build() has always persisted fileCount /
+// edgeCoverage / degraded and warned on stderr at build time, but collectMapStatus()
+// read none of them — so a map of ZERO files reported "Map cache: ok" forever after
+// the one warning scrolled past. Fresh-and-empty is worse than stale: stale tells
+// you to rebuild, "ok" tells you nothing is wrong.
+test("--doctor: a 0-file map is invalid, not ok", () => {
+  const dir = makeRepo({ "README.md": "# no sources\n" });
+  gitInit(dir, { commit: true });
+  const sha = git(dir, "rev-parse", "--short", "HEAD").trim();
+  mkdirSync(join(dir, ".claude", "agentmap"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "agentmap", "map.json"), JSON.stringify({
+    schema: SCHEMA, generatedSha: sha, fileCount: 0, edgeCoverage: null, degraded: false, files: {},
+  }));
+  const r = run(dir, "--doctor");
+  assert.equal(r.status, 0, r.stderr); // documented contract: --doctor always exits 0
+  assert.doesNotMatch(r.stdout, /Map cache: ok/, "a map with zero source files must not report ok");
+  assert.match(r.stdout, /Map cache: invalid/);
+  assert.match(r.stdout, /0 source files/);
+  cleanup(dir);
+});
+
+test("--doctor: a degraded map (imports unresolved) is surfaced", () => {
+  const dir = makeRepo({ "src/x.ts": "export const x = 1;\n" });
+  gitInit(dir, { commit: true });
+  const sha = git(dir, "rev-parse", "--short", "HEAD").trim();
+  mkdirSync(join(dir, ".claude", "agentmap"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "agentmap", "map.json"), JSON.stringify({
+    schema: SCHEMA, generatedSha: sha, fileCount: 154, edgeCoverage: 0.02, degraded: true, files: {},
+  }));
+  const r = run(dir, "--doctor");
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /Map cache: ok/);
+  assert.match(r.stdout, /Map cache: degraded/);
+  assert.match(r.stdout, /2\.0%/, "should report the measured edge coverage");
+  cleanup(dir);
+});
+
+test("--doctor --json: overall reflects map health, not just freshness", () => {
+  const dir = makeRepo({ "README.md": "# no sources\n" });
+  gitInit(dir, { commit: true });
+  const sha = git(dir, "rev-parse", "--short", "HEAD").trim();
+  mkdirSync(join(dir, ".claude", "agentmap"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "agentmap", "map.json"), JSON.stringify({
+    schema: SCHEMA, generatedSha: sha, fileCount: 0, degraded: false, files: {},
+  }));
+  const report = JSON.parse(run(dir, "--doctor", "--json").stdout);
+  assert.equal(report.checks.map[0].status, "invalid");
+  assert.notEqual(report.overall, "ok", "an unusable map must not roll up to overall: ok");
+  cleanup(dir);
+});
+
+test("--doctor: pre-schema-5 caches without health fields still report ok", () => {
+  // Backward compat: `undefined` must read as "unknown", never as 0 / degraded —
+  // otherwise every older cache suddenly reports invalid.
+  const dir = makeRepo({ "src/x.ts": "export const x = 1;\n" });
+  gitInit(dir, { commit: true });
+  const sha = git(dir, "rev-parse", "--short", "HEAD").trim();
+  mkdirSync(join(dir, ".claude", "agentmap"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "agentmap", "map.json"), JSON.stringify({
+    schema: SCHEMA, generatedSha: sha, files: {}, // no fileCount / degraded
+  }));
+  const r = run(dir, "--doctor");
+  assert.match(r.stdout, /Map cache: ok/);
+  cleanup(dir);
+});
+
 test("--doctor --json: emits valid structured report", () => {
   const dir = makeRepo({ "src/x.ts": "export const x = 1;\n" });
   gitInit(dir, { commit: true });

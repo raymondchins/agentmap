@@ -59,6 +59,112 @@ jobs:
       - name: Validate pack manifest
         run: npm pack --dry-run
 
+  # The shipped command, exercised the way users actually invoke it.
+  #
+  # This job exists because 356 tests and a green CI said nothing about the bug
+  # that broke 12 consecutive releases (0.10.0-0.16.0): npm links the bin as
+  # node_modules/.bin/agentmap -> ../@raymondchins/agentmap/agentmap.mjs, so
+  # argv[1] is the SYMLINK and import.meta.url is the TARGET. The entry guard
+  # compared them as strings, read "imported", skipped main(), and the CLI exited
+  # 0 having printed nothing. Every test invoked `node <abs path>/agentmap.mjs`,
+  # the one form that happened to work, and the job above never touched the bin —
+  # `npm pack --dry-run` executes nothing at all.
+  #
+  # So: pack, install from the tarball, and drive the real binary. Exit status is
+  # NOT sufficient evidence here — exit 0 with empty stdout was the bug's exact
+  # signature, so every step below asserts on OUTPUT.
+  install-smoke:
+    name: install smoke (node ${{ matrix.node-version }})
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack the tarball
+        run: echo "TARBALL=$PWD/$(npm pack --silent)" >> "$GITHUB_ENV"
+
+      # A scratch consumer project, so the bin resolves through a real
+      # node_modules/.bin symlink rather than the checkout.
+      - name: Install into a scratch project
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/consumer/src && cd /tmp/consumer
+          git init -q .
+          git config user.email ci@example.com && git config user.name ci
+          printf 'export const a = 1;\n' > src/a.ts
+          printf "import { a } from './a';\nexport const b = a + 1;\n" > src/b.ts
+          npm init -y >/dev/null
+          npm i -D "$TARBALL" >/dev/null
+          git add -A && git commit -qm init
+
+      - name: bin symlink prints a version
+        run: |
+          set -euo pipefail
+          cd /tmp/consumer
+          OUT="$(./node_modules/.bin/agentmap --version)"
+          echo "got: [$OUT]"
+          test -n "$OUT" || { echo "::error::bin symlink printed NOTHING (entry guard skipped main())"; exit 1; }
+
+      - name: npx runs the CLI
+        run: |
+          set -euo pipefail
+          cd /tmp/consumer
+          OUT="$(npx --no-install agentmap --hubs)"
+          echo "$OUT"
+          echo "$OUT" | grep -qi hubs || { echo "::error::npx produced no map"; exit 1; }
+
+      - name: global install exposes a working binary
+        run: |
+          set -euo pipefail
+          npm i -g "$TARBALL" >/dev/null
+          cd /tmp/consumer
+          OUT="$(agentmap --any a)"
+          echo "$OUT"
+          test -n "$OUT" || { echo "::error::globally installed agentmap printed nothing"; exit 1; }
+
+      - name: --mcp answers the MCP Registry launch contract
+        run: |
+          set -euo pipefail
+          cd /tmp/consumer
+          REQ='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          OUT="$(printf '%s\n' "$REQ" | npx --no-install agentmap --mcp)"
+          echo "$OUT"
+          echo "$OUT" | grep -q '"serverInfo"' || { echo "::error::--mcp returned no JSON-RPC response (server.json tells registry clients to run exactly this)"; exit 1; }
+
+      # The gate the obvious test plan misses, and the one that would have caught
+      # the dead auto-refresh: --install-hooks reporting success is worthless
+      # unless a real commit measurably rewrites the map.
+      - name: --install-hooks survives a real commit
+        run: |
+          set -euo pipefail
+          cd /tmp/consumer
+          agentmap --install-hooks
+          test -f .git/hooks/post-commit || { echo "::error::--install-hooks wrote no post-commit hook"; exit 1; }
+          agentmap --hubs >/dev/null
+          BEFORE="$(node -p "require('./.claude/agentmap/map.json').generatedSha")"
+          printf 'export const c = 3;\n' > src/c.ts
+          git add -A && git commit -qm "second"
+          for _ in $(seq 1 30); do
+            AFTER="$(node -p "require('./.claude/agentmap/map.json').generatedSha" 2>/dev/null || echo "$BEFORE")"
+            [ "$AFTER" != "$BEFORE" ] && break
+            sleep 1
+          done
+          echo "generatedSha $BEFORE -> $AFTER"
+          test "$AFTER" != "$BEFORE" || { echo "::error::post-commit hook did not refresh the map — auto-refresh is dead"; exit 1; }
+
   # Audit for high-severity vulnerabilities in the dependency tree. Deliberately
   # its own job rather than a step in the matrix above: it depends only on the
   # lockfile, so running it per Node version was three identical checks, and a
