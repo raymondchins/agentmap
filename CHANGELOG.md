@@ -5,6 +5,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`new Foo()` was not a call site.** `invocationOf()` matched only
+  `CallExpression`, never `NewExpression`, so a class reachable ONLY via `new`
+  reported **zero callers** — silently, exit 1, indistinguishable from genuinely
+  unused. Two lines, but the blast radius was the whole class of
+  instantiated-not-invoked symbols, and it hit the transitive `--depth >= 2` path
+  too since that shares the predicate. Found by diffing the live walk against the
+  new call-edge sweep, which had swept `NewExpression` all along.
+
+- **A symbol exported under a different name than its declaration was invisible to
+  the cached path.** `export { impl as Widget }` binds the export to `Widget` while
+  the node stays named `impl`; the sidecar keyed edges on the declaration's own
+  name, but queries resolve by the EXPORTED name, so `--callers Widget` returned 0
+  from cache and 1 live. Edges now carry every name the defining file exports a
+  declaration as, read from the same `getExportedDeclarations()` the query resolves
+  through.
+
+- **A reassigned local alias fabricated a call.** For `const wrapped = helper;
+  wrapped()`, go-to-definition walks through the trivial reassignment and returns
+  BOTH the local binding and `helper`. The sweep emitted an edge for each, crediting
+  `helper` with a call site that never names it — the live reference walk reports
+  none. Resolution now stops at a local value binding when one is among the targets.
+
+### Known
+- A barrel that BOTH `export * from "./a"` and locally redefines the same name is
+  the one shape where the cached and live paths still disagree — and the cache is
+  the correct one. ES semantics say the local binding shadows the star-export, so
+  `a.ts`'s copy is unreachable; the sweep agrees (0 callers) while
+  `findReferencesAsNodes()` over-reports through the star chain (1). Left as-is
+  rather than teaching the cache to reproduce a wrong answer.
+
 ### Added
 - **`--build-edges`: a precomputed call-edge index, so `--callers` stops paying the
   type-checker on every query.** `--callers` was ~1500ms and the reason was not the

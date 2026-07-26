@@ -3480,9 +3480,13 @@ function mcpResetCache() { _mcpMapCache = null; }
 // module-scope helper against the lazily-loaded ts-morph (same shape as
 // rscBoundary at :450).
 function invocationOf(id, SyntaxKind) {
-  let call = id.getParentIfKind(SyntaxKind.CallExpression);
+  // `new Foo()` is an invocation exactly as much as `foo()` is. Only CallExpression
+  // was matched here, so a class reachable ONLY via `new` reported ZERO callers —
+  // silently, with exit 1, indistinguishable from genuinely-unused. It bit the
+  // transitive --depth path too, since that shares this predicate.
+  let call = id.getParentIfKind(SyntaxKind.CallExpression) ?? id.getParentIfKind(SyntaxKind.NewExpression);
   const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
-  if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression);
+  if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression) ?? pa.getParentIfKind(SyntaxKind.NewExpression);
   if (call && call.getExpression() === (pa ?? id)) return call;
 
   // `<Foo.Bar />` puts the identifier under a member expression; the element's
@@ -3579,6 +3583,37 @@ function buildCallEdges() {
   const cwd = process.cwd().replace(/\\/g, "/");
   const rel = (p) => { const abs = p.replace(/\\/g, "/"); return (vueMap[abs] || abs).replace(cwd + "/", ""); };
   const inProject = (k) => Object.prototype.hasOwnProperty.call(data.files, k);
+  // A declaration's own name is NOT always the name callers query by:
+  // `export { impl as Widget }` binds the export to `Widget` while the node is
+  // still named `impl`, and Phase A resolves the query through
+  // getExportedDeclarations() — i.e. by the EXPORTED name. Keying edges on
+  // d.getName() alone therefore made such a symbol look uncalled. Build the
+  // inverse (declaration -> every name its own file exports it as) from the same
+  // API Phase A trusts, memoised per file since the sweep revisits callee files
+  // constantly.
+  const aliasCache = new Map();
+  const exportedNamesOf = (d, tsf) => {
+    const key = tsf.getFilePath();
+    let byNode = aliasCache.get(key);
+    if (!byNode) {
+      byNode = new Map();
+      try {
+        for (const [name, decls] of tsf.getExportedDeclarations()) {
+          for (const dd of decls) {
+            const at = `${dd.getStartLineNumber?.() ?? 0}:${dd.getKindName?.() ?? ""}`;
+            if (!byNode.has(at)) byNode.set(at, new Set());
+            byNode.get(at).add(name);
+          }
+        }
+      } catch { /* unreadable exports — fall back to the declaration's own name */ }
+      aliasCache.set(key, byNode);
+    }
+    const names = new Set();
+    const own = d.getName?.();
+    if (own) names.add(own);
+    for (const n of byNode.get(`${d.getStartLineNumber?.() ?? 0}:${d.getKindName?.() ?? ""}`) ?? []) names.add(n);
+    return names;
+  };
   const edges = [];
   let sites = 0;
   for (const sf of project.getSourceFiles()) {
@@ -3605,15 +3640,28 @@ function buildCallEdges() {
       if (!idNode) continue; // computed / parenthesized / dynamic — the same honest limit --calls has
       let targets;
       try { targets = idNode.getDefinitionNodes?.() || []; } catch { continue; }
+      // `const wrapped = helper; wrapped()` — go-to-definition helpfully walks
+      // THROUGH the trivial reassignment and returns BOTH the local `wrapped`
+      // binding and `helper` itself. Emitting every target made `helper` look
+      // called from a site that never names it, which the live reference walk
+      // rightly does not report (the reference there is `wrapped`, not `helper`).
+      // A local value binding is where resolution stops: keep only it.
+      const rebind = targets.find((d) => {
+        const k = d.getKindName?.();
+        return (k === "VariableDeclaration" || k === "BindingElement" || k === "Parameter")
+          && d.getSourceFile().getFilePath() === sf.getFilePath();
+      });
+      const resolved = rebind ? [rebind] : targets;
       const callerLine = idNode.getStartLineNumber();
       const callerName = enclosingName(idNode, SyntaxKind);
-      for (const d of targets) {
+      for (const d of resolved) {
         const tsf = d.getSourceFile();
         if (tsf.isInNodeModules() || tsf.isDeclarationFile()) continue;
         const calleeFile = rel(tsf.getFilePath().replace(/\\/g, "/"));
         if (!inProject(calleeFile)) continue;
-        const calleeName = d.getName?.() ?? idNode.getText();
-        edges.push({ callerFile, callerLine, callerName, calleeFile, calleeName, kind: isJsx ? "jsx" : "call" });
+        for (const calleeName of exportedNamesOf(d, tsf)) {
+          edges.push({ callerFile, callerLine, callerName, calleeFile, calleeName, kind: isJsx ? "jsx" : "call" });
+        }
       }
     }
   }

@@ -180,6 +180,69 @@ test("no sidecar is a normal state — --callers works untouched", () => {
   } finally { cleanup(dir); }
 });
 
+// ---------------------------------------------------------------------------
+// Regressions found by adversarially diffing the two paths against each other.
+// Each of these produced FAST != LIVE (or a wrong answer in BOTH) before the fix.
+// ---------------------------------------------------------------------------
+
+// `new Foo()` is an invocation. invocationOf() only matched CallExpression, so a
+// class reachable ONLY via `new` reported ZERO callers — a silent wrong answer,
+// exit 1, indistinguishable from genuinely unused. Independent of the sidecar:
+// the live walk had this bug on its own, and so did --depth >= 2.
+test("new Foo() is a call site (live walk, no sidecar)", () => {
+  const dir = makeRepo({
+    "src/widget.ts": "export class Foo { method() { return 1; } }\n",
+    "src/consumer.ts":
+      'import { Foo } from "./widget";\n' +
+      "export function App() { const o = new Foo(); return o; }\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    assert.ok(!existsSync(join(dir, EDGES)), "this asserts the LIVE path");
+    const out = JSON.parse(run(dir, "--callers", "Foo", "--in", "src/widget.ts", "--json").stdout);
+    assert.equal(out.total, 1, `new Foo() must count as a caller, got ${JSON.stringify(out.callers)}`);
+    assert.equal(out.callers[0].caller, "App");
+  } finally { cleanup(dir); }
+});
+
+// `export { impl as Widget }` binds the export to `Widget` while the declaration
+// node is still named `impl`. Phase A resolves the query by EXPORTED name, so
+// keying sidecar edges on the node's own name made the symbol look uncalled.
+test("a symbol exported under a different name than its declaration", () => {
+  const dir = makeRepo({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { jsx: "react-jsx", moduleResolution: "bundler", module: "esnext", target: "esnext", baseUrl: "." } }),
+    "src/widget.ts": "function impl() { return 1; }\nexport { impl as Widget };\n",
+    "src/consumer.ts": 'import { Widget } from "./widget";\nexport function App() { return Widget(); }\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    const [cached, live] = bothPaths(dir, "--callers", "Widget", "--in", "src/widget.ts", "--json");
+    assert.equal(cached, live);
+    assert.equal(JSON.parse(cached).total, 1, "the aliased export has exactly one caller");
+  } finally { cleanup(dir); }
+});
+
+// go-to-definition walks THROUGH `const wrapped = helper` and returns both the
+// local binding and `helper`. Emitting every target credited `helper` with a call
+// site that never names it — which the live reference walk does not report.
+test("a reassigned local alias does not fabricate a call to the original", () => {
+  const dir = makeRepo({
+    "src/lib.ts": "export function helper() { return 1; }\n",
+    "src/consumer.ts":
+      'import { helper } from "./lib";\n' +
+      "const wrapped = helper;\n" +
+      "export function App() { return wrapped(); }\n",
+  });
+  try {
+    gitInit(dir, { commit: true });
+    run(dir, "--build-edges");
+    const [cached, live] = bothPaths(dir, "--callers", "helper", "--in", "src/lib.ts", "--json");
+    assert.equal(cached, live);
+    assert.equal(JSON.parse(cached).total, 0, "`wrapped()` names wrapped, not helper");
+  } finally { cleanup(dir); }
+});
+
 test("LAZY: normal commands neither read nor write the sidecar", () => {
   const dir = makeRepo(repo());
   try {
