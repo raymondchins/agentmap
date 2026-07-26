@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-26
+
 ### Fixed
 - **The CLI never ran through its own `bin`.** npm links
   `node_modules/.bin/agentmap -> ../@raymondchins/agentmap/agentmap.mjs`, so
