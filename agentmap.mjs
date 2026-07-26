@@ -1417,7 +1417,13 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
     if (nodes.length === 0) {
       process.stderr.write("⚠ 0 source files found (repo not git-tracked? non-standard dir layout?)\n");
     } else if (degraded) {
-      process.stderr.write(`⚠ ${nodes.length} files, ${fileEdges.length} import edge${fileEdges.length === 1 ? "" : "s"} resolved — most imports unresolved. Aliases from vite.config/webpack aren't read yet; mirror them into tsconfig paths, or file an issue.\n`);
+      // Do NOT reinstate the old "aliases from vite.config/webpack aren't read
+      // yet" line: VITE_CONFIG_RE (:579) probes vite/vitest/webpack configs and
+      // readBundlerAliasEntries() (:587) AST-parses their resolve.alias, covered
+      // by test/vite-alias.test.mjs. That message sent users to mirror aliases
+      // into tsconfig paths — work the tool had already done — and hid the real
+      // causes below.
+      process.stderr.write(`⚠ ${nodes.length} files, ${fileEdges.length} import edge${fileEdges.length === 1 ? "" : "s"} resolved — most imports unresolved. Known gaps: tsconfig \`references\` (solution-style configs), and computed aliases (function/regex/URL idioms) in bundler configs, which are skipped. Run \`agentmap --doctor\`, or file an issue with your config layout.\n`);
     }
   }
   return out;
@@ -2233,6 +2239,40 @@ function collectMapStatus() {
       suggestion: "agentmap",
     }];
   }
+  // Health BEFORE staleness. build() already persists fileCount/edgeCoverage/
+  // degraded (:1386-1387) and warns on stderr at :1417-:1421, but that warning
+  // scrolls past once at build time and --doctor never read the fields — so a
+  // map of ZERO files reported "Map cache: ok" with exit 0 forever after. A map
+  // that is fresh and empty is worse than a stale one: staleness suggests
+  // rebuilding, "ok" suggests nothing is wrong. Checked first so the empty case
+  // can't be masked by a matching generatedSha.
+  //
+  // Guarded on typeof, not truthiness: caches written before schema 5 lack these
+  // fields, and `undefined` must read as "unknown", never as 0/degraded.
+  if (typeof cache.fileCount === "number" && cache.fileCount === 0) {
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "invalid",
+      detail: "map contains 0 source files (repo not git-tracked? non-standard dir layout? everything excluded?)",
+      path: selectedPath,
+      suggestion: "agentmap",
+    }];
+  }
+  if (cache.degraded === true) {
+    const cov = typeof cache.edgeCoverage === "number"
+      ? ` — only ${(cache.edgeCoverage * 100).toFixed(1)}% of local imports resolved`
+      : "";
+    return [{
+      name: "map-cache",
+      label: "Map cache",
+      status: "degraded",
+      detail: `map built but most imports did not resolve${cov}; --relates and --hubs will be unreliable`,
+      path: selectedPath,
+      suggestion: "agentmap",
+    }];
+  }
+
   const sha = currentSha();
   const dirty = dirtyCount();
   const reasons = [];
@@ -2283,8 +2323,11 @@ async function collectDoctorReport() {
 
   const all = [...hooks, ...skills, ...mcp, ...map];
   const suggestions = [...new Set(all.map((c) => c.suggestion).filter(Boolean))];
+  // "degraded" belongs here: a map that built but resolved almost no imports is
+  // exactly the state --doctor exists to surface. Omitting it would reproduce the
+  // bug this list is meant to catch — a real problem reported with exit 0.
   const needsAttention = all.some((c) =>
-    ["missing", "stale", "invalid"].includes(c.status)
+    ["missing", "stale", "invalid", "degraded"].includes(c.status)
   );
   const overall = !insideGit ? "degraded" : (needsAttention ? "needs attention" : "ok");
 
