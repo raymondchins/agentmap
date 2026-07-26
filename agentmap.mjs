@@ -627,7 +627,19 @@ function joinPosixAbs(a, b) {
 // Follows `extends` recursively (depth-capped) so a package tsconfig that only
 // `extends` a shared base (Turborepo tsconfig.base.json holding all `paths`)
 // still contributes its inherited baseUrl/paths. Child overrides parent.
-function readTsconfigAliasOpts(cfgPath, _depth = 0) {
+function readTsconfigAliasOpts(cfgPath, _depth = 0, _memo = new Map()) {
+  // Terminating condition for `extends`: read each config AT MOST ONCE per
+  // top-level call. Without this, `extends` fans out as branch^depth and the
+  // `_depth < 10` cap below bounds DEPTH but not WORK: since TS 5.0 `extends`
+  // may be an array, so one self-referencing file (`extends: ["./tsconfig.json"
+  // ×4]`) is 4^10 readFileSync+JSON.parse calls and spins a core indefinitely.
+  // It is a synchronous loop, so the process never reaches a signal handler —
+  // SIGTERM is ignored and only SIGKILL stops it. The in-flight `null` doubles
+  // as the cycle guard. A fresh Map per top-level call keeps every acyclic,
+  // non-duplicated config — i.e. every real repo — byte-identical.
+  const _key = cfgPath.replace(/\\/g, "/");
+  if (_memo.has(_key)) return _memo.get(_key);
+  _memo.set(_key, null);
   try {
     const raw = JSON.parse(readFileSync(cfgPath, "utf8")) || {};
     const co = raw.compilerOptions || {};
@@ -646,7 +658,7 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
         if (!existsSync(base) && existsSync(base + ".json")) base += ".json";
         else if (!/\.json$/.test(base) && existsSync(join(base, "tsconfig.json"))) base = join(base, "tsconfig.json");
         if (!existsSync(base)) continue;
-        const parent = readTsconfigAliasOpts(base, _depth + 1);
+        const parent = readTsconfigAliasOpts(base, _depth + 1, _memo);
         if (parent) inherited = { ...(inherited || {}), ...parent };
       }
     }
@@ -659,6 +671,7 @@ function readTsconfigAliasOpts(cfgPath, _depth = 0) {
     if (co.paths) self.paths = co.paths;
     const out = { ...(inherited || {}), ...self };
     if (!Object.keys(out).length) return null;
+    _memo.set(_key, out);
     return out;
   } catch { return null; }
 }
