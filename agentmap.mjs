@@ -438,30 +438,39 @@ function bm25Search(lexical, files, rawQuery, { limit = SYMBOL_MATCH_LIMIT } = {
 // without a full reparse. Skips node_modules/.git/.next. Any error ⇒ "" (caller
 // falls through to build, i.e. current behavior). Never used on the git path.
 // SOURCE_EXT_RE includes `.vue` so editing a Vue SFC invalidates the cache too.
+// The one recursive source walk. Two callers needed exactly this traversal and
+// differed only in what they do with a file, so it existed twice with the safety
+// rules restated in both — the failure mode being a fix applied to one copy. The
+// rules are load-bearing and each is here for a specific reason:
+//   • depth cap 40 — don't fully walk a pathologically deep tree;
+//   • per-directory try/catch — one permission-denied subdir must NOT abort the
+//     WHOLE walk. In sourceFingerprint() that would return "" and silently
+//     disable caching, which looks like a performance mystery, not an error;
+//   • lstatSync, NOT statSync, so a symlink reports as itself rather than its
+//     target, and symlinked entries are skipped entirely — never recursed into,
+//     never stat'd through — so a circular symlink cannot recurse until the
+//     stack overflows;
+//   • node_modules/.git/.next pruned before any stat.
+// `onFile(fullPath, name, stat)` is called for every non-directory survivor.
+function walkSources(dir, onFile, depth = 0) {
+  if (depth > 40) return;
+  let names; try { names = readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (name === "node_modules" || name === ".git" || name === ".next") continue;
+    const full = dir + "/" + name;
+    let st; try { st = lstatSync(full); } catch { continue; }
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) walkSources(full, onFile, depth + 1);
+    else onFile(full, name, st);
+  }
+}
+
 function sourceFingerprint() {
   try {
     const entries = [];
-    const walk = (dir, depth) => {
-      if (depth > 40) return; // depth cap — don't fully walk a pathologically deep tree
-      // per-directory try/catch: a single permission-denied subdir must NOT abort
-      // the WHOLE walk (that would return "" and silently disable caching) — skip
-      // the unreadable dir and keep going so the fingerprint stays usable.
-      let names; try { names = readdirSync(dir); } catch { return; }
-      for (const name of names) {
-        if (name === "node_modules" || name === ".git" || name === ".next") continue;
-        const full = dir + "/" + name;
-        let st;
-        // lstatSync (NOT statSync) so a symlink reports as a symlink instead of
-        // its target. Symlinked entries are SKIPPED entirely — never recursed
-        // into, never stat'd through — so a circular symlink can't cause infinite
-        // recursion / stack overflow.
-        try { st = lstatSync(full); } catch { continue; }
-        if (st.isSymbolicLink()) continue;
-        if (st.isDirectory()) walk(full, depth + 1);
-        else if (SOURCE_EXT_RE.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
-      }
-    };
-    walk(".", 0);
+    walkSources(".", (full, name, st) => {
+      if (SOURCE_EXT_RE.test(name)) entries.push(`${full}:${st.mtimeMs}:${st.size}`);
+    });
     entries.sort();
     return createHash("sha1").update(entries.join("\n")).digest("hex");
   } catch { return ""; }
@@ -1150,23 +1159,11 @@ function makeProject(inc = null) {
       `components/**/*.${g}`, `lib/**/*.${g}`,
       `pages/**/*.${g}`, `*.${g}`,
     ]);
-    // Non-git `.vue` fallback: walk the tree like sourceFingerprint() does.
+    // Non-git `.vue` fallback: same traversal as sourceFingerprint(), different leaf.
     try {
-      const walk = (dir, depth) => {
-        if (depth > 40) return; // depth cap, matching sourceFingerprint()
-        let names; try { names = readdirSync(dir); } catch { return; } // skip unreadable dir, don't abort the whole walk
-        for (const name of names) {
-          if (name === "node_modules" || name === ".git" || name === ".next") continue;
-          const full = dir + "/" + name;
-          // lstatSync (NOT statSync) + skip symlinks, matching sourceFingerprint():
-          // a circular symlink would otherwise recurse until the stack overflows.
-          let st; try { st = lstatSync(full); } catch { continue; }
-          if (st.isSymbolicLink()) continue;
-          if (st.isDirectory()) walk(full, depth + 1);
-          else if (name.endsWith(".vue")) vueFiles.push(full.replace(/^\.\//, ""));
-        }
-      };
-      walk(".", 0);
+      walkSources(".", (full, name) => {
+        if (name.endsWith(".vue")) vueFiles.push(full.replace(/^\.\//, ""));
+      });
     } catch { /* ignore — proceed without Vue */ }
   }
   // Build the virtual→real map and register each `<script>` block as a virtual
