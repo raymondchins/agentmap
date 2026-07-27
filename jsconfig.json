@@ -1,0 +1,29 @@
+{
+  "//": [
+    "Typecheck gate for a codebase with no .ts in it. agentmap.mjs is ~250KB of",
+    "hand-written JavaScript; `checkJs` is the only static analysis that reads it.",
+    "",
+    "strict is OFF on purpose, and that is the whole reason this file is usable.",
+    "Measured 2026-07-27: strict reports 505 errors, of which 272 are TS7006",
+    "(annotate every parameter) — a rewrite, not a gate. Non-strict reports 2, and",
+    "both were real drift: a JSDoc @type for PLATFORMS that had fallen behind the",
+    "object it describes, and a dynamic import TypeScript could not follow. The",
+    "gate earns its place by catching that class — wrong property, wrong arity,",
+    "stale annotation — not by demanding annotations.",
+    "",
+    "Tighten it when the code is ready, not by loosening what it reports."
+  ],
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["agentmap.mjs", "mcp.mjs", "skills/*.mjs", "hooks/*.mjs"]
+}

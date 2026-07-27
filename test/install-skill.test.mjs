@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeRepo, run, runErr, cleanup } from "./helpers.mjs";
+import { makeRepo, run, runErr, runWithHome, cleanup } from "./helpers.mjs";
 
 const PKG_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
@@ -83,7 +83,9 @@ test("--install-skill --platform gemini installs GEMINI.md and hooks", () => {
 
 test("--install-skill --global --platform antigravity --dry-run targets ~/.gemini/config/skills", () => {
   const dir = makeRepo({});
-  const r = run(dir, "--install-skill", "--global", "--platform", "antigravity", "--dry-run");
+  const home = makeRepo({});
+  const r = runWithHome(dir, home, "--install-skill", "--global", "--platform", "antigravity", "--dry-run");
+  assert.ok(r.stdout.includes(home), "global paths did not resolve against the fake HOME");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\.gemini[/\\]config[/\\]skills[/\\]agentmap[/\\]SKILL\.md/);
   cleanup(dir);
@@ -91,7 +93,9 @@ test("--install-skill --global --platform antigravity --dry-run targets ~/.gemin
 
 test("--install-skill --global --platform opencode --dry-run targets ~/.config/opencode/skills and AGENTS.md", () => {
   const dir = makeRepo({});
-  const r = run(dir, "--install-skill", "--global", "--platform", "opencode", "--dry-run");
+  const home = makeRepo({});
+  const r = runWithHome(dir, home, "--install-skill", "--global", "--platform", "opencode", "--dry-run");
+  assert.ok(r.stdout.includes(home), "global paths did not resolve against the fake HOME");
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /\.config[/\\]opencode[/\\]skills[/\\]agentmap[/\\]SKILL\.md/);
   assert.match(r.stdout, /\.config[/\\]opencode[/\\]AGENTS\.md/);
