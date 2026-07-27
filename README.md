@@ -133,12 +133,17 @@ follows the chain and names the file that actually declares it.
 - **The win scales with the work.** The 63% and 11% rows are the floor. A *trivial
   single-file* lookup can cost **more** than `cat` + `grep` — taxonomy's file-import task hit
   **−313%**, and it stays in the table.
-- **The 98.3% combined figure is skewed** by the whole-repo row (150 K vs 1 K). Excluding it,
-  the per-task average is ~32× rather than 58×. Both are real; the headline captures the
-  common worst case (repo dump on session start).
+- **The 98.3% headline is carried by its two biggest rows** — repo dump (150,281 → 1,127) and
+  blast radius (81,038 → 616). Drop the repo dump and it's **96.9%**; drop both and it's
+  **89.8%** here, **93.7%** pooled across all three repos, and **73.1%** on the smallest one.
+  All of those are real — they answer different questions. The headline is the common worst
+  case: an agent dumping the repo at session start.
 - **`--relates` returns the full blast radius**, so it costs *more* than a bare `grep -l` file
-  list. Complete-and-correct over short-and-wrong — but it is a trade, stated in
-  [EVAL.md](./EVAL.md).
+  list. That's why the same command reads as 99.2% *saved* in the benchmark and *more
+  expensive* in the eval: the benchmark's baseline is an agent that `cat`s all 65 dependent
+  files, the eval's is a file list nobody reads. Against the list, agentmap trades tokens for
+  precision — 100% vs 59.9%, so ~4 in 10 files on the grep list don't belong.
+  Complete-and-correct over short-and-wrong, but it is a trade → [EVAL.md](./EVAL.md).
 - **Numbers are context-token volume**, not answer quality or wall-clock.
 - **Token counts are estimates** (`chars / 4`), applied identically to both sides.
 - **TypeScript/JavaScript only** (+ Vue SFC) — see [Scope & limitations](#scope--limitations).

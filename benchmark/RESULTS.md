@@ -6,13 +6,21 @@ raw files with `cat` / `grep` / `find`. Measured across **7 agent tasks on 3 rea
 public repos**, fully reproducible. Every number below is captured tool output —
 no hand-tuned figures.
 
-| Repo | Files | Total saved | Standout task |
-|------|------:|------------:|---------------|
-| [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) | 154 | **98.3%** | reuse lookup 99.9% |
-| [colinhacks/zod](https://github.com/colinhacks/zod) | 367 | **99.2%** | whole-repo map 99.8% |
-| [shadcn-ui/taxonomy](https://github.com/shadcn-ui/taxonomy) | 125 | **96.0%** | reuse lookup 99.3% |
+| Repo | Files | Total saved | Excl. D+F | Standout task |
+|------|------:|------------:|----------:|---------------|
+| [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) | 154 | **98.3%** | 89.8% | reuse lookup 99.9% |
+| [colinhacks/zod](https://github.com/colinhacks/zod) | 367 | **99.2%** | 96.4% | whole-repo map 99.8% |
+| [shadcn-ui/taxonomy](https://github.com/shadcn-ui/taxonomy) | 125 | **96.0%** | 73.1% | reuse lookup 99.3% |
+| **Pooled** | 646 | **98.7%** | **93.7%** | — |
 
 Per-task peaks across the three repos: **whole-repo map 99.8%**, **reuse-before-rebuild 99.9%**, **blast-radius 99.2%**, **find-symbol 99%**.
+
+**Read the second column before quoting the first.** Scenarios **D** (blast radius) and
+**F** (map whole repo) are the two largest rows in every run, and they carry the totals —
+see caveats 7 and 8. The `Excl. D+F` column is the same runs with both dropped: it is the
+figure to quote for the *routine* case, and the totals are the figure for the case the tool
+exists to prevent (an agent dumping a repo into context). Both columns come from the same
+captured output below; neither is re-weighted.
 
 ## Captured runs (`bench.mjs`)
 
@@ -73,9 +81,18 @@ ts-morph-mappable repo.
 ## Honest caveats — read before quoting the number
 
 1. **Token estimate is `chars / 4`** — a rough heuristic (the same one agentmap
-   uses), applied to **both** sides, so the saved-% *ratio* is robust even though
-   absolute token figures are ±10%. Raw char counts live in each run's `@@JSON@@`
-   footer.
+   uses), applied to **both** sides. **Checked once against a real tokenizer**
+   (`o200k_base`, 2026-07-27, on the three pinned `EVAL.md` repos): `chars/4`
+   **undercounts** real tokens by **1.1–12.5%** on raw source, and is within
+   **±4.6%** on agentmap's own `--map`/`--hubs` output. So the *absolute* counts
+   are looser than the ±10% this caveat used to claim — treat them as ±13%.
+   The *ratio* survives, which is the part that gets published: agentmap's output
+   tokenizes ~4–10% more densely than raw source, and recomputing the saved-% on
+   real tokens moves it by **0.03–0.08 percentage points** (zod 99.6 → 99.7,
+   hono 99.6 → 99.6, zustand 98.0 → 98.1). Quote the percentages, not the counts.
+   The tokenizer is **not** a dependency — it was installed once outside the repo
+   for this check and nothing in `package.json` changed. Raw char counts live in
+   each run's `@@JSON@@` footer.
 2. **One result is negative, and we left it in.** taxonomy scenario **A = −313%**:
    for a *trivial single-file* dependency lookup, `cat` + a tiny `grep` is cheaper
    than agentmap's structured block. The tool pays off **at scale** (more files,
@@ -93,6 +110,24 @@ ts-morph-mappable repo.
    there (unusual layout its ts-morph pass didn't pick up), so `--map` emitted
    nothing and the "100%" was an empty-output artifact, not a real saving. Only
    repos agentmap actually indexes are reported.
+7. **Two scenarios carry the totals.** D and F are the two largest rows in all
+   three runs — on ai-chatbot they are 90% of the baseline by themselves. Dropping
+   both takes 98.3% → **89.8%** (ai-chatbot), 99.2% → **96.4%** (zod), and
+   96.0% → **73.1%** (taxonomy); pooled, 98.7% → **93.7%**. That is not a
+   correction — a repo dump and a blast-radius walk are things agents really do,
+   and they are exactly where a map wins most. It does mean a total is a statement
+   about a *mix of tasks*, so quoting it for a single routine query overstates it.
+   The `Excl. D+F` column exists so nobody has to recompute this to check.
+8. **Scenario D's baseline is `cat` every dependent, not `grep -l`.** The 99.2% is
+   measured against an agent that opens all 65 dependent files. Against an agent
+   that runs `grep -l` and reads nothing, `--relates` costs **more** tokens, not
+   fewer — [`../EVAL.md`](../EVAL.md) measures and states that. The two are not in
+   conflict; they price different baselines. What the eval adds is why the cheaper
+   baseline is not free: `grep -l` scores **59.9%** precision against agentmap's
+   **100%** (n=42), so roughly 4 in 10 files on that list are not dependents, and
+   the agent pays for them on the next turn when it reads them. ⚠️ `bench.mjs` does
+   **not** yet ship a `grep -l` baseline row for D — until it does, this caveat is
+   the reconciliation, not a measured third column.
 
 ## Reproduce
 
