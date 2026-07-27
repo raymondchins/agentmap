@@ -45,7 +45,11 @@ export function gitInit(dir, { commit = false, message = "init" } = {}) {
   g("config", "user.email", "test@example.com");
   g("config", "user.name", "agentmap-test");
   g("config", "commit.gpgsign", "false");
-  g("config", "core.hooksPath", "/dev/null"); // never fire a real hook during tests
+  // Point hooks at a directory that does not exist — git then finds no hooks, which
+  // is the intent. Was "/dev/null"; that happens to work on Windows too (git looks
+  // for a \dev\null directory and finds nothing) but only by accident, and reusing
+  // the same sentinel as the config vars above says what is meant.
+  g("config", "core.hooksPath", NO_GIT_CONFIG);
   if (commit) { g("add", "-A"); g("commit", "-q", "-m", message, "--no-verify"); }
 }
 
