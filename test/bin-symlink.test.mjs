@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { symlinkSync, mkdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeRepo, gitInit, cleanup, AGENTMAP } from "./helpers.mjs";
 
@@ -29,6 +29,32 @@ const FIXTURE = {
   "src/b.ts": "import { a } from './a';\nexport const b = a + 1;\n",
 };
 
+// Can this platform create a file symlink at all?
+//
+// Windows needs elevation or Developer Mode for that, and npm does not use symlinks
+// there anyway — it writes a .cmd shim that invokes the real path, so argv[1] IS the
+// target and the guard's fast path settles it. Probed once, by actually trying it,
+// rather than branching on process.platform: an elevated Windows runner CAN make the
+// link, and there is no reason to give up the coverage when it can.
+//
+// Where it cannot, the realpathSync branch of the guard is genuinely UNCOVERED on
+// that platform. Measured, not assumed: disabling that branch fails these five tests
+// and leaves the non-canonical-path test below still passing, because Node resolves
+// argv[1] itself and the string-equality fast path answers first. Nothing short of a
+// real symlink reaches it. Stated here so the skip is read as a gap, not as coverage
+// that moved somewhere else.
+const SYMLINKS_OK = (() => {
+  const probe = makeRepo({});
+  try {
+    symlinkSync(join(probe, "target"), join(probe, "link"));
+    return true;
+  } catch (e) {
+    if (process.platform === "win32" && (e.code === "EPERM" || e.code === "ENOSYS")) return false;
+    return true; // any other failure is a real problem — let the tests surface it
+  } finally { cleanup(probe); }
+})();
+const NO_SYMLINKS = { skip: SYMLINKS_OK ? false : "npm uses .cmd shims, not symlinks, here — see the non-canonical-path test" };
+
 // Mirror npm's layout: a .bin/ symlink pointing at the package entry point.
 function linkBin(dir, target, name) {
   const binDir = join(dir, "node_modules", ".bin");
@@ -38,7 +64,7 @@ function linkBin(dir, target, name) {
   return link;
 }
 
-test("bin symlink: --version prints the version (not silent exit 0)", () => {
+test("bin symlink: --version prints the version (not silent exit 0)", NO_SYMLINKS, () => {
   const dir = makeRepo(FIXTURE);
   try {
     gitInit(dir, { commit: true });
@@ -51,7 +77,7 @@ test("bin symlink: --version prints the version (not silent exit 0)", () => {
   } finally { cleanup(dir); }
 });
 
-test("bin symlink: a query command produces real output", () => {
+test("bin symlink: a query command produces real output", NO_SYMLINKS, () => {
   const dir = makeRepo(FIXTURE);
   try {
     gitInit(dir, { commit: true });
@@ -64,7 +90,7 @@ test("bin symlink: a query command produces real output", () => {
   } finally { cleanup(dir); }
 });
 
-test("bin symlink: --install-hooks actually writes the hook", () => {
+test("bin symlink: --install-hooks actually writes the hook", NO_SYMLINKS, () => {
   const dir = makeRepo(FIXTURE);
   try {
     gitInit(dir, { commit: true });
@@ -83,7 +109,7 @@ test("bin symlink: --install-hooks actually writes the hook", () => {
   } finally { cleanup(dir); }
 });
 
-test("bin symlink: --mcp serves the MCP Registry launch contract", () => {
+test("bin symlink: --mcp serves the MCP Registry launch contract", NO_SYMLINKS, () => {
   // server.json tells registry clients to run the npm package with `--mcp`,
   // i.e. through the bin symlink. That path returned zero bytes.
   const dir = makeRepo(FIXTURE);
@@ -103,7 +129,7 @@ test("bin symlink: --mcp serves the MCP Registry launch contract", () => {
   } finally { cleanup(dir); }
 });
 
-test("mcp.mjs run through its own symlink still serves", () => {
+test("mcp.mjs run through its own symlink still serves", NO_SYMLINKS, () => {
   const dir = makeRepo(FIXTURE);
   try {
     gitInit(dir, { commit: true });
@@ -126,4 +152,35 @@ test("importing agentmap.mjs still executes nothing", async () => {
   assert.equal(typeof mod.isDirectRun, "function");
   assert.equal(mod.isDirectRun(new URL(`file://${AGENTMAP}`).href), false,
     "isDirectRun returned true while imported by the test runner — the CLI would run on import");
+});
+
+// The entry guard, exercised WITHOUT a symlink — so this runs everywhere, including
+// the Windows runner where npm ships .cmd shims and file symlinks may be refused.
+//
+// What this does NOT do: reach the realpathSync branch. Node resolves the main
+// module before setting argv[1], so `<dir>/test/../agentmap.mjs` arrives already
+// normalised and the string-equality fast path answers. Verified by disabling the
+// realpath comparison — the five symlink tests above fail and this one still passes.
+// Only a real symlink exercises that branch.
+//
+// What it DOES cover, on every platform including one that refuses symlinks: a user
+// invoking through a path they typed rather than one npm generated — an npm script
+// with a relative path, a wrapper, a monorepo tool composing `..` segments. That has
+// to print something. The failure signature here is the one that hid for 12 releases,
+// exit 0 with empty stdout, so this asserts OUTPUT and never status.
+test("entry guard: a non-canonical argv[1] still runs main()", () => {
+  const dir = makeRepo(FIXTURE);
+  try {
+    gitInit(dir, { commit: true });
+    // <repo>/test/../agentmap.mjs — same file, different string.
+    // Concatenated, not join()ed — join() would normalise the `..` straight back out
+    // and leave the fast path in charge, quietly making this test vacuous.
+    const noncanonical = `${dirname(AGENTMAP)}${sep}test${sep}..${sep}agentmap.mjs`;
+    assert.notEqual(noncanonical, AGENTMAP, "path is already canonical — this test would be vacuous");
+    const stdout = execFileSync(process.execPath, [noncanonical, "--version"], {
+      cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000,
+    });
+    assert.notEqual(stdout.trim(), "", "non-canonical argv[1] printed NOTHING — the entry guard skipped main()");
+    assert.ok(stdout.trim().includes(PKG.version), `expected version ${PKG.version}, got: ${stdout.trim()}`);
+  } finally { cleanup(dir); }
 });
