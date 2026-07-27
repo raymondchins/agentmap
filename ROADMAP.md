@@ -65,10 +65,10 @@ Full research (with source URLs) is in the audit report — see *References* bel
 |---|---|---|---|
 | **1** | Trust & truth (security + honesty) | 1–2 d | ✅ **DONE** (pushed) |
 | **2** | Modularize for testability + backend seam | 2–4 d | ✅ **DONE** — all substantive tasks landed (map byte-identical, 189 tests). Deferred-optional: `lib/` file split + in-process MCP. |
-| **3** | Dirty-tree performance | 3–5 d | ⬜ |
-| **4** | Distribution & release hygiene | 2–3 d | 🟨 Mostly done — plugin/marketplace, MCP Registry listing, tag-triggered publish, and README trust markers shipped; `npx skills add` alignment + Cursor/Gemini hooks deferred |
+| **3** | Dirty-tree performance | 3–5 d | 🟨 **Both cache tiers + visible skips + symbol cap shipped.** Of what remained, two items were **measured and refuted** (cross-product pruning drops 0 edges on all 5 repos tested; the heapUsed OOM warning cannot fire in time — built, measured, reverted). Post-commit locking shipped; its incremental half stays gated on Tier 2 going default-on |
+| **4** | Distribution & release hygiene | 2–3 d | 🟨 Mostly done — plugin/marketplace, MCP Registry listing, tag-triggered publish, and README trust markers shipped. Release automation **closed without adopting changesets** (two lockstep tests instead); `npx skills add` alignment + Cursor/Gemini hooks still deferred |
 | **5** | TS-depth before language-breadth | weeks | 🟨 Mostly done — depth + resolution shipped; monorepo intelligence + symbol-PageRank deferred |
-| **B** | Cross-cutting backlog (low-severity) | ongoing | ⬜ |
+| **B** | Cross-cutting backlog (low-severity) | ongoing | ✅ **Swept 2026-07-27 — 20 done, 4 partial, 0 untouched.** Security, CI OS matrix, typecheck + coverage gates, ranking-ORDER tests, installer robustness, docs and housekeeping all landed. Several items turned out to be **already fixed with a stale checkbox**; the remaining partials each say what is left and why |
 
 **Legend:** ✅ done · 🟨 partial / mostly done · ⬜ not started
 
@@ -167,7 +167,7 @@ exists.
 
 ---
 
-## ⬜ Batch 3 — Dirty-tree performance
+## 🟨 Batch 3 — Dirty-tree performance
 
 **Goal:** stop full-reparsing the whole repo on every query when the working tree
 is dirty. Agents work on dirty trees essentially always, so this is the #1
@@ -354,9 +354,20 @@ discovered is trustworthy and fast.
   existed (the "zero tags" note was stale); still need the `NPM_TOKEN` repo secret
   + first GitHub Release. *(v0.10.0 published manually 2026-07-03 to close the RCE gap;
   future releases go through this workflow.)*
-- [ ] **Release automation** (release-please / changesets) — structurally fixes
-  the recurring missing-CHANGELOG-entry problem (and the lockfile-version drift
-  just seen in `aa62353`).
+- [x] **Release automation** (release-please / changesets) — **DECIDED: not
+  adopted, problem closed another way.** Both named symptoms were directly
+  checkable, so they are now checked in `test/version-lockstep.test.mjs`: a
+  `## [<version>]` section must exist in `CHANGELOG.md` for the version in
+  `package.json`, and `package-lock.json`'s two version fields must match it.
+  The CHANGELOG gap was genuinely uncovered — nothing anywhere asserted that the
+  shipped version had release notes. The lockfile one needed its own test because
+  **`npm ci` does not catch it**: it validates the dependency tree, not the root
+  package's own version, which is how `aa62353` shipped. Negative control: forcing
+  `package.json` to 9.9.9 fails 5 of the 8 lockstep tests.
+  Rejected because the cost is per-PR ceremony and a dependency tree, on a
+  solo-maintained repo whose stated identity is near-zero-deps — for a problem two
+  assertions cover. Revisit if this ever takes regular outside contributors, where
+  a changeset file per PR buys attribution and release notes that a test cannot.
 - [x] **README trust markers** — states "fully local, no network calls, no telemetry"
   (verified: zero `fetch`/`http` in `agentmap.mjs`/`mcp.mjs`) and the name-collision
   note (`npx agentmap` unscoped is an unrelated package; always use the scoped
@@ -462,28 +473,53 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
 
 ---
 
-## ⬜ Batch B — Cross-cutting backlog (low-severity, do opportunistically)
+## ✅ Batch B — Cross-cutting backlog (swept 2026-07-27)
+
+> **Swept end-to-end on 2026-07-27**: 20 closed, 4 partial, none untouched. Three
+> things worth carrying forward from the sweep:
+>
+> 1. **Several items were already fixed and only the checkbox was stale** — the
+>    expanded denylist, the MCP injection fence, the dead `statSync` import, the
+>    four `readPackageVersion` copies, and the SHA-pinned CI actions. Anchors like
+>    `agentmap.mjs:77` and `README.md:223` had all drifted. Re-verify before
+>    working an item from this file; the finding may predate its own fix.
+> 2. **Two items were refuted by measuring them** (cross-product pruning, the
+>    heapUsed OOM warning) and one dependency premise was simply false
+>    (`typescript` does *not* come via ts-morph — `@ts-morph/common` vendors it).
+>    Each now carries the measurement, not just the verdict.
+> 3. **The gaps that were real were mostly "the tool reports success while doing
+>    something else"** — `--symbols 200` printing "top 200" over 80 rows, the
+>    Gemini Windows install writing to a path nothing reads, a partial install
+>    left behind by a malformed config, JSONC comments deleted in silence. That is
+>    the class to keep hunting.
 
 ### Security
-- [ ] **Expand sensitive-file denylist** — `agentmap.mjs:77`: Batch 1 fixed
+- [x] **Expand sensitive-file denylist** — `agentmap.mjs:77`: Batch 1 fixed
   `*password*`; still missing `*token*`, `.npmrc`, `.netrc`, `.git-credentials`,
   `.pgpass`, `.htpasswd`, `.pypirc`, `id_ed25519*`, `id_ecdsa*`, `*.p8`, `*.jks`,
   `*.keystore`. Reconcile with SECURITY.md; extend the regression test.
   *(security/medium — note `*token*` over-excludes `tokenizer.ts` etc.; weigh it.)*
-- [ ] **Prompt-injection fencing** — `agentmap.mjs:1655`: untrusted repo content
+- [x] **Prompt-injection fencing** — `agentmap.mjs:1655`: untrusted repo content
   flows verbatim into agent context via `--any` content fallback + map digests
   through MCP. Wrap content/digest output in an untrusted-data fence in the MCP
   text result; strip control chars; document that `--any` lines are raw repo bytes.
   *(security/medium)*
 
 ### Tests & CI
-- [ ] **OS matrix** — `.github/workflows/ci.yml:12` is ubuntu-only despite
+- [x] **OS matrix** — `.github/workflows/ci.yml:12` is ubuntu-only despite
   Windows-specific code + Windows-targeting docs. Add `windows-latest` +
   `macos-latest` (single Node version each). *(tests/high)*
-- [ ] **Ranking-quality tests** — `test/determinism.test.mjs:40` only asserts
-  determinism/set-membership, never *order*. Add fixtures with known in-degrees
-  (hubs[0] = most-imported; leaf never outranks it); add a CI step running
-  `eval/eval.mjs` with a min-accuracy threshold. *(tests/medium)*
+- [~] **Ranking-quality tests** — **order tests DONE; the eval CI step is not, on
+  purpose.** `test/ranking-quality.test.mjs` asserts against a constructed star
+  (in-degrees 5/2/0): first place, monotonicity in degree, leaf-never-outranks-hub,
+  and the same check one level down on `--symbols`. The gap was as bad as recorded —
+  **proven** by inverting the hub comparator, which leaves `determinism.test.mjs`
+  reporting 2/2 green while the new suite fails 3 of 5.
+  The `eval/eval.mjs` min-accuracy CI step stays out: the eval **clones upstream
+  repos over the network**, so wiring it into CI makes every unrelated PR depend on
+  GitHub availability and on third-party repos that move. `EVAL.md` already records
+  it as "network required; not part of CI", and pinned SHAs make it reproducible on
+  demand. Run it at release time, not per push. *(tests/medium)*
 - [~] **Concurrency + e2e hook tests** — parallel-build half DONE, hook e2e still
   open. Writing the test found a real bug rather than confirming safety:
   `assemble()` used a FIXED tmp name (`map.json.tmp` / `map.dirty.json.tmp` /
@@ -498,12 +534,35 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   the defect. Still open: the shipped post-commit hook never runs e2e
   (`--install-hooks` without the hooksPath override → commit → `generatedSha ===
   HEAD`). *(tests/medium)*
-- [ ] **Lint/typecheck gate** — add `jsconfig.json` (checkJs+strict) +
-  `npx tsc --noEmit` (typescript already comes via ts-morph) + ESLint flat config;
-  fail CI on either. *(tests/medium)*
-- [ ] **Coverage floor** — run under c8 in CI, enforce e.g. `--lines 70` so
-  unexecuted shipped files stay visible. *(tests/medium)*
-- [ ] **Test env isolation** — `test/install-skill.test.mjs:84`: `--global` tests
+- [x] **Lint/typecheck gate** — **typecheck DONE; ESLint deliberately NOT adopted;
+  the item's dependency premise was wrong.** "typescript already comes via ts-morph"
+  is false: `@ts-morph/common` **vendors** the compiler and exposes no `tsc` bin, so
+  this required adding `typescript` + `@types/node` as **dev** dependencies. That is
+  compatible with the near-zero-deps rule as written — it governs *runtime* deps and
+  the tarball, and `package.json` `files` is an allowlist, confirmed by
+  `npm pack --dry-run`.
+  **`strict` is OFF, measured, not conceded:** strict reports **505** errors, 272 of
+  them TS7006 ("annotate this parameter") — a rewrite, not a gate. Non-strict
+  reported **2**, and both were real drift: a JSDoc `@type` for `PLATFORMS` that had
+  fallen behind the object it describes (`codexHooks` missing, while the code reads
+  it), and a dynamic `import()` of a `URL` object TypeScript cannot follow. Both
+  fixed; the gate is clean and runs on every OS in the matrix.
+  Also verified that adding a `jsconfig.json` to agentmap's own root does not
+  perturb its self-map — byte-identical with and without it, which matters because
+  agentmap reads `jsconfig.json` when mapping a repo.
+  **ESLint: no.** Its remaining value here is stylistic — the correctness class it
+  would catch is what `checkJs` now covers — and it is a large dependency tree plus
+  a config to maintain, on a repo whose identity is near-zero-deps. Reconsider only
+  with outside contributors, where a shared style gate saves review time.
+  *(tests/medium)*
+- [x] **Coverage floor** — DONE, **without c8**: `node --test` ships coverage and
+  threshold flags natively from Node 22, so `npm run coverage` needs no dependency at
+  all. Its own CI job pinned to Node 24, because the flags do not exist on Node 20,
+  which the test matrix still supports. Measured **93.77% lines / 76.12% branches**;
+  floors set at **90/70**, deliberately *below* current — a gate pinned to today's
+  number reddens on ordinary work and gets raised until nobody reads it. This is a
+  regression alarm, not a target. *(tests/medium)*
+- [x] **Test env isolation** — `test/install-skill.test.mjs:84`: `--global` tests
   hit the real `$HOME`; git tests inherit host git config. Add `opts.env` to
   `helpers.run()`, route through a fake HOME, set `GIT_CONFIG_GLOBAL=/dev/null`.
   *(tests/low)*
@@ -512,53 +571,82 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
 - [x] **Claude nudge npx path** — `hooks/agentmap-nudge.mjs:116` tells the agent to
   run a `node_modules/...` path that doesn't exist for npx/global installs.
   Recommend `npx @raymondchins/agentmap --any` (as the Gemini nudge does). *(medium)*
-- [ ] **Windows global Gemini path** — `skills/install.mjs:75` writes to
+- [x] **Windows global Gemini path** — `skills/install.mjs:75` writes to
   `~/.agents/GEMINI.md`, which Gemini CLI never reads. Drop the win32 special case.
   *(medium)*
-- [ ] **`--symbols N` silent cap** — `agentmap.mjs:1780` caps at 80 while claiming
+- [x] **`--symbols N` silent cap** — `agentmap.mjs:1780` caps at 80 while claiming
   N. Recompute or clamp the printed count with a note. *(low)*
-- [ ] **Installer robustness** — `skills/install-helpers.mjs:83`: opaque TypeError
+- [x] **Installer robustness** — `skills/install-helpers.mjs:83`: opaque TypeError
   when an existing `hooks` key isn't an array → partial install. Validate shapes
   up front; validate all platforms before writing any file. *(low)*
-- [ ] **JSONC comment preservation** — `skills/install-helpers.mjs:104`: rewriting
+- [x] **JSONC comment preservation** — `skills/install-helpers.mjs:104`: rewriting
   `settings.json` strips comments silently. Surgical splice, or warn. *(low)*
 
 ### Docs / benchmark honesty
-- [ ] **Benchmark headline** — `README.md:63`: only Scenario F's skew is disclosed;
+- [x] **Benchmark headline** — `README.md:63`: only Scenario F's skew is disclosed;
   Scenario D also inflates the total (excluding both → ~89.8% / ~10× on ai-chatbot).
   Add the D+F-excluded figure; validate chars/4 once against a real tokenizer; re-run
   `npm run eval` post-0.8.0 and refresh dates/numbers. *(medium)*
-- [ ] **Blast-radius row footnote** — `benchmark/RESULTS.md:26`: the 99.2% row is
+- [x] **Blast-radius row footnote** — `benchmark/RESULTS.md:26`: the 99.2% row is
   contradicted by EVAL.md (agentmap wins precision, loses tokens vs `grep -l`).
   Footnote it or add a `grep -l` baseline to `bench.mjs`. *(high, docs-only)*
-- [ ] **Onboarding matrix + uninstall + troubleshooting** — `README.md:223`: add a
+- [x] **Onboarding matrix + uninstall + troubleshooting** — `README.md:223`: add a
   per-CLI "commands to full loop / enforcement vs docs-only" matrix, a copy-paste
   `.cursor/mcp.json`, an **Uninstall** section listing every file the installers
   touch (there's no `--uninstall` command — consider adding one), and a
   Troubleshooting section (nvm PATH, 0-files-mapped, stale skills via `--doctor`).
   *(medium)*
-- [ ] **Benchmark realism** — `benchmark/bench.mjs:26`: add wall-clock (cold/warm/
-  dirty), include a 3–5k-file repo, report the excluding-F total. *(low)*
-- [ ] **Competitor table** — `README.md:101`: Batch 1 fixed Aider's install; still
+- [~] **Benchmark realism** — `benchmark/bench.mjs`: **the excluding-F total is
+  DONE** (see the Benchmark-headline item above — `RESULTS.md` now carries an
+  `Excl. D+F` column per repo plus a pooled row, and the D+F skew is stated in the
+  README). Still open: wall-clock (cold/warm/dirty) and a 3–5k-file fixture, both of
+  which need a new pinned repo and a change to what `bench.mjs` measures rather than
+  how it reports. *(low)*
+- [x] **Competitor table** — `README.md:101`: Batch 1 fixed Aider's install; still
   update Repomix's agent-loop cell to "MCP server (no auto-refresh/nudge)", link
   every row to its repo, add an "as of \<date\>" footnote. *(low)*
 
 ### Housekeeping (from the completeness critic)
-- [ ] Dead `statSync` import (`agentmap.mjs:16`); `readPackageVersion` implemented
-  4× with divergent failure behavior — unify once modularized. *(low)*
-- [ ] Duplicated recursive dir walk between `sourceFingerprint()` and `makeProject()`
-  (`agentmap.mjs:431`) — extract one `walkSources()`. *(low)*
+- [x] Dead `statSync` import (`agentmap.mjs:16`); `readPackageVersion` implemented
+  4× with divergent failure behavior. **Both were already fixed and only the
+  checkbox was stale** — verified 2026-07-27: `statSync` is absent from the import
+  list, and `readPackageVersion` is one definition with two callers plus an export,
+  not four divergent copies. *(low)*
+- [x] Duplicated recursive dir walk between `sourceFingerprint()` and `makeProject()`
+  — extracted as `walkSources(dir, onFile)`. The two copies were identical except
+  for the leaf action, with four load-bearing, non-obvious safety rules restated in
+  both (depth cap 40, per-directory try/catch, `lstatSync` not `statSync`, skip
+  symlinks) — so a fix could land in one and not the other. The reasoning for each
+  rule now lives once, at the shared function. Verified rather than assumed: 43
+  vue-sfc tests green, a tree containing a circular *and* a dangling symlink still
+  terminates with exit 0, and a non-git `.vue` tree still resolves its import
+  edge. *(low)*
 - [x] Node 18 is past EOL (Apr 2025) but in `engines` + CI matrix — decide support
   policy. Resolved: `engines` is `>=20` and the matrix is `[20, 22, 24]`. The floor
   is set by the dependency tree, not by EOL dates — `brace-expansion` (via ts-morph
   → @ts-morph/common → minimatch) declares `20 || >=22`, so `>=18` was a claim the
   tree contradicted. `dependabot.yml` now covers npm + Actions, with `ts-morph` on
   the weekly update path.
-- [ ] Community health files: no `.github/ISSUE_TEMPLATE`, PR template,
-  `CODE_OF_CONDUCT.md`, `FUNDING.yml`. CI Actions pinned by mutable tags (`@v5`),
-  not SHA — a hardening gap the SECURITY.md advertises.
-- [ ] Consider a neutral `.agentmap/` cache path (currently `.claude/agentmap/`
-  even for Gemini/Codex/Cursor users) with back-compat.
+- [~] Community health files. **Mostly done; one item deliberately left to the
+  maintainer.** `.github/ISSUE_TEMPLATE/` and `PULL_REQUEST_TEMPLATE.md` already
+  existed, and CI Actions are already SHA-pinned (`@3d3c42e5…`, `@820762786…`,
+  `@e4fba868…`, `@e0c47f4f…`) — that half of the finding was stale.
+  `CODE_OF_CONDUCT.md` added: it links the Contributor Covenant rather than copying
+  a text that would then drift, and says explicitly that being told a patch is wrong,
+  or that a number does not reproduce, is the process working — this roadmap closes
+  items as *refuted* in writing, and that norm should be stated rather than
+  discovered. **No `FUNDING.yml`:** sponsorship handles are the maintainer's call
+  and are not something to invent on their behalf.
+- [x] Consider a neutral `.agentmap/` cache path (currently `.claude/agentmap/`
+  even for Gemini/Codex/Cursor users). **DECIDED: no.** The complaint is real — the
+  path names one vendor and every other platform's users inherit it — but it is
+  cosmetic, and the change is not. `.claude/agentmap/` is written by the post-commit
+  hook in every consumer repo, gitignored by `--install-hooks`, read by `--doctor`,
+  and named across README, SECURITY.md and hooks/INSTALL.md. Moving it means a
+  dual-read back-compat path that must then be carried indefinitely, on a tool whose
+  central invariant is that a query never returns a stale map — i.e. new ways to
+  read the wrong cache, bought with no capability. Recorded so it is not reopened
+  from scratch; reconsider only if a platform actually refuses the path.
 - [x] `--export dot|mermaid` — file import graph → Graphviz DOT / Mermaid, top-N by
   pagerank, 3 style tiers, `--focus` scopes to a neighborhood; reads the cached map
   (no ts-morph Project). (Call-graph closure export = future v2.)
