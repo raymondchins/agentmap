@@ -91,3 +91,38 @@ test("the Node engines floor and the README badge agree", () => {
     `README badge says node >=${badge[1]} but package.json engines says >=${floor}`,
   );
 });
+
+// --- release hygiene: the two things a release commit is supposed to carry -----
+//
+// ROADMAP proposed release-please/changesets to fix "the recurring
+// missing-CHANGELOG-entry problem (and the lockfile-version drift just seen in
+// aa62353)". Both are checkable directly, so these two tests close that item
+// without a dependency tree or a changeset file per PR. Neither tool was adopted;
+// see the roadmap entry for the reasoning.
+
+test("CHANGELOG.md documents the version in package.json", () => {
+  // The version in package.json is always the LAST released one, so this holds
+  // continuously — not just at release time. Bumping the version without writing
+  // the section fails here, in `npm test`, rather than being noticed after publish
+  // when the release notes are already public.
+  const changelog = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
+  const heading = new RegExp(`^##\\s*\\[?${VERSION.replace(/\./g, "\\.")}\\]?`, "m");
+  assert.match(
+    changelog,
+    heading,
+    `CHANGELOG.md has no "## [${VERSION}]" section. Add the entry in the same commit as the version bump.`,
+  );
+});
+
+test("package-lock.json tracks package.json", () => {
+  // Bumping the version without re-running npm install leaves the lockfile
+  // declaring the old one in TWO places. `npm ci` does not catch this — it
+  // validates the dependency tree, not the root package's own version — so it
+  // shipped once already.
+  const lock = read("package-lock.json");
+  assert.equal(lock.version, VERSION, "package-lock.json .version drifted — run `npm install` after the bump");
+  assert.equal(
+    lock.packages?.[""]?.version, VERSION,
+    'package-lock.json .packages[""].version drifted — run `npm install` after the bump',
+  );
+});
