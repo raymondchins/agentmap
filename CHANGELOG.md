@@ -3,6 +3,68 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.21.0] - 2026-07-27
+
+Backlog sweep. Fixes a class of bug this project exists to prevent — a command
+reporting success while doing something other than what it said — plus the CI
+gates that would have caught them. Two proposed optimisations were **measured and
+refuted** rather than implemented; the measurements are in `ROADMAP.md`.
+
+### Fixed
+- **`--symbols N` no longer claims a count it did not return.** `map.json` persists
+  the top 80, so `--symbols 200` printed "top 200 ranked symbols" above at most 80
+  rows. Asking for more than was persisted now re-ranks from the cached file map
+  (no ts-morph, the same recompute `--map --focus` already does), so 200 really
+  returns 200. Where a repo has fewer, the header says so and `--json` carries
+  `requested` / `shown` / `truncated`.
+- **Gemini global install on Windows wrote to a path nothing reads.** It targeted
+  `~/.agents/`, the Amp/legacy convention; Gemini CLI resolves global config under
+  `homedir()/.gemini` on every platform. Two files written where nothing loads
+  them, reported as installed. The win32 branch is gone.
+- **A malformed config no longer leaves a half-installed skill.** A non-object
+  `hooks` key in `settings.json` threw `.some is not a function` partway through a
+  multi-platform install, after earlier platforms were already on disk.
+  `--install-skill` now preflights every platform before the first write, and the
+  error names the file and the key.
+- **JSONC comments are no longer deleted in silence.** `JSON.stringify` cannot
+  round-trip them, so they still go — but the file is now named in a warning.
+- **Terminal control sequences in content-search output are neutralised.** Matched
+  lines are the only raw repository bytes agentmap echoes; a text file carrying
+  `ESC[2J` could blank the terminal or overwrite the `file:line` prefix so a hit
+  appeared to come from elsewhere. C0 and DEL become `U+FFFD` on both the prose and
+  `--json` surfaces; tab and newline are kept.
+- **Windows: dynamic import of a bare drive path** in the entry-guard test
+  (`ERR_UNSUPPORTED_ESM_URL_SCHEME`), and a stale JSDoc `@type` for `PLATFORMS`
+  missing `codexHooks` — both surfaced by the new gates on their first run.
+
+### Added
+- **Windows and macOS in the CI matrix.** 490 tests had only ever run on Linux,
+  while the code carries per-platform branches and the docs target Windows.
+- **Typecheck gate** (`npm run typecheck`) — `checkJs` over the `.mjs` sources.
+  `strict` is off with a measured reason: strict reports 505 errors, 272 of them
+  "annotate this parameter"; non-strict reported 2, both real drift.
+- **Coverage floor** (`npm run coverage`) — `node --test`'s built-in coverage, no
+  `c8`. Measured 93.77% lines / 76.13% branches; floors at 90/70.
+- **Ranking-quality tests.** The suite proved two builds agreed and that a file
+  appeared *somewhere* in hubs — invert the comparator and every assertion still
+  passed. New tests assert order against a constructed star.
+- **Release-hygiene gates** — `CHANGELOG.md` must document the shipped version, and
+  `package-lock.json` must track it (`npm ci` does not check the root version).
+- `CODE_OF_CONDUCT.md`.
+
+### Changed
+- **Benchmark honesty.** `RESULTS.md` gains an `Excl. D+F` column — 89.8%
+  (ai-chatbot), 96.4% (zod), 73.1% (taxonomy), 93.7% pooled — because two of seven
+  scenarios carry the totals. The blast-radius row is reconciled with `EVAL.md`
+  from both sides: they price different baselines, and the cheaper one is cheaper
+  because it is 59.9% precise. `chars/4` validated against a real tokenizer for the
+  first time: absolute error 1.1–12.5%, but the published saved-% moves 0.03–0.08pp.
+- Docs: the Gemini row said the nudge fires on `AfterTool`; it is `BeforeTool` with
+  a top-level `systemMessage`. Four troubleshooting rows added (nvm, OOM with the
+  measured memory envelope, stale skills, `0 files`). Competitor rows now link out
+  and carry an as-of date.
+- One `walkSources()` replaces two copies of the recursive source walk.
+
 ## [0.20.1] - 2026-07-27
 
 Docs and packaging metadata only — no runtime change. Cut so the npm page stops
