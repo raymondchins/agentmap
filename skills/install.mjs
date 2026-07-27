@@ -33,6 +33,7 @@ function skillPath(root, _globalScope, ...segments) {
  *   legacy?: boolean;
  *   docs?: (root: string, globalScope: boolean) => string;
  *   hooks?: boolean;
+ *   codexHooks?: boolean;
  *   plugin?: boolean;
  * }>} */
 const PLATFORMS = {

@@ -120,9 +120,22 @@ When you touch caching, building, or the schema:
 ## Submitting a PR
 
 1. For anything non-trivial, open (or link) an issue describing the change first.
-2. Branch, make the change, run `npm test` — all green on Node 20+.
+2. Branch, make the change, then run all three gates — CI runs the same ones:
+
+   ```bash
+   npm test          # black-box suite, all green on Node 20+
+   npm run typecheck # checkJs over the .mjs sources (see jsconfig.json)
+   npm run coverage  # suite again with the line/branch floor enforced
+   ```
+
+   `typecheck` is intentionally non-strict — `jsconfig.json` explains what that
+   buys and what it gives up. `coverage` needs Node 22+ for the threshold flags;
+   `npm test` alone is fine on Node 20.
 3. Tests are dependency-free black-box drivers over throwaway git repos (see
-   `test/helpers.mjs`). New behavior needs a test in that style.
+   `test/helpers.mjs`). New behavior needs a test in that style. Assert what the
+   output *should be*, not merely that two runs agree — `test/determinism.test.mjs`
+   passes unchanged with the hub comparator inverted, which is why
+   `test/ranking-quality.test.mjs` exists.
 4. Keep the diff minimal and the output byte-identical for existing commands —
    unless the change *is* the output (then call it out).
 5. Fill in the PR checklist. Maintainers may decline in-scope-but-bloating

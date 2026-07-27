@@ -49,9 +49,29 @@ export function gitInit(dir, { commit = false, message = "init" } = {}) {
   if (commit) { g("add", "-A"); g("commit", "-q", "-m", message, "--no-verify"); }
 }
 
+// Detach every test's git from the DEVELOPER's git. Without this the suite
+// inherits whatever is in ~/.gitconfig and /etc/gitconfig — `init.defaultBranch`,
+// `core.autocrlf`, `commit.gpgsign`, an `includeIf`, a global `core.hooksPath` —
+// so a test can pass on one machine and fail on another for reasons no assertion
+// mentions. gitInit() already pins the few settings it cares about locally; this
+// closes the rest.
+//
+// Points at a path that does not exist rather than /dev/null: git treats a missing
+// config file as empty everywhere, while /dev/null is not a path on Windows, which
+// the CI matrix now covers.
+const NO_GIT_CONFIG = join(tmpdir(), "agentmap-no-such-gitconfig");
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: NO_GIT_CONFIG,
+  GIT_CONFIG_SYSTEM: NO_GIT_CONFIG,
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
 // Run a raw git command in `dir`. Throws on failure (callers expect git to work).
 export function git(dir, ...args) {
-  return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return execFileSync("git", args, {
+    cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...GIT_ENV },
+  });
 }
 
 // Every synchronous CLI invocation below gets a hard ceiling: if agentmap ever

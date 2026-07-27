@@ -3048,7 +3048,10 @@ async function main() {
   // `node mcp.mjs` run, which is not cyclic).
   if (has("--mcp")) {
     try {
-      const m = await import(new URL("./mcp.mjs", import.meta.url));
+      // .href, not the URL object: both resolve identically at runtime, but the
+      // dynamic-import signature is typed as string, so the object form is the
+      // one thing in this file the typecheck gate cannot see past.
+      const m = await import(new URL("./mcp.mjs", import.meta.url).href);
       await m.serve(mcpQuery);
     } catch (e) {
       console.error(`agentmap --mcp failed: ${e?.message || e}`);

@@ -61,6 +61,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # checkJs over ~250KB of hand-written JS — the only static analysis that
+      # reads this codebase, since none of it is TypeScript. Deliberately runs on
+      # every OS: the two errors it caught when introduced were a stale JSDoc type
+      # and an unfollowable dynamic import, and path-shaped mistakes are exactly
+      # the kind that differ per platform.
+      - name: Typecheck
+        run: npm run typecheck
+
       # Black-box suite — drives the real CLI as a subprocess against temp repos.
       # Runs via npm so CI uses the same glob set as `npm test` locally
       # (test/*.test.mjs alone silently skipped the test/vue-sfc/ suite).
@@ -188,6 +196,35 @@ jobs:
           done
           echo "generatedSha $BEFORE -> $AFTER"
           test "$AFTER" != "$BEFORE" || { echo "::error::post-commit hook did not refresh the map — auto-refresh is dead"; exit 1; }
+
+  # Coverage floor, so a shipped file that nothing executes stays visible.
+  #
+  # Uses node --test's own coverage rather than c8: the thresholds land natively
+  # from Node 22, and the near-zero-deps rule is easier to keep than to argue with.
+  # That is also why this is its own job pinned to one version — the flags do not
+  # exist on Node 20, which the test matrix still supports.
+  #
+  # Floors sit BELOW the measured 93.77% lines / 75.92% branches on purpose. They
+  # are a regression alarm, not a target: a gate set at the current number reddens
+  # on ordinary work and gets raised until someone stops reading it.
+  coverage:
+    name: Coverage floor
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests under coverage
+        run: npm run coverage
 
   # Audit for high-severity vulnerabilities in the dependency tree. Deliberately
   # its own job rather than a step in the matrix above: it depends only on the
