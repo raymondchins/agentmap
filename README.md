@@ -1,142 +1,219 @@
 <p align="center">
-  <img src="assets/hero.png" alt="agentmap — ~98% token savings to understand a codebase (up to 99.9% per task)" width="100%">
+  <img src="assets/hero.png" alt="agentmap — 98% fewer tokens for a coding agent to find code, same answer" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@raymondchins/agentmap"><img src="https://img.shields.io/npm/v/@raymondchins/agentmap" alt="npm"></a>
+  <a href="https://github.com/raymondchins/agentmap/actions/workflows/ci.yml"><img src="https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License: MIT"></a>
+  <a href="#"><img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="node >= 20"></a>
+  <a href="#"><img src="https://img.shields.io/badge/runtime%20deps-1-2EE0A8" alt="1 runtime dependency"></a>
+  <a href="#"><img src="https://img.shields.io/badge/network%20calls-0-2EE0A8" alt="zero network calls"></a>
 </p>
 
 # agentmap
 
-**Stop your coding agent from reading the wrong files.**
+### 98% of what your coding agent spends finding code is waste.
 
-Ask "what breaks if I change this?" and `grep` hands back a pile where **40% of the
-files don't actually depend on it**. agentmap answers the same question at **100%
-precision** — measured, on public repos, [reproducibly](./EVAL.md).
+You've watched it happen. You ask Claude Code or Cursor for one small change, and before it
+writes a single line it greps, opens a file, greps again, opens five more. Thousands of
+tokens gone. Then `compacting conversation…` scrolls past, and the next session starts the
+whole excavation over from zero.
+
+None of that is the actual work. It's your agent trying to find the code.
+
+**agentmap just tells it.** One command:
 
 ```bash
-npx @raymondchins/agentmap --relates src/lib/auth.ts
+npx @raymondchins/agentmap --relates lib/db/schema.ts
 ```
 
-Your agent re-learns your codebase every session, grepping to find what connects to
-what and burning tokens before it writes a line. agentmap gives it a queryable,
-PageRank-ranked import/symbol map instead — built with `ts-morph`, the real
-TypeScript compiler, so it resolves what string matching cannot.
+```
+relates: lib/db/schema.ts  (pr 0.073744)
+exports (14): user, User, chat, Chat, message, DBMessage, …
+dependents (21): hooks/use-active-chat.tsx, lib/types.ts, lib/utils.ts,
+                 components/chat/message.tsx, lib/db/queries.ts,
+                 app/(chat)/api/chat/route.ts, …
+```
+
+That's the blast radius of the file — and **every entry on it is real**. Scored against
+ground truth on public repos, `--relates` returns dependents at **100% precision**. Ask
+`grep` the same question and **40% of what it hands back doesn't actually depend on the
+file** — and your agent opens those wrong files and reasons from them.
+([how that's measured](./EVAL.md))
+
+There's no server, no vector database, no embedding API, no account. It's one npm package
+that reads your code locally and answers questions about it.
+
+---
+
+## Why you'd care
+
+Four things your coding agent does every day, and what each one costs when it hunts for the
+answer instead of asking for it.
+
+### ♻️ "It wrote a helper I already had." → **99.9% cheaper**
+
+Nobody can hold every export in their head, and your agent re-reads a slice of the repo
+trying. `--find` searches every symbol in the codebase — exported *and* private — so
+"do we already have this?" stops costing a file-reading spree.
+
+```bash
+agentmap --find formatCurrency
+```
+
+### 🔥 "It burns my whole context window just orienting itself." → **99.3% cheaper**
+
+Every fresh session starts with the same archaeology. `--map` replaces it with a ranked,
+token-budgeted digest — the files that matter most with their key symbols, sized to whatever
+budget you give it. A 154-file repo fits in about a thousand tokens.
+
+```bash
+agentmap --map --tokens 2000
+```
+
+### 💥 "It edited one file and broke three others it never opened." → **99.2% cheaper**
+
+Your agent can't see who imports what, so it edits blind and finds out at build time.
+`--relates` gives it the exact dependency fallout of a file — direct importers *plus* the
+transitively-related files, ranked — before it touches anything.
+
+```bash
+agentmap --relates src/lib/auth.ts
+```
+
+### 🔎 "Where is this thing even defined?" → **99% cheaper**
+
+The most common question an agent asks itself, and the one `grep` answers worst: a barrel
+file (`export * from "./x"`) looks exactly like the real definition, so your agent opens the
+re-export and edits nothing. agentmap follows the chain with the TypeScript checker and
+names the file that actually declares it.
+
+```bash
+agentmap --find ChatMessage
+```
+
+<sub>Each percentage above is the measured token saving for that task on a real 154-file Next.js repo — full table in <a href="#the-receipts">The receipts</a>, raw output in <a href="./benchmark/RESULTS.md"><code>benchmark/RESULTS.md</code></a>.</sub>
+
+**And the reason to trust the answers:** agentmap is built on `ts-morph` — the actual
+TypeScript compiler — not text matching or tree-sitter guessing. It resolves your
+`tsconfig` path aliases, your `vite`/`webpack` aliases, `#imports` subpaths, and monorepo
+workspace packages. When `grep` sees a string, agentmap sees the resolved module.
+
+---
+
+## Get it running
+
+**Try it right now**, no install, in any TypeScript/JavaScript repo:
+
+```bash
+npx @raymondchins/agentmap --any <anything>
+```
+
+`--any` is the "I don't want to learn eight flags" entry point — throw it a filename, a
+function name, a feature, or a raw string, and it figures out what you meant.
+
+**Then wire it into your agent so you never have to think about it again:**
+
+```bash
+npx @raymondchins/agentmap --install-hooks    # auto-refresh + steer the agent to the map
+npx @raymondchins/agentmap --install-skill    # Claude Code, Cursor, Codex, Gemini, OpenCode, Copilot
+```
+
+That's the part most repo-map tools skip. The map **rebuilds itself after every commit**,
+and a hook **nudges the agent toward the map the moment it reaches for a dependency-shaped
+grep** — so it stays current, and it actually gets used. On Claude Code you can do both in
+one shot with the [plugin](#4-claude-code-plugin-one-command-bundle).
+
+<details>
+<summary>What it writes on disk, and how it stays fresh</summary>
+
+<br>
+
+The first run builds and caches the map to `.claude/agentmap/map.json` (`--install-hooks`
+adds it to your `.gitignore`). Later runs serve that cache **only** when the tree is clean
+and `HEAD` is unchanged — with uncommitted `.ts/.tsx/.js/…` edits it silently rebuilds from
+disk, so a query always reflects your in-flight work instead of a stale snapshot.
+
+Run it with no flag to build and print a one-line summary:
+
+```
+$ npx @raymondchins/agentmap
+agentmap: 154 files | 4 features | top hub: lib/utils.ts (deg 52, pr 0.105171)
+```
+
+Working from a checkout instead of npm? Every command below also works as
+`node agentmap.mjs …`.
+
+</details>
+
+> **Fully local.** Zero network calls, zero telemetry — there is not a single `fetch`/`http`
+> call in the source. Your code never leaves your machine.
+>
+> ⚠️ **Install the scoped name: `@raymondchins/agentmap`.** The unscoped `npx agentmap` is an
+> **unrelated** package by a different author.
+
+---
+
+## The receipts
+
+Every number below is captured tool output, reproducible at pinned commits — not a vibe.
+
+**Fewer tokens.** The hidden first step of every agent task is *find the relevant code*.
+Here's what that step costs on a real 154-file Next.js app
+([vercel/ai-chatbot](https://github.com/vercel/ai-chatbot), sha `2becdb4`):
+
+| The question the agent has to answer first | Reading files | With agentmap | Saved |
+|---|---:|---:|---:|
+| Where is this symbol defined? | 1,950 | 20 | **99%** |
+| Does a helper for this already exist? | 14,740 | 19 | **99.9%** |
+| What breaks if I change this file? | 81,038 | 616 | **99.2%** |
+| What files make up this feature? | 6,121 | 1,025 | **83.3%** |
+| Give me a repo overview | 3,065 | 1,127 | **63.2%** |
+| Load the whole repo into context | 150,281 | 1,127 | **99.3%** |
+| What does this one file import? | 583 | 517 | **11.3%** |
+| **All 7 tasks combined** | **257,778** | **4,451** | **98.3%** |
+
+The pattern holds across [zod](https://github.com/colinhacks/zod) (367 files, **99.2%**) and
+[taxonomy](https://github.com/shadcn-ui/taxonomy) (125 files, **96.0%**). Full per-scenario
+tables: [`benchmark/RESULTS.md`](./benchmark/RESULTS.md).
+
+**And the right tokens.** Fewer tokens is worthless if they're the wrong ones, so a separate
+eval scores *retrieval accuracy* against ground truth derived live from real repos:
 
 | Question | agentmap | `git grep` |
 |---|---|---|
 | What depends on this file? | **100%** precision, 99.2% recall | 59.9% precision |
-| Where is this symbol defined? | **53.3%** top-1, 93.3% top-3 | 32% top-1, 80% top-3 |
+| Where is this symbol defined? | **53.3%** top-1, **93.3%** top-3 | 32% top-1, 80% top-3 |
 | Tokens to find a definition | **~2.4× fewer** | — |
 
-<sub>n=42 dependents / n=75 definitions across [zod](https://github.com/colinhacks/zod), [zustand](https://github.com/pmndrs/zustand) and [hono](https://github.com/honojs/hono) at pinned commits. Ground truth is derived at runtime by an independent resolver, not hand-authored. Re-run it yourself: `npm run eval`. Full method + per-repo numbers: [EVAL.md](./EVAL.md).</sub>
+<sub>n=42 dependents / n=75 definitions across <a href="https://github.com/colinhacks/zod">zod</a>, <a href="https://github.com/pmndrs/zustand">zustand</a> and <a href="https://github.com/honojs/hono">hono</a> at pinned commits. Ground truth is derived at runtime by an independent resolver, not hand-authored. Re-run it yourself: <code>npm run eval</code>. Full method: <a href="./EVAL.md">EVAL.md</a>.</sub>
 
-Precision is the point: every wrong file your agent opens is context spent being
-misled. `--relates` returns the full blast radius, so it costs *more* tokens than a
-bare `grep -l` file list — and that trade is [stated plainly in the eval](./EVAL.md),
-not hidden.
+**And it's fast.** A cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm
+cached query returns in **~0.1s** — the agent has a ranked answer back before it would have
+finished opening the first handful of files.
 
-[![npm](https://img.shields.io/npm/v/@raymondchins/agentmap)](https://www.npmjs.com/package/@raymondchins/agentmap)
-[![CI](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml/badge.svg)](https://github.com/raymondchins/agentmap/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](#)
+<details>
+<summary><b>The honest asterisks</b> (click — we'd rather you read them than find them later)</summary>
 
-> One file, one runtime dependency (`ts-morph`, which bundles the TypeScript compiler — ~10 MB installed). No vector DB, no embedding API, no server.
-> `npx @raymondchins/agentmap --any <query>` and you have a ranked answer.
->
-> **Fully local — no network calls, no telemetry, no data leaves your machine.** agentmap
-> reads your code, writes a cache under `.claude/agentmap/`, and never phones home (there is
-> not a single `fetch`/`http` call in the source). Your code is never sent anywhere.
->
-> ⚠️ **Always install the scoped name: `@raymondchins/agentmap`.** `npx agentmap`
-> (unscoped) runs an **unrelated** package by a different author — this project is
-> **`@raymondchins/agentmap`**, and the scoped name is required in every install and command.
-> [`npmjs.com/package/@raymondchins/agentmap`](https://www.npmjs.com/package/@raymondchins/agentmap)
+<br>
 
----
+- **The win scales with the work.** The small rows above (63%, 11%) are the floor, and a
+  *trivial single-file* lookup can cost **more** than `cat` + `grep` — taxonomy's file-import
+  task hit **−313%**, and we left it in the table.
+- **The 58× combined figure is skewed** by the whole-repo-load row (150 K vs 1 K tokens).
+  Excluding it, the per-task average on the same repo is ~32×. Both are real: the headline
+  captures the common agent worst-case (repo dump on session start), the per-task average
+  better represents a typical single query.
+- **`--relates` returns the full blast radius**, so it costs *more* tokens than a bare
+  `grep -l` file list. That trade is stated plainly in [EVAL.md](./EVAL.md), not hidden — we
+  think complete-and-correct beats short-and-wrong, but it is a trade.
+- **Numbers measure context-token volume**, not answer quality or wall-clock time.
+- **Token counts are estimates** (`chars / 4`), applied identically to both sides.
+- **TypeScript/JavaScript only** (+ Vue SFC). If your repo isn't TS/JS, this is not your
+  tool yet — see [Scope & limitations](#scope--limitations).
 
-## Quickstart
-
-No install needed:
-
-```bash
-npx @raymondchins/agentmap --any <query>
-```
-
-…or run it directly from a checkout:
-
-```bash
-node agentmap.mjs --any <query>
-```
-
-The first run builds and caches the map to `.claude/agentmap/map.json` (add
-`.claude/agentmap/` to `.gitignore`). Subsequent runs serve the cache when the tree is clean and `HEAD` is
-unchanged, and silently rebuild from disk when there are uncommitted `.ts/.tsx/.js/...`
-edits — so queries always reflect your in-flight work.
-
-Run with no flag to build + print a one-line summary:
-
-```
-$ node agentmap.mjs
-agentmap: 154 files | 4 features | top hub: lib/utils.ts (deg 52, pr 0.105171)
-```
-
----
-
-## Benchmark
-
-Every task you hand a coding agent starts with the same hidden step — *find the relevant code*.
-Here's the token cost of that step, **reading raw files vs querying agentmap**, on a real 154-file
-Next.js app ([vercel/ai-chatbot](https://github.com/vercel/ai-chatbot)). Every figure is captured
-tool output (`node benchmark/bench.mjs <repo>` at the pinned sha):
-
-<table width="100%">
-<thead>
-<tr>
-<th align="left">The question the agent has to answer first</th>
-<th align="right">Reading files</th>
-<th align="right">With agentmap</th>
-<th align="right">Saved</th>
-</tr>
-</thead>
-<tbody>
-<tr><td align="left">Where is this symbol defined?</td><td align="right">1,950</td><td align="right">20</td><td align="right">99%</td></tr>
-<tr><td align="left">Does a helper for this already exist? <i>(reuse)</i></td><td align="right">14,740</td><td align="right">19</td><td align="right">99.9%</td></tr>
-<tr><td align="left">What breaks if I change this file? <i>(blast radius)</i></td><td align="right">81,038</td><td align="right">616</td><td align="right">99.2%</td></tr>
-<tr><td align="left">What files make up this feature?</td><td align="right">6,121</td><td align="right">1,025</td><td align="right">83.3%</td></tr>
-<tr><td align="left">Give me a repo overview</td><td align="right">3,065</td><td align="right">1,127</td><td align="right">63.2%</td></tr>
-<tr><td align="left">Load the whole repo into context</td><td align="right">150,281</td><td align="right">1,127</td><td align="right">99.3%</td></tr>
-<tr><td align="left">What does this one file import?</td><td align="right">583</td><td align="right">517</td><td align="right">11.3%</td></tr>
-<tr><td align="left"><b>All 7 tasks combined</b></td><td align="right"><b>257,778</b></td><td align="right"><b>4,451</b></td><td align="right"><b>98.3%</b></td></tr>
-</tbody>
-</table>
-
-<sub>Context tokens the agent burns to answer each question — token est = chars/4, applied to both sides.</sub>
-
-That's the agent reaching the same answer on **58× fewer tokens** overall — and the pattern holds
-across [zod](https://github.com/colinhacks/zod) (367 files, **99.2%**) and
-[taxonomy](https://github.com/shadcn-ui/taxonomy) (125 files, **96.0%**), peaking at **646× fewer**
-on a single whole-repo map. Reproducible at pinned shas; full per-scenario tables in
-**[`./benchmark/RESULTS.md`](./benchmark/RESULTS.md)**.
-
-> **Methodology note:** the 58× overall figure is dominated by the whole-repo-load scenario
-> (Scenario F — 150 K vs 1 K tokens), which skews the combined ratio sharply upward. Excluding it,
-> the per-task overall ratio on the same sample repo is approximately 32×. Both numbers are real;
-> the headline captures the most common agent worst-case (repo-dump on session start), while the
-> per-task average better represents typical individual queries. RESULTS.md has the full breakdown.
-
-**Fewer tokens, but are they the _right_ tokens?** Token efficiency is only half the story — a
-separate [`EVAL.md`](./EVAL.md) (`npm run eval`) scores **retrieval accuracy** against ground
-truth derived live from real repos (zod, zustand, hono). Headline: agentmap returns the symbol
-definition in the **top 3 93.3%** of the time (naive grep 80%) at **~2.4× fewer tokens**, and
-identifies a module's dependents at **100% precision / 99.2% recall** (grep 100% recall but 59.9%
-precision). Fixtures are pinned to exact commits, so those numbers are re-derivable rather than
-whatever upstream happened to look like the day they were taken. Honest tradeoffs and method in
-EVAL.md.
-
-**Speed:** a cold build (parse + PageRank + symbol graph) takes **~1.2s**; a warm cached query
-returns in **~0.1s** (the lazy-loaded path added in 0.2.2) — the agent has a ranked answer back
-before it would have finished opening the first handful of files.
-
-Honest notes: the win scales with the work — the small rows above (63%, 11%) are the floor, and a
-*trivial single-file* lookup can even cost **more** than `cat`+`grep` (taxonomy's file-import task
-hit −313%; we leave it in). Numbers measure **context-token volume**, not answer quality or wall-clock.
+</details>
 
 ---
 
@@ -147,10 +224,10 @@ the prompt once and walk away — the copy goes stale the moment you edit a file
 makes the agent actually read it. agentmap is queryable and ranked instead: the agent
 interrogates it flag-by-flag rather than swallowing a dump.
 
-But the real reason to reach for agentmap is **accuracy**. It's built on `ts-morph` — the actual
-TypeScript compiler — so its import graph resolves the things a text/tree-sitter scanner guesses
-at: `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/`webpack` `resolve.alias`, package.json Node
-`#imports` subpaths, and pnpm/npm/yarn workspace cross-package imports. It reports an
+The wedge is **accuracy**, and it comes from `ts-morph` resolving what a text or tree-sitter
+scanner has to guess at: `tsconfig`/`jsconfig` `paths`, `vite`/`vitest`/`webpack`
+`resolve.alias`, package.json Node `#imports` subpaths, and pnpm/npm/yarn workspace
+cross-package imports. It reports an
 `edgeCoverage` map-health signal and warns loudly when a repo's imports mostly *don't* resolve,
 so a broken map is never framed as success — and a separate [`EVAL.md`](./EVAL.md) scores
 retrieval accuracy against live ground truth. That compiler-grade precision on TS/JS is the wedge.
