@@ -2,7 +2,7 @@
 // --install-skill: skill files + always-on docs/hooks per platform (project or global).
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { homedir, platform as osPlatform } from "node:os";
+import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -69,16 +69,17 @@ const PLATFORMS = {
   gemini: {
     label: "Gemini CLI",
     src: SKILL_MD,
-    dest: (root, globalScope) => {
-      if (!globalScope) return skillPath(root, false, ".gemini", "skills", "agentmap", "SKILL.md");
-      if (osPlatform() === "win32") return skillPath(root, true, ".agents", "skills", "agentmap", "SKILL.md");
-      return skillPath(root, true, ".gemini", "skills", "agentmap", "SKILL.md");
-    },
-    docs: (root, globalScope) => {
-      if (!globalScope) return join(root, "GEMINI.md");
-      if (osPlatform() === "win32") return join(root, ".agents", "GEMINI.md");
-      return join(root, ".gemini", "GEMINI.md");
-    },
+    // No win32 special case, deliberately. A previous version sent the GLOBAL
+    // Windows install to `~/.agents/` instead of `~/.gemini/`; `.agents` is the
+    // Amp/legacy convention (see the `agents` entry below), and Gemini CLI does
+    // not read it on any platform — it resolves global config under
+    // `homedir()/.gemini` everywhere. So the special case wrote two real files to
+    // a path nothing loads, and the install reported success: a Windows user got
+    // a silent no-op rather than an error. One path on every platform.
+    dest: (root, globalScope) =>
+      skillPath(root, globalScope, ".gemini", "skills", "agentmap", "SKILL.md"),
+    docs: (root, globalScope) =>
+      globalScope ? join(root, ".gemini", "GEMINI.md") : join(root, "GEMINI.md"),
     hooks: true,
   },
   antigravity: {
@@ -178,11 +179,11 @@ function installDocsForPlatform(cfg, { root, globalScope, dryRun, guidance, merg
   targets.push(dest);
 }
 
-function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, targets }) {
+function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, targets, quiet = false }) {
   if (cfg.hooks && !globalScope) {
     const hookTargets = installGeminiHooks(root, dryRun);
     for (const t of hookTargets) {
-      if (dryRun) console.log(`  ${cfg.label} hooks: ${t}`);
+      if (dryRun) { if (!quiet) console.log(`  ${cfg.label} hooks: ${t}`); }
       else {
         console.log(`  ${cfg.label} hooks → ${t}`);
         targets.push(t);
@@ -192,7 +193,7 @@ function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, target
   if (cfg.codexHooks && !globalScope) {
     const hookTargets = installCodexHooks(root, dryRun);
     for (const t of hookTargets) {
-      if (dryRun) console.log(`  ${cfg.label} hooks: ${t}`);
+      if (dryRun) { if (!quiet) console.log(`  ${cfg.label} hooks: ${t}`); }
       else {
         console.log(`  ${cfg.label} hooks → ${t}`);
         targets.push(t);
@@ -202,7 +203,7 @@ function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, target
   if (cfg.plugin && !globalScope) {
     const pluginTargets = installOpencodePlugin(root, dryRun);
     for (const t of pluginTargets) {
-      if (dryRun) console.log(`  ${cfg.label} plugin: ${t}`);
+      if (dryRun) { if (!quiet) console.log(`  ${cfg.label} plugin: ${t}`); }
       else {
         console.log(`  ${cfg.label} plugin → ${t}`);
         targets.push(t);
@@ -226,6 +227,27 @@ export function installSkill({ platforms: platformsArg = "all", project = true, 
   const guidance = readGuidanceSection();
 
   if (dryRun) console.log(`--dry-run: would install agentmap skill (${scope} scope):`);
+
+  // Preflight: validate EVERY platform before writing the FIRST file.
+  //
+  // The loop below writes as it goes, so a platform whose config is malformed
+  // used to throw partway through and leave the earlier platforms installed and
+  // the later ones not — a state that is neither "installed" nor "unchanged",
+  // from a command the user will now re-run against a repo it has already
+  // half-modified. The extras are where that happens: they parse the user's
+  // settings.json / config.toml, which is the one input agentmap does not
+  // control. Running them in dry-run mode first performs the same parse and
+  // shape validation and writes nothing, so a bad file fails clean.
+  //
+  // Skipped when already dry-running (the loop below does this work anyway) and
+  // silenced via `quiet`, since these are checks, not a plan for the user to read.
+  if (!dryRun) {
+    for (const name of names) {
+      const cfg = PLATFORMS[name];
+      if (cfg.projectOnly && globalScope) continue;
+      installExtrasForPlatform(name, cfg, { root, globalScope, dryRun: true, targets: [], quiet: true });
+    }
+  }
 
   for (const name of names) {
     const cfg = PLATFORMS[name];

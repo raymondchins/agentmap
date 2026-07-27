@@ -757,6 +757,16 @@ top 10 ranked symbols (Aider-style):
   0.015034  lib/errors.ts → ErrorCode (TypeAliasDeclaration)
 ```
 
+`map.json` persists the top 80. Asking for more re-ranks from the cached map rather than
+truncating, so `--symbols 200` really does return 200 where the repo has them. When a repo
+has fewer ranked symbols than you asked for, the header says so and `--json` carries
+`requested` / `shown` / `truncated`:
+
+```
+$ node agentmap.mjs --symbols 200
+top 62 ranked symbols (Aider-style) — asked for 200, this repo only ranks 62:
+```
+
 ### `--map [--tokens N] [--focus <path>]` — token-budgeted ranked digest
 
 The token-budgeted digest (Aider's killer feature): a ranked, files-and-symbols summary

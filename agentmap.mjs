@@ -1818,6 +1818,27 @@ function assemble(files, { target = MAP, extra = null, t0 = Date.now() } = {}) {
   return out;
 }
 
+// Resolve `--symbols n` / the `symbols` MCP tool against a cached map.
+//
+// `map.json` persists only the top RANKED_SYMBOLS_LIMIT (80) symbols, so asking
+// for more used to print "top 200 ranked symbols" above at most 80 rows: the
+// count described the REQUEST, not the output, with nothing saying so. When n
+// exceeds what was persisted, re-rank from the cached file map rather than
+// truncating — rankSymbols() reads `files` only, which is the same ts-morph-free
+// recompute the `--map --focus` path already performs, so this costs a graph walk
+// over data already in memory and no rebuild. Falls back to the stored slice if
+// the recompute cannot run (a pre-schema-7 cache with no `files`), because a
+// short answer beats a thrown one. Callers report `shown` so a repo that simply
+// has fewer ranked symbols than requested is distinguishable from a cap.
+function rankedSymbolsFor(data, n) {
+  const stored = data.rankedSymbols || [];
+  if (n <= stored.length) return stored.slice(0, n);
+  try {
+    const full = rankSymbols(data.files || {}, null);
+    return full.length >= stored.length ? full.slice(0, n) : stored.slice(0, n);
+  } catch { return stored.slice(0, n); }
+}
+
 // Build the Aider-style identifier graph from the file map and return a
 // ranked list of { file, name, kind, rank }. `focus` (Set of paths) +
 // derived mentioned idents personalize the ranking when given.
@@ -3400,9 +3421,9 @@ async function main() {
   } else if (has("--symbols")) {
     const data = ensureFresh();
     const sn = parseInt(arg("--symbols") ?? "", 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
-    const syms = (data.rankedSymbols || []).slice(0, n);
-    out({ command: "symbols", symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) }, () => {
-      console.log(`top ${n} ranked symbols (Aider-style):`);
+    const syms = rankedSymbolsFor(data, n);
+    out({ command: "symbols", requested: n, shown: syms.length, truncated: syms.length < n, symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) }, () => {
+      console.log(`top ${syms.length} ranked symbols (Aider-style)${syms.length < n ? ` — asked for ${n}, this repo only ranks ${syms.length}` : ""}:`);
       for (const s of syms) console.log(`  ${s.rank}  ${s.file} → ${s.name} (${s.kind})`);
     });
   } else if (has("--feature")) {
@@ -4487,8 +4508,8 @@ function mcpQuery(name, args) {
       const data = mcpEnsureFresh();
       const snRaw = (a.n != null && Number.isFinite(Number(a.n))) ? String(Math.trunc(Number(a.n))) : "";
       const sn = parseInt(snRaw, 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
-      const syms = (data.rankedSymbols || []).slice(0, n);
-      return ok({ command: "symbols", symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) });
+      const syms = rankedSymbolsFor(data, n);
+      return ok({ command: "symbols", requested: n, shown: syms.length, truncated: syms.length < n, symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) });
     }
     default:
       return err(2, `unknown tool: ${name}`);
