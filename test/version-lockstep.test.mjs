@@ -105,12 +105,22 @@ test("CHANGELOG.md documents the version in package.json", () => {
   // continuously — not just at release time. Bumping the version without writing
   // the section fails here, in `npm test`, rather than being noticed after publish
   // when the release notes are already public.
+  // Parse each heading and compare STRINGS, rather than building a RegExp out of
+  // VERSION. The first draft did `VERSION.replace(/\./g, "\\.")`, which CodeQL
+  // flagged as js/incomplete-sanitization, correctly: escaping only `.` leaves
+  // every other metacharacter — and the backslash itself — unescaped. Not
+  // exploitable here (the test above pins VERSION to bare semver, and the input is
+  // our own package.json), but a half-escape is the kind of thing that gets copied
+  // somewhere it does matter. Comparing parsed strings needs no escaping at all.
   const changelog = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
-  const heading = new RegExp(`^##\\s*\\[?${VERSION.replace(/\./g, "\\.")}\\]?`, "m");
-  assert.match(
-    changelog,
-    heading,
-    `CHANGELOG.md has no "## [${VERSION}]" section. Add the entry in the same commit as the version bump.`,
+  const versions = changelog
+    .split("\n")
+    .map((line) => line.match(/^##(?!#)\s*\[?([^\]\s]+)\]?/)) // (?!#) so ### subheads do not report as "#"
+    .filter(Boolean)
+    .map((m) => m[1]);
+  assert.ok(
+    versions.includes(VERSION),
+    `CHANGELOG.md has no "## [${VERSION}]" section. Add the entry in the same commit as the version bump. Found: ${versions.slice(0, 5).join(", ")}`,
   );
 });
 
