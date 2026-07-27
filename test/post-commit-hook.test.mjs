@@ -14,6 +14,13 @@ import { makeRepo, writeFiles, gitInit, cleanup } from "./helpers.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK_SRC = join(HERE, "..", "hooks", "post-commit");
 
+// hooks/post-commit is a POSIX /bin/sh script, and every test below drives it by
+// spawning `sh` directly. `sh` is not a Windows platform binary — git for Windows
+// ships its own bash and runs the hook through that, so what is unavailable on
+// win32 is this harness, not the hook. Skipped explicitly rather than left to fail
+// or, worse, rewritten into something that passes without executing anything.
+const POSIX_ONLY = { skip: process.platform === "win32" ? "hooks/post-commit is a POSIX sh script; sh is unavailable on win32" : false };
+
 // Install the real hook into dir/.git/hooks/post-commit, overriding the
 // core.hooksPath=/dev/null that gitInit sets so the hook actually fires.
 function installHook(dir) {
@@ -27,7 +34,7 @@ function installHook(dir) {
 // (the hook runs it via `node ./agentmap.mjs`, which treats .mjs as a module).
 const PAYLOAD = 'import{writeFileSync}from"node:fs";writeFileSync("PWNED","x")\n';
 
-test("planted ./agentmap.mjs is NOT executed by the post-commit hook by default", () => {
+test("planted ./agentmap.mjs is NOT executed by the post-commit hook by default", POSIX_ONLY, () => {
   const dir = makeRepo({ "agentmap.mjs": PAYLOAD, "a.ts": "export const a = 1;\n" });
   gitInit(dir);
   installHook(dir);
@@ -41,7 +48,7 @@ test("planted ./agentmap.mjs is NOT executed by the post-commit hook by default"
   cleanup(dir);
 });
 
-test("AGENTMAP_HOOK_ALLOW_LOCAL=1 opts in to running ./agentmap.mjs", () => {
+test("AGENTMAP_HOOK_ALLOW_LOCAL=1 opts in to running ./agentmap.mjs", POSIX_ONLY, () => {
   const dir = makeRepo({ "agentmap.mjs": PAYLOAD, "a.ts": "export const a = 1;\n" });
   gitInit(dir);
   installHook(dir);
@@ -70,7 +77,7 @@ const runHook = (dir) => execFileSync("sh", [join(dir, ".git", "hooks", "post-co
   cwd: dir, env: { ...process.env, AGENTMAP_HOOK_ALLOW_LOCAL: "1" }, stdio: "ignore",
 });
 
-test("a held lock makes the hook skip instead of piling on", () => {
+test("a held lock makes the hook skip instead of piling on", POSIX_ONLY, () => {
   const dir = makeRepo({ "agentmap.mjs": PAYLOAD, "a.ts": "export const a = 1;\n" });
   gitInit(dir);
   installHook(dir);
@@ -82,7 +89,7 @@ test("a held lock makes the hook skip instead of piling on", () => {
   cleanup(dir);
 });
 
-test("a lock older than 10 minutes is cleared so refresh cannot stay dead", () => {
+test("a lock older than 10 minutes is cleared so refresh cannot stay dead", POSIX_ONLY, () => {
   // Without this, one killed rebuild would disable auto-refresh permanently —
   // a worse failure than the leak it guards against, and a silent one.
   const dir = makeRepo({ "agentmap.mjs": PAYLOAD, "a.ts": "export const a = 1;\n" });
@@ -123,7 +130,7 @@ const WRAPPER = [
   'setInterval(()=>{},1000);\n',
 ].join("");
 
-test("the timeout reaps a hung runner's grandchild, not just the wrapper", () => {
+test("the timeout reaps a hung runner's grandchild, not just the wrapper", POSIX_ONLY, () => {
   const dir = makeRepo({ "agentmap.mjs": WRAPPER, "a.ts": "export const a = 1;\n" });
   const beat = join(dir, "HEARTBEAT");
   try {

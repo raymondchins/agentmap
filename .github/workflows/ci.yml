@@ -23,15 +23,31 @@ permissions:
 
 jobs:
   test:
-    name: test (node ${{ matrix.node-version }})
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
     # The schedule trigger exists only to re-run `audit` against a moving
     # advisory DB; the code is unchanged between crons, so skip the rest.
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    # Node versions fan out on Linux only; Windows and macOS get one pinned
+    # version each via `include`. A full 3x3 cross-product would be nine jobs to
+    # re-answer a question the Linux column already answers — what these two add
+    # is the PLATFORM, not another Node.
+    #
+    # They are here because the code has real per-platform branches (win32 paths
+    # in skills/install.mjs, path separators through the resolver, git behaviour
+    # differences) and the docs target Windows, yet every one of the 477 tests
+    # had only ever run on Linux. macOS is the maintainer's own platform and is
+    # exercised locally; Windows genuinely was not covered anywhere.
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node-version: [20, 22, 24]
+        include:
+          - os: windows-latest
+            node-version: 22
+          - os: macos-latest
+            node-version: 22
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,6 +89,14 @@ jobs:
   # So: pack, install from the tarball, and drive the real binary. Exit status is
   # NOT sufficient evidence here — exit 0 with empty stdout was the bug's exact
   # signature, so every step below asserts on OUTPUT.
+  #
+  # Deliberately Linux-only, unlike the `test` job above. Every step here is a
+  # bash script with `set -euo pipefail`, absolute /tmp paths and $GITHUB_ENV
+  # export syntax; on windows-latest the default shell is PowerShell, so porting
+  # this means `shell: bash` plus rewriting the paths, and a half-ported version
+  # that silently skips a step is worse than an honest gap. The Windows install
+  # path is therefore NOT covered — recorded here rather than left to be inferred
+  # from the matrix.
   install-smoke:
     name: install smoke (node ${{ matrix.node-version }})
     if: github.event_name != 'schedule'
