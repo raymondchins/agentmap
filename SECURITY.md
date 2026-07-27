@@ -56,6 +56,13 @@ When no graph match is found, agentmap falls back to a live `git grep` over trac
 
 This denylist is a best-effort guard for conventionally-named secret files, not a guarantee — a secret stored in an unmatched filename can still be surfaced. (It deliberately does **not** match a bare `token` substring, which would over-exclude ordinary source like `tokenizer.ts`.) agentmap does **not** transmit file contents anywhere; all processing is local.
 
+**Matched lines are untrusted repository bytes**, and are the only place agentmap echoes repository content back out — everything else it prints is its own metadata. Two guards apply:
+
+- **Terminal control sequences are neutralised.** C0 control characters and `DEL` are replaced with `U+FFFD` before the lines are printed or serialised, on both the prose and `--json` surfaces. Tab and newline are preserved. Without this, a text file carrying `ESC[2J` or a cursor-up run could blank the terminal or overwrite the `file:line` prefix so a hit appears to come from a file it did not.
+- **Over MCP, the lines are fenced as data.** The `any` tool appends a second content block marking the result as raw untrusted repository content, so a planted "ignore previous instructions" in an ordinary source or markdown file reads to the model as data rather than as a command. Structural results (file / symbol / feature) are agentmap's own metadata and are not fenced; the CLI path writes to a terminal, not to a model, and is not fenced either.
+
+Neither guard makes untrusted repository content safe to execute. They reduce the two ways a matched line can act on something other than the reader's eyes.
+
 ### Trust boundaries
 
 | Boundary | Notes |

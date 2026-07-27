@@ -109,3 +109,50 @@ test('a literal that DOES exist still matches inertly (positive control)', () =>
   assert.match(r.stdout, /SAFE_LITERAL_TOKEN/, "benign literal not found via content search");
   cleanup(dir);
 });
+
+test("terminal control sequences in matched source are neutralised, not echoed", () => {
+  // Content-search lines are the only raw repository bytes agentmap prints. A text
+  // file can carry ESC sequences that `git grep -I` happily passes through: ESC[2J
+  // clears the screen, and a cursor-up run can overwrite the file:line prefix so a
+  // hit looks like it came from somewhere else. Assert the escape never reaches
+  // stdout on EITHER surface — prose or --json — while the match still lands.
+  const dir = makeRepo({
+    ...FIXTURE,
+    // \x1b[2J = clear screen, \x1b[1A = cursor up, \x07 = bell, \x7f = DEL.
+    "src/evil.ts": `export const E = "ESCAPE_PROBE_LITERAL\x1b[2J\x1b[1A\x07\x7fspoofed";`,
+  });
+  gitInit(dir, { commit: true });
+
+  const prose = run(dir, "--any", "ESCAPE_PROBE_LITERAL");
+  assert.equal(prose.status, 0, `probe literal should be found, got ${prose.status}: ${prose.stderr}`);
+  assert.match(prose.stdout, /evil\.ts/, "the match itself was lost while sanitising");
+  assert.doesNotMatch(prose.stdout, /[\x00-\x08\x0B-\x1F\x7F]/, "a raw control character reached prose stdout");
+
+  const json = run(dir, "--any", "ESCAPE_PROBE_LITERAL", "--json");
+  assert.equal(json.status, 0, `--json probe should exit 0, got ${json.status}: ${json.stderr}`);
+  const obj = JSON.parse(json.stdout);
+  assert.equal(obj.kind, "content", `expected a content result, got ${obj.kind}`);
+  const joined = obj.lines.join("\n");
+  // Parsed back out, so this catches the JSON-escaped form too — JSON.stringify
+  // would have written a \\u001b escape and a consumer echoing the parsed value is exposed.
+  assert.doesNotMatch(joined, /[\x00-\x08\x0B-\x1F\x7F]/, "a raw control character survived into --json lines");
+  assert.match(joined, /ESCAPE_PROBE_LITERAL/, "the match itself was lost in --json");
+  assert.match(joined, /�/, "controls should be replaced with U+FFFD, not silently dropped");
+
+  cleanup(dir);
+});
+
+test("sanitising controls does not eat ordinary tabs in matched lines", () => {
+  // \t is deliberately NOT stripped — it is ordinary source indentation, and
+  // removing it would mangle every tab-indented repo's content-search output.
+  const dir = makeRepo({
+    ...FIXTURE,
+    "src/tabbed.ts": `export function f() {\n\treturn "TAB_PROBE_LITERAL";\n}`,
+  });
+  gitInit(dir, { commit: true });
+  const r = run(dir, "--any", "TAB_PROBE_LITERAL", "--json");
+  assert.equal(r.status, 0, `tab probe should exit 0, got ${r.status}: ${r.stderr}`);
+  const line = JSON.parse(r.stdout).lines.join("\n");
+  assert.match(line, /\t/, "the tab was stripped along with the control characters");
+  cleanup(dir);
+});

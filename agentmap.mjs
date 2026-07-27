@@ -277,9 +277,23 @@ const SENSITIVE_EXCLUDES = [
   // password.txt / passwords.json is excluded, not just foo.password.ts.
   ":(exclude,icase)*secret*", ":(exclude,icase)*credential*", ":(exclude,icase)*password*",
 ];
+// Neutralise terminal control sequences in content-search output. These lines are
+// the ONLY place agentmap echoes raw repository bytes back out — everything else it
+// prints is its own metadata. `git grep -I` already skips binary files, so what is
+// left is a TEXT file with escapes deliberately embedded in it: an ESC[2J or a
+// cursor-up run can blank the terminal or overwrite the file:line prefix, making a
+// hit appear to come from a file it did not. Replaces C0 controls (keeping \t) and
+// DEL with U+FFFD, so the line count and column alignment survive and the escape
+// becomes visible instead of executable. Applied inside contentSearch() rather than
+// at the two print sites, so prose AND --json get the same sanitised bytes — a JSON
+// consumer that parses and echoes a line is exposed to exactly the same trick, and
+// MCP's JSON.stringify escaping protects the model but not that consumer.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x08\x0B-\x1F\x7F]/g;
+const sanitizeContentLines = (s) => s.replace(CONTROL_CHARS, "�");
 const contentSearch = (q) => {
   try {
-    return execFileSync("git", ["-c", "core.quotePath=off", "grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap/", ...SENSITIVE_EXCLUDES], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim();
+    return sanitizeContentLines(execFileSync("git", ["-c", "core.quotePath=off", "grep", "-F", "--untracked", "-n", "-i", "-I", "-e", q, "--", ".", ":!.claude/agentmap/", ...SENSITIVE_EXCLUDES], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: MAXBUF }).trim());
   } catch { return ""; }
 };
 const currentSha = () => sh("git rev-parse --short HEAD");
