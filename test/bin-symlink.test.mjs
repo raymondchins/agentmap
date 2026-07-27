@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { symlinkSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { makeRepo, gitInit, cleanup, AGENTMAP } from "./helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -148,9 +148,17 @@ test("mcp.mjs run through its own symlink still serves", NO_SYMLINKS, () => {
 test("importing agentmap.mjs still executes nothing", async () => {
   // The guard must stay a guard: the realpath fix must not make an IMPORT look
   // like a direct run. argv[1] here is the test runner, not agentmap.mjs.
-  const mod = await import(AGENTMAP);
+  //
+  // pathToFileURL, not a `file://` + path template. On POSIX the two agree, which
+  // is why the template survived until a Windows runner existed; there AGENTMAP is
+  // `D:\a\agentmap\...`, and both forms break — the bare path is rejected by the
+  // ESM loader (ERR_UNSUPPORTED_ESM_URL_SCHEME, protocol 'd:') and `file://D:\a\...`
+  // is not a valid file URL either. pathToFileURL handles the drive letter and the
+  // separators on every platform.
+  const selfUrl = pathToFileURL(AGENTMAP).href;
+  const mod = await import(selfUrl);
   assert.equal(typeof mod.isDirectRun, "function");
-  assert.equal(mod.isDirectRun(new URL(`file://${AGENTMAP}`).href), false,
+  assert.equal(mod.isDirectRun(selfUrl), false,
     "isDirectRun returned true while imported by the test runner — the CLI would run on import");
 });
 
