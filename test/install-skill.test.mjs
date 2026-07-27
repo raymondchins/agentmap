@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeRepo, run, cleanup } from "./helpers.mjs";
+import { makeRepo, run, runErr, cleanup } from "./helpers.mjs";
 
 const PKG_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
@@ -137,5 +137,72 @@ test("--install-skill is idempotent", () => {
   const dir = makeRepo({});
   assert.equal(run(dir, "--install-skill", "--platform", "claude").status, 0);
   assert.equal(run(dir, "--install-skill", "--platform", "claude").status, 0);
+  cleanup(dir);
+});
+
+// --- installer robustness: a malformed settings.json must not half-install ----
+
+test("a non-object hooks key fails with a named error, not an opaque TypeError", () => {
+  // `settings.hooks ??= {}` only fills null/undefined, so a string sailed through
+  // and threw ".some is not a function" two lines later.
+  const dir = makeRepo({ ".gemini/settings.json": JSON.stringify({ hooks: "nope" }, null, 2) });
+  const r = run(dir, "--install-skill", "--platform", "gemini");
+  assert.notEqual(r.status, 0, "a malformed settings.json should fail the install");
+  const msg = r.stdout + r.stderr;
+  assert.match(msg, /\.gemini\/settings\.json/, "the error does not name the offending file");
+  assert.match(msg, /"hooks" must be an object/, "the error does not name the offending key");
+  assert.doesNotMatch(msg, /is not a function/, "still throwing the opaque TypeError");
+  cleanup(dir);
+});
+
+test("a non-array hooks.BeforeTool fails with a named error", () => {
+  const dir = makeRepo({ ".gemini/settings.json": JSON.stringify({ hooks: { BeforeTool: 42 } }, null, 2) });
+  const r = run(dir, "--install-skill", "--platform", "gemini");
+  assert.notEqual(r.status, 0, "a malformed hooks.BeforeTool should fail the install");
+  assert.match(r.stdout + r.stderr, /"hooks\.BeforeTool" must be an array/, "the error does not name the offending key");
+  cleanup(dir);
+});
+
+test("a malformed config for ONE platform installs nothing for the others", () => {
+  // The whole point of the preflight. Before it, `--install-skill` (all platforms)
+  // wrote Claude/Cursor/Codex first and only then hit Gemini's broken settings.json,
+  // leaving a repo that was neither installed nor untouched.
+  const dir = makeRepo({
+    "src/index.ts": "export function x() { return 1; }",
+    ".gemini/settings.json": JSON.stringify({ hooks: "nope" }, null, 2),
+  });
+  const r = run(dir, "--install-skill");
+  assert.notEqual(r.status, 0, "install should fail while any platform's config is malformed");
+  for (const p of [
+    join(dir, ".claude", "skills", "agentmap", "SKILL.md"),
+    join(dir, ".cursor", "rules", "agentmap.mdc"),
+    join(dir, ".codex", "skills", "agentmap", "SKILL.md"),
+    join(dir, ".opencode", "skills", "agentmap", "SKILL.md"),
+  ]) {
+    assert.equal(existsSync(p), false, `partial install: ${p} was written despite the failure`);
+  }
+  cleanup(dir);
+});
+
+test("comments in settings.json are reported as dropped, not deleted in silence", () => {
+  // JSON.stringify cannot round-trip JSONC. The comments go; the user gets told.
+  const dir = makeRepo({
+    ".gemini/settings.json": '{\n  // keep an eye on this\n  "theme": "dark"\n}\n',
+  });
+  const r = runErr(dir, "--install-skill", "--platform", "gemini");
+  assert.equal(r.status, 0, r.stderr);
+  const msg = r.stdout + r.stderr;
+  assert.match(msg, /contained comments/i, "no warning that JSONC comments were dropped");
+  const after = JSON.parse(readFileSync(join(dir, ".gemini", "settings.json"), "utf8"));
+  assert.equal(after.theme, "dark", "the surrounding settings were not preserved");
+  assert.ok(Array.isArray(after.hooks?.BeforeTool), "the hook was not actually registered");
+  cleanup(dir);
+});
+
+test("a comment-free settings.json triggers no comment warning", () => {
+  const dir = makeRepo({ ".gemini/settings.json": JSON.stringify({ theme: "dark" }, null, 2) });
+  const r = runErr(dir, "--install-skill", "--platform", "gemini");
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout + r.stderr, /contained comments/i, "false comment warning on plain JSON");
   cleanup(dir);
 });

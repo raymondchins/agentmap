@@ -43,12 +43,38 @@ function stripJsonComments(src) {
   return out;
 }
 
+// Parse a settings file that may be JSONC. Returns { settings, hadComments } —
+// `hadComments` is true when the file only parsed after comments were stripped,
+// which is the caller's cue to warn: we re-serialise with JSON.stringify, so
+// every comment in the user's file is dropped on write. Preserving them would
+// mean a real JSONC-aware splice; warning is the honest cheap option, and it
+// beats the previous behaviour of deleting a user's annotations in silence.
 function parseSettings(text, settingsPath) {
-  try { return JSON.parse(text) || {}; }
+  try { return { settings: JSON.parse(text) || {}, hadComments: false }; }
   catch {
-    try { return JSON.parse(stripJsonComments(text)) || {}; }
+    try { return { settings: JSON.parse(stripJsonComments(text)) || {}, hadComments: /\/\/|\/\*/.test(text) }; }
     catch { throw new Error(`${settingsPath} is not valid JSON — fix or remove it, then re-run`); }
   }
+}
+
+// Fetch settings.hooks[event] as an array, creating it when absent and REJECTING
+// a conflicting shape with a message that names the file and the key.
+//
+// `settings.hooks ??= {}` only fills null/undefined, so a settings.json where
+// `hooks` is a string, a number or an array sailed through and blew up two lines
+// later on `.some is not a function` — an opaque TypeError, thrown mid-install
+// after earlier platforms had already been written to disk. The user saw a stack
+// trace and a half-installed skill, with nothing pointing at the actual cause.
+function hookArray(settings, event, settingsPath) {
+  if (settings.hooks === undefined || settings.hooks === null) settings.hooks = {};
+  if (typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
+    throw new Error(`${settingsPath}: "hooks" must be an object, found ${Array.isArray(settings.hooks) ? "an array" : typeof settings.hooks} — fix it, then re-run`);
+  }
+  if (settings.hooks[event] === undefined || settings.hooks[event] === null) settings.hooks[event] = [];
+  if (!Array.isArray(settings.hooks[event])) {
+    throw new Error(`${settingsPath}: "hooks.${event}" must be an array, found ${typeof settings.hooks[event]} — fix it, then re-run`);
+  }
+  return settings.hooks[event];
 }
 
 export function readGuidanceSection() {
@@ -74,14 +100,17 @@ export function installGeminiHooks(root, dryRun) {
   const NUDGE_CMD = `node "$GEMINI_PROJECT_DIR/.gemini/hooks/agentmap-nudge.mjs"`;
   const targets = [nudgeRel, settingsPath];
 
-  let settings = {};
+  let settings = {}, hadComments = false;
   if (existsSync(settingsPath)) {
-    settings = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath);
+    ({ settings, hadComments } = parseSettings(readFileSync(settingsPath, "utf8"), settingsPath));
   }
-  settings.hooks ??= {};
-  settings.hooks.BeforeTool ??= [];
+  // Validates shape and throws a named error before anything is written. Runs on
+  // the dry-run path too, on purpose: installSkill() preflights every platform
+  // with dryRun=true so a broken settings.json fails before the FIRST file lands,
+  // instead of halfway through a multi-platform install.
+  const beforeTool = hookArray(settings, "BeforeTool", settingsPath);
   const matcher = "run_shell_command|grep|search";
-  const already = settings.hooks.BeforeTool.some(
+  const already = beforeTool.some(
     (e) => e?.matcher === matcher && Array.isArray(e?.hooks) &&
       e.hooks.some((h) => typeof h?.command === "string" && h.command.includes("agentmap-nudge")),
   );
@@ -92,7 +121,7 @@ export function installGeminiHooks(root, dryRun) {
   writeFileSync(nudgeDest, readFileSync(GEMINI_NUDGE_SRC, "utf8"));
 
   if (!already) {
-    settings.hooks.BeforeTool.push({
+    beforeTool.push({
       matcher,
       hooks: [{
         name: "agentmap-nudge",
@@ -102,6 +131,12 @@ export function installGeminiHooks(root, dryRun) {
         description: "Nudge structural searches toward agentmap",
       }],
     });
+    // Say so before the rewrite, not after. JSON.stringify cannot round-trip
+    // JSONC, so the user's comments are about to be gone and the only kind thing
+    // to do is name the file they should check.
+    if (hadComments) {
+      console.warn(`  ⚠ ${settingsPath} contained comments — JSON has no way to keep them, so they were dropped when agentmap added its hook. Re-add them if you need them.`);
+    }
     atomicWrite(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   }
   return targets;
