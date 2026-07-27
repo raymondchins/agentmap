@@ -232,10 +232,20 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
     `./types` → `types.d.ts`, and for directory imports resolving via a nested
     `package.json` `"main"`. Trying ts-morph first with `resolveSpec` as fallback is
     already the correct design. *(performance/high)*
-- [ ] **Incremental post-commit rebuild + lock** — `hooks/post-commit:67`: the
-  hook re-parses the entire repo on every commit and concurrent rebuilds duplicate
-  work with no locking. Diff `HEAD~1..HEAD` and re-parse only changed files + their
-  direct dependents; add a lockfile / compare-and-skip on in-progress HEAD build.
+- [~] **Incremental post-commit rebuild + lock** — **LOCK DONE; incremental
+  deliberately NOT taken yet.** The locking half shipped: `hooks/post-commit` holds
+  a single-instance lock via atomic `mkdir` (`:92`), clears a lock orphaned by a
+  killed run after 10 minutes (`:95`) so one bad commit cannot wedge refresh
+  permanently, and caps the run with a process-tree kill. Concurrent rebuilds no
+  longer duplicate work.
+  The incremental half is **gated on Tier 2 going default-on**, and should stay
+  gated. Tier 2 (`AGENTMAP_INCREMENTAL=1`) is still EXPERIMENTAL because three
+  adversarial rounds left a residual isolated-reparse tail (`.d.ts` edges,
+  package.json `exports`, barrel+target). This hook ships to every consumer and runs
+  on every commit they make, so wiring it to an opt-in-because-not-yet-trusted path
+  would push exactly that tail onto people who never opted in — and a wrong map
+  written by a background hook is the hardest kind to notice. Revisit when Tier 2's
+  tail closes and it becomes the default dirty path.
   *(performance/medium — depends on Batch 2 incremental machinery)*
 - [ ] **Memory ceiling** — ⚠ **THE REMEDY IN THE ORIGINAL ITEM IS REFUTED. Do not
   implement it.** Measured on content-os (393 files), four loop variants doing
@@ -256,19 +266,50 @@ behavior into a real competitive claim vs CodeGraph's 2s sync.
   closure (~300MB, ~1,800 extra program files on content-os) dominates and is
   independent of repo size. A file-count envelope would cry wolf on small dep-heavy
   repos and stay silent on the big repo it exists for.
-  **Still open, rescoped:** sample real `heapUsed` during the parse and print one
-  actionable warning (with the `--max-old-space-size` fix) before an OOM kills the
-  build with no map at all; document the measured envelope. *(performance/medium)*
+  **The rescoped remedy is now ALSO refuted — built, measured, reverted.** Sampling
+  `heapUsed` against `getHeapStatistics().heap_size_limit` during the parse loop
+  cannot fire in time, for two independent reasons measured on zod (409 files) under
+  a forced `--max-old-space-size=150`:
+  - **The fatal allocation is inside ONE file's work, not spread across files.** With
+    a probe printing on every iteration, the process died having logged **exactly one
+    sample** — it OOM'd during the first file's `getExportedDeclarations()`. Sampling
+    every 64 files logged **zero** samples before death. No sampling rate helps when
+    the granularity of the blow-up is finer than one loop iteration.
+  - **The reading immediately before death is not elevated.** That single sample read
+    `heapUsed` **104MB against a 246MB limit — 42%**, nowhere near any threshold
+    worth warning on. V8 keeps `heapUsed` low by collecting harder right up until it
+    gives up, so the ratio is flat and then the process is gone.
+  A guard that never fires is worse than none: it reads as protection in the source
+  and in a review. The implementation was therefore reverted (`agentmap.mjs` is
+  byte-identical to before it), and what survives is the half that is real — the
+  measured envelope and the `--max-old-space-size` remedy, documented in the README
+  Troubleshooting section where a user hitting the OOM will search for it.
+  **Still open:** nothing in-process. A supervisor that spawns the build and maps
+  exit 134 / `SIGABRT` to the remedy would work, and `mcp.mjs` already spawns
+  agentmap so it could do this for the MCP path — but the plain CLI has no parent,
+  and adding one is an architecture change, not a warning. *(performance/medium)*
 - [x] **Cap unbounded symbol matches** — DONE. `--find`/`--any` symbol matches are
   ranked by the containing file's PageRank and capped to `SYMBOL_MATCH_LIMIT` (50),
   with a "showing top N of M by pagerank — narrow your query" footer in prose and
   `total`/`shown`/`truncated` (`--find`) / `symbolsTotal`/`symbolsTruncated`
   (`--any`) in JSON. Ranking keeps the important matches when truncated.
   *(performance/medium)*
-- [ ] **Prune rankSymbols cross-product** — `agentmap.mjs:736`: refs×defs edge
-  list per identifier is quadratic on duplicated export names. Skip identifiers
-  whose definer count exceeds a threshold (near-zero signal after the 0.1
-  multiplier) or aggregate into per-defFile summary edges. *(performance/low)*
+- [x] **Prune rankSymbols cross-product** — **CLOSED: REFUTED. Do not implement.**
+  Measured on five repos (agentmap 77 files, zustand 49, hono 385, zod 409,
+  a 392-file Next.js app) by replaying the edge-building loop over each cached map.
+  The cross-product is not quadratic in practice: the largest edge list is **2,533**
+  (hono), and the most definers any single identifier attracts is **17**. Pruning at
+  `defCount > 20` drops **0 edges on every one of the five**, so the threshold the
+  item implies is a no-op. Pruning low enough to matter is actively harmful —
+  `defCount > 5` would drop **78.7% of zod's graph**, including `util`
+  (12 definers × 34 referencing files), which is a real identifier the ranking wants.
+  The app-shaped repo, the case most likely to duplicate export names, peaked at
+  **3** definers (`NotificationsPage`) and 1,292 edges.
+  Two premises were wrong: `default` is already excluded from references
+  (`agentmap.mjs:1859`), which removes the one identifier that would genuinely fan
+  out, and `identMul`'s `RARE_PENALTY` already discounts the high-definer case it
+  proposed to delete. The real cost driver is `getExportedDeclarations()` at
+  ~O(N^2.7), recorded in the wall-clock-budget item above. *(performance/low)*
 
 **Acceptance:** a second query on an unchanged dirty tree does not re-parse;
 a pathological deep-chain repo finishes within the budget with skipped files
