@@ -3,6 +3,28 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.20.1] - 2026-07-27
+
+Docs and packaging metadata only — no runtime change. Cut so the npm page stops
+disagreeing with the repo: npm freezes README text at publish time but resolves
+relative images against the default branch, so the new banner was already showing
+above the old copy.
+
+### Changed
+- **README rewritten around what it saves.** The old opening led with precision/recall
+  and methodology caveats — credibility content standing where the value proposition
+  belongs. The benchmark table now sits directly under the demo, the four prose benefit
+  blocks collapse into one command table, and sections are table-led rather than
+  paragraph-led. Every figure, source and caveat is unchanged; the honest asterisks moved
+  into a `<details>` rather than out of the document.
+- **New generated banner** (`assets/hero.png`, built from `assets/hero.html`). The bar
+  widths are the real `4451 / 257778` ratio, drawn to scale. Redesigned on a 1200px canvas
+  after the previous 1600px version proved unreadable on phones — GitHub renders README
+  images at roughly 375px, so type below ~26px disappears. `assets/README.md` documents the
+  constraint and how to verify it.
+- **Plugin marketplace description** no longer opens with "the repo map your coding agent
+  is forced to use", matching the README's positioning.
+
 ## [0.20.0] - 2026-07-27
 
 ### Added
