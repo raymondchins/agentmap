@@ -74,6 +74,14 @@ where naive grep returns a noisy superset (high recall, low precision) — and `
 actually costs **more** tokens than `grep -l` because it returns the full blast radius
 (exports + imports + dependents + related), not just the file list.
 
+> **Reconciling this with `RESULTS.md`'s 99.2% blast-radius row.** Both numbers are real;
+> they price different baselines. `RESULTS.md` scenario D compares against an agent that
+> `cat`s every dependent file — agentmap wins by ~99%. This eval compares against `grep -l`,
+> which returns a file list and nothing else — agentmap loses on tokens. The list is cheaper
+> because it is *less* correct: at **59.9%** precision, roughly 4 of every 10 paths on it are
+> not dependents, and the agent pays for them on the next turn when it opens them. Neither
+> file is the whole picture on its own; quote them together.
+
 ### Per fixture
 
 | Repo | commit | def n | agentmap top1/top3 | grep top1/top3 | deps n | agentmap recall/prec | grep recall/prec |
