@@ -169,16 +169,19 @@ OS-event file watcher (FSEvents/inotify) with debounced auto-sync and an install
 auto-configures eight agent CLIs. agentmap's honest edge over the multi-language graph tools is
 narrower and sharper: **TS/JS resolution the others approximate, with a published accuracy eval.**
 
-| | **agentmap** | Aider repo map | RepoMapper | Repomix | code2prompt |
+| | **agentmap** | [Aider repo map](https://github.com/Aider-AI/aider) | [RepoMapper](https://github.com/nuptcode/repomapper) | [Repomix](https://github.com/yamadashy/repomix) | [code2prompt](https://github.com/mufeedvh/code2prompt) |
 | --- | --- | --- | --- | --- | --- |
 | **Ranking algorithm** | Personalized PageRank (file + symbol graphs) | PageRank (graph ranking) | Importance heuristics | None (file order) | None (file order) |
 | **Languages** | TS/JS + Vue SFC (via ts-morph) | Many (tree-sitter) | Many (tree-sitter) | Language-agnostic (text) | Language-agnostic (text) |
 | **Token-budget output** | Yes — `--map [--tokens N]` ranked digest | Yes (built into Aider's context) | Partial | Yes (size caps) | Yes (templates/caps) |
 | **TS/JS resolution depth** | **Compiler-grade — `tsconfig` paths + `vite`/`webpack` alias + `#imports` + workspaces (ts-morph)** | Basename/regex heuristics | Basename/regex heuristics | N/A (text) | N/A (text) |
 | **Retrieval-accuracy eval** | **Yes — published [`EVAL.md`](./EVAL.md) vs live ground truth** | No | No | No | No |
-| **Agent-loop wiring** | Yes — post-commit auto-refresh + PreToolUse hook | In-process (Aider only) | No | No | No |
+| **Agent-loop wiring** | Yes — post-commit auto-refresh + PreToolUse hook | In-process (Aider only) | No | MCP server (no auto-refresh, no nudge) | No |
 | **Dependencies** | `ts-morph` only | Python + tree-sitter stack | Python + tree-sitter | Node | Rust binary |
 | **Install** | `npx @raymondchins/agentmap` | `pip install aider-chat` | `pip install` | `npx`/global | `cargo`/binary |
+
+<sub>Comparison as of <b>2026-07-27</b>, from each project's own docs. These are moving targets — if a
+cell is out of date, that's a bug: <a href="https://github.com/raymondchins/agentmap/issues">open an issue</a>.</sub>
 
 What that table is **not** claiming: agentmap is TS/JS-only (the others are multi-language),
 and it's a **file-level import graph**, not a full call-site/reference resolver (see
@@ -358,7 +361,7 @@ skill/rule the agent may or may not consult). Honest matrix:
 | Platform | Install | Enforcement | Known gaps |
 |----------|---------|-------------|------------|
 | **Claude Code** | `/plugin install agentmap@agentmap` (or `--install-hooks`) | **live hook** — `PreToolUse` nudge on `Grep` + Bash searchers | non-blocking (never denies grep); bare-symbol `Grep` nudge requires the #3 hook fix |
-| **Gemini CLI** | `--install-skill --platform gemini` | **live hook** — `.gemini/settings.json` nudge | fires on the `AfterTool`/`systemMessage` path (the earlier `BeforeTool` + `additionalContext` combo was silently dropped — fixed in #4) |
+| **Gemini CLI** | `--install-skill --platform gemini` | **live hook** — `.gemini/settings.json` nudge | fires on `BeforeTool` and emits a top-level `systemMessage`; Gemini parses and then **drops** `hookSpecificOutput.additionalContext` on `BeforeTool`, which is why the nudge used to vanish silently |
 | **OpenCode** | `--install-skill --platform opencode` | **log-only** — `.opencode/plugins/agentmap-nudge.js` writes to the log, does not inject context | plugin can't steer the model; relies on the `AGENTS.md` block being read |
 | **Cursor** | `--install-skill --platform cursor` + `.cursor/mcp.json` (below) | **MCP + docs** — `alwaysApply` rule + the MCP server | Cursor's own hooks aren't wired; the rule is advisory |
 | **Codex CLI** | `--install-skill --platform codex` | **live gate** — `.codex/config.toml` PreToolUse hook | denies only high-confidence structural greps; allow-fallback for logs/pipes/non-TS-JS; `AGENTMAP_CODEX_GATE=0` bypasses; needs a trusted dir + Codex hooks-GA |
@@ -408,6 +411,10 @@ leaves the rest of your `AGENTS.md` / `GEMINI.md` intact.
 | Codex/Gemini nudge never fires | Codex's gate is opt-in — set `[features] hooks = true` in `.codex/config.toml` (`AGENTMAP_CODEX_GATE=0` disables it). Gemini needs the `BeforeTool` hook that `--install-skill` writes. |
 | Installed the wrong `agentmap` | This is **`@raymondchins/agentmap`** (npm scope) — not the unrelated unscoped `agentmap` packages. |
 | Cursor MCP tools missing | `--mcp` doesn't auto-wire Cursor; add the copy-paste `.cursor/mcp.json` from the matrix above and restart Cursor. |
+| Hook works in your shell, not in the agent | Almost always **nvm**. Your interactive shell sources `~/.nvm/nvm.sh`; the git hook and the agent's tool runner do not, so `node` isn't on their `PATH`. Point the hook at an absolute node (`which node`) or install a system-wide node. |
+| `JavaScript heap out of memory` | Raise the ceiling — the parse peaks and there is no in-process warning that can fire in time (the process dies inside a single call, with heap use still at ~40% one sample earlier). Re-run as `NODE_OPTIONS=--max-old-space-size=8192 npx @raymondchins/agentmap`. Repo **size is not the axis**: measured, a 252-file Next.js app peaks at 683 MB while 4,000 dependency-free files peak at 756 MB, because the dependency `.d.ts` closure (~300 MB, ~1,800 extra program files on a 393-file app) dominates. A small repo with heavy `@types` can need more than a large plain one. |
+| Skill file looks out of date | Each installed skill dir carries a `.agentmap_version`. `agentmap --doctor` compares it against the running version and flags the drift; `--install-skill` again overwrites it. |
+| `0 files mapped` | agentmap indexes `git ls-files --cached --others --exclude-standard`, so uncommitted files *are* included but **`.gitignore`d ones are not** — a source tree matched by an ignore rule maps to nothing, as does a directory that is not a git repo at all. Confirm with `git ls-files --others --exclude-standard \| head`. |
 
 ---
 
