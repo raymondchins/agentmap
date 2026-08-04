@@ -210,9 +210,10 @@ jobs:
           cd /tmp/consumer-wt
           agentmap --install-hooks
           test -f /tmp/consumer/.git/hooks/post-commit || { echo "::error::hook did not land in the common dir — git will never run it"; exit 1; }
-          # Commit what --install-hooks created, or the tree is dirty and agentmap
-          # correctly writes map.dirty.json instead of map.json.
-          git add -A && git commit -qm "wire agentmap"
+          # No commit needed here: the step above already committed the files
+          # --install-hooks creates, so this worktree branches from a clean tree.
+          # (An earlier version committed anyway and died on "nothing to commit"
+          # under `set -e`.)
           agentmap --hubs >/dev/null
           BEFORE="$(node -p "require('./.claude/agentmap/map.json').generatedSha")"
           printf 'export const d = 4;\n' > src/d.ts

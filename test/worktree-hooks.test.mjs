@@ -10,77 +10,83 @@
 //  around — died silently, in the exact install shape a parallel-agent workflow
 //  uses most.
 //
-//  The first test asserts BEHAVIOUR (a real commit moves generatedSha), not the
-//  hook file's existence: a file in the right place that never fires would pass a
-//  path assertion and still be the same bug. That means it must undo the harness's
-//  own core.hooksPath=<nonexistent> (gitInit sets it so stray hooks never run),
-//  the same way test/post-commit-hook.test.mjs does.
+//  The behavioural test proves GIT RAN THE HOOK, which a path assertion cannot.
+//  It does so with a planted `./agentmap.mjs` stub + AGENTMAP_HOOK_ALLOW_LOCAL=1
+//  (hook rung 1) rather than by letting the hook resolve a real agentmap binary:
+//  rungs 2-4 need a node_modules install, a PATH binary, or a network npx, none
+//  of which a temp fixture has. An earlier cut of this file did rely on that
+//  resolution — it passed locally and failed on every CI platform, which is the
+//  test being environment-dependent, not the fix being wrong.
 //
 //  Run: node --test test/worktree-hooks.test.mjs
 // ============================================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { makeRepo, gitInit, git, run, runErr, cleanup } from "./helpers.mjs";
 
-// Wait for the detached post-commit rebuild to land. The hook runs in the
-// background on purpose, so polling is the honest way to observe it.
-function waitForSha(mapPath, before, tries = 60) {
-  const block = new Int32Array(new SharedArrayBuffer(4));
-  for (let i = 0; i < tries; i++) {
-    try {
-      const sha = JSON.parse(readFileSync(mapPath, "utf8")).generatedSha;
-      if (sha && sha !== before) return sha;
-    } catch { /* not written yet, or caught mid-rename */ }
-    Atomics.wait(block, 0, 0, 250);
-  }
-  return before;
-}
+// Same reasoning as test/post-commit-hook.test.mjs: hooks/post-commit is a POSIX
+// sh script. Git for Windows runs it through its own bundled bash, so what is
+// missing on win32 is this harness, not the behaviour. The path assertions below
+// are platform-independent and run everywhere.
+const POSIX_ONLY = { skip: process.platform === "win32" ? "hooks/post-commit is a POSIX sh script; sh is unavailable on win32" : false };
 
-// A worktree checked out beside the repo, in its own temp root so it never
-// collides with the harness's sentinel paths in tmpdir().
+// A stand-in for the real CLI: hook rung 1 runs `node ./agentmap.mjs`, so if this
+// marker appears, git executed the hook that --install-hooks wrote.
+const PAYLOAD = 'import{writeFileSync}from"node:fs";writeFileSync("HOOK_RAN","x")\n';
+
+// A worktree in its own temp root, so it never collides with the harness's
+// sentinel paths in tmpdir().
 function addWorktree(main, branch) {
   const dir = join(mkdtempSync(join(tmpdir(), "agentmap-wt-")), "tree");
   git(main, "worktree", "add", "-q", dir, "-b", branch);
   return dir;
 }
 
-test("--install-hooks in a worktree wires the hook git actually runs", () => {
+test("--install-hooks in a worktree writes to the dir git runs hooks from", () => {
+  const main = makeRepo({ "src/a.ts": "export const a = 1;\n" });
+  try {
+    gitInit(main, { commit: true });
+    const tree = addWorktree(main, "feat");
+    try {
+      run(tree, "--install-hooks");
+      // Before the fix this file was absent and an orphan sat under
+      // .git/worktrees/<name>/hooks, which git never reads.
+      assert.ok(
+        existsSync(join(main, ".git", "hooks", "post-commit")),
+        "post-commit must land in the common dir, not the per-worktree git dir",
+      );
+    } finally {
+      git(main, "worktree", "remove", "--force", tree);
+    }
+  } finally { cleanup(main); }
+});
+
+test("git really runs that hook on a commit inside the worktree", POSIX_ONLY, () => {
   const main = makeRepo({ "src/a.ts": "export const a = 1;\n" });
   try {
     gitInit(main, { commit: true });
     // gitInit points core.hooksPath at a nonexistent dir so stray hooks never
     // fire; this test is specifically about the hook firing.
     git(main, "config", "--unset", "core.hooksPath");
-    const tree = addWorktree(main, "feat");
+    const tree = addWorktree(main, "feat-run");
     try {
       run(tree, "--install-hooks");
-
-      // The common dir is where git looks. Before the fix this file was absent,
-      // and an orphan sat under .git/worktrees/<name>/hooks instead.
-      assert.ok(
-        existsSync(join(main, ".git", "hooks", "post-commit")),
-        "post-commit must land in the common dir, not the per-worktree git dir",
-      );
-
-      // Commit what --install-hooks just created (.gitignore, .claude/hooks/…),
-      // otherwise the tree is dirty and agentmap correctly writes map.dirty.json
-      // instead of map.json — the freshness invariant doing its job.
-      git(tree, "add", "-A");
-      git(tree, "commit", "-qm", "wire agentmap");
-
-      // Behavioural proof: a real commit inside the worktree rebuilds the map.
-      run(tree, "--hubs");
-      const mapPath = join(tree, ".claude", "agentmap", "map.json");
-      const before = JSON.parse(readFileSync(mapPath, "utf8")).generatedSha;
+      writeFileSync(join(tree, "agentmap.mjs"), PAYLOAD);
       writeFileSync(join(tree, "src", "b.ts"), "export const b = 2;\n");
       git(tree, "add", "-A");
-      git(tree, "commit", "-qm", "second");
-      assert.notEqual(
-        waitForSha(mapPath, before), before,
-        "post-commit did not refresh the map inside the worktree",
+      // The hook inherits the committing process's env, which is how rung 1 gets
+      // opted into. It backgrounds its work, so wait before asserting.
+      execFileSync("git", ["commit", "-qm", "second"], {
+        cwd: tree, env: { ...process.env, AGENTMAP_HOOK_ALLOW_LOCAL: "1" }, stdio: "ignore",
+      });
+      execFileSync("sh", ["-c", "sleep 2"]);
+      assert.ok(
+        existsSync(join(tree, "HOOK_RAN")),
+        "git did not run the installed hook — auto-refresh is dead inside the worktree",
       );
     } finally {
       git(main, "worktree", "remove", "--force", tree);
@@ -118,8 +124,8 @@ test("a core.hooksPath redirect is reported as INERT, not installed", () => {
     git(main, "config", "core.hooksPath", ".husky");
     // runErr, not run: run() drops stderr on a zero exit, and the warning is the
     // whole point — installing still succeeds, it just cannot take effect.
-    const r = runErr(main, "--install-hooks");
-    assert.match(r.stderr, /core\.hooksPath/, "install must warn that the hook is inert");
+    assert.match(runErr(main, "--install-hooks").stderr, /core\.hooksPath/,
+      "install must warn that the hook is inert");
 
     const doctor = run(main, "--doctor").stdout;
     const line = doctor.split("\n").find((l) => l.includes("post-commit"));
