@@ -246,3 +246,59 @@ test("a repo with no barrels gains no new bytes in map.json", () => {
     assert.ok(!/definedIn|external/.test(raw), `annotation leaked into a barrel-free repo:\n${raw}`);
   } finally { cleanup(dir); }
 });
+
+// ---------------------------------------------------------------------------
+// The real declaration outranks the barrel that only forwards the name.
+//
+// PageRank alone works AGAINST the question --find answers. A barrel is imported
+// by everything, so on a repo where index.ts re-exports many modules it outranks
+// each individual declaration file — and the top-1 answer sends the agent to a
+// line that only forwards the name, not to the code it can edit. EVAL.md's caveat
+// (3) named this as why top-1 trailed top-3, and it is the one measured place
+// where naive grep beat agentmap.
+//
+// Measured on the fixture below before the fix: top-1 was `src/index.ts`.
+test("--find ranks the declaration site above a re-export barrel", () => {
+  const files = { "src/index.ts": "" };
+  for (let i = 1; i <= 12; i++) {
+    files[`src/deep/thing${i}.ts`] = `export function thing${i}() { return ${i}; }\n`;
+    files["src/index.ts"] += `export * from "./deep/thing${i}";\n`;
+  }
+  // Consumers import through the barrel, which is what lifts its PageRank above
+  // any single declaration file. Without them the barrel never wins and the
+  // fixture cannot fail.
+  for (let i = 1; i <= 8; i++) {
+    files[`src/c${i}.ts`] = `import { thing1 } from "./index";\nexport const c${i} = thing1();\n`;
+  }
+  const dir = makeRepo(files);
+  try {
+    gitInit(dir, { commit: true });
+    const r = JSON.parse(run(dir, "--find", "thing1", "--json").stdout);
+    assert.equal(r.matches[0].file, "src/deep/thing1.ts", "top-1 must be the declaration, not the barrel");
+    assert.equal(r.matches[0].definedIn, undefined, "a declaration site carries no definedIn");
+    // The barrel row is still present — demoted, not dropped. An agent that wants
+    // the public import path still has it.
+    assert.ok(
+      r.matches.some((m) => m.file === "src/index.ts" && m.definedIn === "src/deep/thing1.ts"),
+      "the barrel row must survive, just lower",
+    );
+  } finally { cleanup(dir); }
+});
+
+test("a re-export of an EXTERNAL symbol is not promoted as a declaration", () => {
+  // An external re-export carries `external: true` and NO `definedIn`, so a naive
+  // "no definedIn means declaration" rule would rank the one row nobody can edit
+  // at the top. The in-repo declaration must still win.
+  const dir = makeRepo({
+    "package.json": '{ "name": "app", "private": true }',
+    "src/own.ts": "export function useThing() { return 1; }\n",
+    "src/index.ts": 'export * from "./own";\nexport { readFile } from "node:fs";\n',
+    "src/app.ts": 'import { useThing } from "./index";\nexport const a = useThing();\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const r = JSON.parse(run(dir, "--find", "useThing", "--json").stdout);
+    assert.equal(r.matches[0].file, "src/own.ts");
+    assert.equal(r.matches[0].external, undefined);
+  } finally { cleanup(dir); }
+});

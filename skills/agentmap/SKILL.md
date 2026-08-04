@@ -42,6 +42,16 @@ agentmap --map --focus <path> --tokens 400
 # Hub files (PageRank)
 agentmap --hubs
 
+# Which tests cover a file — and whether ANY do (check before a risky edit)
+agentmap --affected <path/to/file.ts>
+
+# Next.js App Router: the route table, and URL -> the code that serves it
+agentmap --routes
+agentmap --route /dashboard/settings
+
+# Narrow a symbol search by declaration kind (modifier for --find / --search)
+agentmap --find <name> --kind function
+
 # JSON for tools
 agentmap --json --any <query>
 ```

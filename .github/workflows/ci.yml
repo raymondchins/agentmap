@@ -197,6 +197,34 @@ jobs:
           echo "generatedSha $BEFORE -> $AFTER"
           test "$AFTER" != "$BEFORE" || { echo "::error::post-commit hook did not refresh the map — auto-refresh is dead"; exit 1; }
 
+      # Same gate, one install shape deeper. `git rev-parse --git-dir` inside a
+      # linked worktree returns <main>/.git/worktrees/<name>, but git runs hooks
+      # from the COMMON dir — so --install-hooks used to write a hook git never
+      # executes while printing "Done" and --doctor reported "installed". Only an
+      # end-to-end commit catches that; a path assertion would have passed.
+      - name: --install-hooks works inside a git worktree
+        run: |
+          set -euo pipefail
+          cd /tmp/consumer
+          git worktree add -q /tmp/consumer-wt -b wt-ci
+          cd /tmp/consumer-wt
+          agentmap --install-hooks
+          test -f /tmp/consumer/.git/hooks/post-commit || { echo "::error::hook did not land in the common dir — git will never run it"; exit 1; }
+          # Commit what --install-hooks created, or the tree is dirty and agentmap
+          # correctly writes map.dirty.json instead of map.json.
+          git add -A && git commit -qm "wire agentmap"
+          agentmap --hubs >/dev/null
+          BEFORE="$(node -p "require('./.claude/agentmap/map.json').generatedSha")"
+          printf 'export const d = 4;\n' > src/d.ts
+          git add -A && git commit -qm "in worktree"
+          for _ in $(seq 1 30); do
+            AFTER="$(node -p "require('./.claude/agentmap/map.json').generatedSha" 2>/dev/null || echo "$BEFORE")"
+            [ "$AFTER" != "$BEFORE" ] && break
+            sleep 1
+          done
+          echo "worktree generatedSha $BEFORE -> $AFTER"
+          test "$AFTER" != "$BEFORE" || { echo "::error::auto-refresh is dead inside a git worktree"; exit 1; }
+
   # Coverage floor, so a shipped file that nothing executes stays visible.
   #
   # Uses node --test's own coverage rather than c8: the thresholds land natively

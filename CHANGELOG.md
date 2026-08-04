@@ -3,6 +3,87 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.22.0] - 2026-08-04
+
+Four commands were answering confidently and wrongly with exit 0 — the exact class
+this project exists to prevent. Each was found by measuring against a real repo, not
+by reading code, and each is reproduced in a test that fails on 0.21.0.
+
+**`SCHEMA_VERSION` 7 → 8.** The map's SHAPE is unchanged; its CONTENT is not. Caches
+are keyed by HEAD sha alone, so on a repo whose sha has not moved, an upgraded install
+would otherwise keep serving the missing edges — the stale cache encodes exactly the
+bug being fixed. Caches rebuild once.
+
+### Fixed
+- **A NodeNext alias import resolved to nothing, so files with real importers reported
+  `dependents (0)`.** `tryResolveAt` tried the bare path, each extension, then
+  `/index.*`, and never stripped the emitted `.js` a TypeScript source writes for its
+  `.ts` sibling. That ladder is the ONLY resolution path for a per-package tsconfig
+  alias, so in a monorepo whose sub-package aliases its own `src`, every `~/x.js`-style
+  import produced no edge — silently, with the target looking like an orphan. The
+  literal path is still tried first, so a real `.js` file next to a `.ts` of the same
+  name still wins.
+- **`--affected` called files uncovered when every importer was type-only.**
+  `transitiveDependents` walked `dependents` and ignored `typeOnlyDependents`, so a
+  types module reported `covered: false` while `--relates` on the same cached map
+  listed its 61 type-only dependents. Two commands contradicting each other about one
+  map. Changing an exported type breaks its `import type` consumers at compile time,
+  so the closure now walks both edge kinds. PageRank still excludes type-only edges —
+  that exclusion was always correct, the bug was throwing the fact away downstream.
+- **`--callers` credited the receiver of a method call as the callee.**
+  `invocationOf()` accepted a two-hop `PropertyAccessExpression` without checking which
+  half the reference was, so for `db.query()` the reference to `db` matched and every
+  exported object / array / singleton const collected every method call made on it.
+  The dotted-JSX branch had the same hole, crediting `Dialog` for `<Dialog.Root />`.
+  The sidecar edge builder already applied this check, so the cached and live walks
+  disagreed — meaning the answer depended on whether the background `--build-edges`
+  had finished. The sidecar parity fixture gained a non-function export, which is why
+  it could not catch this before.
+- **`--install-hooks` inside a git worktree wired a hook git never runs.**
+  `git rev-parse --git-dir` returns `<main>/.git/worktrees/<name>` there, but git
+  executes hooks from the common dir — so the install printed "Done — the map
+  auto-refreshes on commit", `--doctor` reported "installed", and the map silently
+  froze at install time. Now resolved via `--git-common-dir`, with an end-to-end CI
+  case that commits inside a worktree and asserts `generatedSha` moved.
+- **A `core.hooksPath` redirect (husky) is no longer reported as a healthy install.**
+  Same silent-freshness-death by another route: the hook is written correctly and git
+  looks elsewhere. `--install-hooks` now warns, and `--doctor` reports `INERT` with the
+  fix that actually works (`git config --unset core.hooksPath`) rather than suggesting
+  a re-install that would rewrite the same inert file. Deliberately NOT resolved via
+  `--git-path hooks`: dropping a generated file into a user's tracked `.husky/` is a
+  different decision than fixing worktrees.
+- **`npm run eval` destroyed hand-written analysis in `EVAL.md`.** It wrote the whole
+  file, so every run deleted the paragraph reconciling this repo's two headline numbers
+  — the single most important honesty artifact in it. Generated content now lives in
+  marker-delimited regions and everything outside them survives; a file missing the
+  markers is rewritten loudly, not silently.
+
+### Changed
+- **`--find` ranks the real declaration above the barrel that forwards the name.**
+  PageRank alone worked against the question `--find` answers: a barrel is imported by
+  everything, so on a repo whose `index.ts` re-exports many modules it took the top
+  slot and sent the agent to a line that only forwards. Measured on the pinned eval
+  fixtures, symbol-definition **top-1 moved from 53.3% to 100%** (top-3 93.3% → 100%);
+  barrel rows are demoted, not dropped. External re-exports are excluded from the
+  promotion — they carry `external: true` and no `definedIn`, and are the one row
+  nobody can edit.
+- **`--features` / `--feature` refuse instead of returning `{}` with exit 0.** A repo
+  with no `app/` or `src/app/` now gets an explicit `reason` and exit 1, matching
+  `--routes`. An empty payload with no explanation reads as a finding to the LLM that
+  consumes it, not as "not applicable".
+- **README's published numbers now reproduce.** The claims table said 2.4× fewer
+  tokens; the command printed beside it prints **1.9×**. Both the ratio and the
+  accuracy rows are regenerated from `npm run eval`.
+
+### Added
+- **`affected`, `routes` and `route` are reachable over MCP**, and `find` / `search`
+  accept a `kind` filter. All four shipped in 0.19.0–0.20.0 as CLI-only, which left the
+  most agent-shaped queries this tool has — "which tests cover this file", "what serves
+  this URL" — unreachable from the surface every agent integration routes through.
+  Payloads are byte-identical to the CLI. 11 MCP tools → 14.
+- **`--routes`, `--route`, `--affected` and `--kind` are documented in README §Commands.**
+  They had existed only in `--help` and the changelog.
+
 ## [0.21.0] - 2026-07-27
 
 Backlog sweep. Fixes a class of bug this project exists to prevent — a command
@@ -1316,7 +1397,11 @@ and **never execute** untrusted repo config.
   enumeration (replacing an expensive full-tree FS glob) make a full build net faster
   than v0.1.0 while indexing the same-or-more files.
 
-[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/raymondchins/agentmap/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/raymondchins/agentmap/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/raymondchins/agentmap/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/raymondchins/agentmap/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/raymondchins/agentmap/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/raymondchins/agentmap/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/raymondchins/agentmap/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/raymondchins/agentmap/compare/v0.16.0...v0.16.1

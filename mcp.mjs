@@ -63,12 +63,12 @@ const TOOLS = [
   {
     name: "find",
     description: "Find every symbol whose name matches (substring, case-insensitive) — exported symbols plus non-exported top-level declarations. Use to locate a function/class/type before rebuilding it. A match reached through a re-export barrel carries `definedIn` — the file that actually declares it, resolved by the TypeScript checker through any number of barrel hops — or `external: true` when the origin is outside the repo. Read that field to find the file to EDIT rather than the index.ts that only forwards the name.",
-    inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports.") }, required: ["symbol"] },
+    inputSchema: { type: "object", properties: { symbol: str("Symbol name or substring to match against exports."), kind: str("Optional declaration-kind filter, matched loosely: 'function', 'type', 'interface', 'class', 'variable'.") }, required: ["symbol"] },
   },
   {
     name: "search",
     description: "Rank symbols by BM25 lexical relevance for a VAGUE natural-language query (e.g. 'where's the auth retry logic', 'the function that dedupes symbols') — where exact `find`/`any` name matching fails. Tokenizes symbol names + path segments + feature + kind, scored by BM25 and fused with file PageRank. Best when you don't know the exact symbol name.",
-    inputSchema: { type: "object", properties: { query: str("Natural-language / keyword query. Stopwords are dropped; multi-word is fine.") }, required: ["query"] },
+    inputSchema: { type: "object", properties: { query: str("Natural-language / keyword query. Stopwords are dropped; multi-word is fine."), kind: str("Optional declaration-kind filter, matched loosely: 'function', 'type', 'interface', 'class', 'variable'.") }, required: ["query"] },
   },
   {
     name: "relates",
@@ -117,6 +117,21 @@ const TOOLS = [
     name: "symbols",
     description: "Top N globally ranked symbols (Aider-style importance). Defaults to 30.",
     inputSchema: { type: "object", properties: { n: { type: "integer", description: "How many symbols to return (default 30)." } } },
+  },
+  {
+    name: "affected",
+    description: "Which test files cover a source file, following import edges transitively — and, just as usefully, whether ANY do. Answers 'what do I re-run after changing this' before the edit, not after CI. Walks runtime AND type-only edges, so a file imported only via `import type` still reports its covering tests. An empty list is the ANSWER (nothing covers this file), not a lookup failure.",
+    inputSchema: { type: "object", properties: { path: str("File path, basename, or unique suffix identifying the source file.") }, required: ["path"] },
+  },
+  {
+    name: "routes",
+    description: "The Next.js App Router route table: every URL path the repo serves, with the file that serves it. Next.js only — on any other repo this returns an explicit `reason` rather than an empty list.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "route",
+    description: "Resolve one URL path (e.g. '/dashboard/settings') to the files that serve it, including the layouts it nests under. Use to go from a bug report naming a URL straight to the code. Next.js App Router only.",
+    inputSchema: { type: "object", properties: { path: str("URL path to resolve, e.g. '/dashboard/settings'.") }, required: ["path"] },
   },
 ];
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

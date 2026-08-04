@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 
 // Lazy ts-morph: its ~105ms module init only fires on a COLD rebuild. Warm cache
 // queries (the common case) never construct a Project, so they skip the load
@@ -64,7 +64,14 @@ const EDGES_FORMAT = 4;
 // caches written BEFORE this feature — those could already be missing files with no
 // way to tell, which is the exact bug being fixed, so serving them unchanged would
 // leave the lie in place until HEAD happened to move.
-const SCHEMA_VERSION = 7;
+// Bumped 7 → 8: `tryResolveAt` gained the emitted-extension rung, so a NodeNext
+// `~/x.js` alias specifier now resolves to `x.ts` instead of dropping the edge.
+// The map SHAPE is unchanged — this bump exists because the CONTENT is not: a
+// cache written by an older build is keyed only by HEAD sha, so on a repo whose
+// sha has not moved it would keep serving the missing edges (and a `dependents (0)`
+// on a file with real importers) indefinitely after upgrade. Same reasoning as the
+// 6 → 7 bump: the stale cache encodes exactly the bug being fixed.
+const SCHEMA_VERSION = 8;
 
 // --- .agentmapignore + .d.ts default-exclude (config-file / flag scoping) ------
 // The map-cache path used when --include-dts is set. Kept SEPARATE from map.json
@@ -379,14 +386,27 @@ const typeOnlyOut = (f) => ({
   ...(f.typeOnlyDependents?.length ? { typeOnlyDependents: f.typeOnlyDependents } : {}),
 });
 
-// Rank symbol matches ({file,name,kind}) by their containing file's PageRank
-// (desc), tie-broken by path then name for a stable order. A broad --find/--any
-// on a large repo can match thousands of exports; showing them all defeats the
-// token-savings point, so callers slice the ranked list to SYMBOL_MATCH_LIMIT and
-// surface a "showing N of M" footer.
+// Rank symbol matches ({file,name,kind}): real declaration sites first, then by
+// their containing file's PageRank (desc), tie-broken by path then name for a
+// stable order. A broad --find/--any on a large repo can match thousands of
+// exports; showing them all defeats the token-savings point, so callers slice the
+// ranked list to SYMBOL_MATCH_LIMIT and surface a "showing N of M" footer.
+//
+// The declaration-first tier exists because PageRank alone actively works against
+// the question --find answers. A barrel is imported by everything, so index.ts
+// outranks the file that actually declares the symbol — and the top-1 answer sends
+// the agent to a line that only forwards the name. EVAL.md's own caveat (3) named
+// this as why top-1 trailed top-3, and it is the one measured place where naive
+// grep beat agentmap.
+//
+// `!definedIn && !external` is the predicate, not `!definedIn` alone: a re-export
+// of something outside the repo carries `external: true` and NO `definedIn`, so
+// the naive form would promote exactly the rows that cannot be edited at all.
+const isDeclarationSite = (m) => !m.definedIn && !m.external;
 const rankMatches = (files, matches) =>
   matches.slice().sort((a, b) =>
-    (files[b.file]?.pagerank ?? 0) - (files[a.file]?.pagerank ?? 0)
+    (isDeclarationSite(b) ? 1 : 0) - (isDeclarationSite(a) ? 1 : 0)
+    || (files[b.file]?.pagerank ?? 0) - (files[a.file]?.pagerank ?? 0)
     || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 // Split an identifier / path segment into lowercased subtokens on camelCase,
@@ -1258,13 +1278,24 @@ function extractFacts(inc = null) {
   };
   // resolve an absolute-ish path to an in-project source file, honoring
   // extensionless + /index.* + .vue resolution (shared by relative + alias paths).
-  const tryResolveAt = (abs) => {
+  const tryResolveAt = (abs, allowEmittedExt = true) => {
     if (vueReal[abs]) return rel(abs);
     let sf = project.getSourceFile(abs);
     if (!sf) for (const e of RES_EXT) { sf = project.getSourceFile(`${abs}.${e}`); if (sf) break; }
     if (!sf) for (const e of RES_EXT) { sf = project.getSourceFile(`${abs}/index.${e}`); if (sf) break; }
     if (sf) return rel(sf.getFilePath());
     if (vueReal[`${abs}.vue`]) return rel(`${abs}.vue`);
+    // Under `moduleResolution: nodenext`, a TS source imports its sibling by the
+    // EMITTED specifier — `./consts.js` for `consts.ts`. This ladder is the ONLY
+    // resolution path for per-package tsconfig aliases (resolveAlias below), so
+    // without this rung every `~/x.js`-style alias edge in a monorepo is dropped
+    // and the target reports zero dependents. Strip the emitted extension once
+    // and re-run. Literal paths are tried FIRST above, so a real .js file still
+    // wins over a .ts sibling of the same name in a mixed repo.
+    if (allowEmittedExt) {
+      const m = /\.(js|jsx|mjs|cjs)$/.exec(abs);
+      if (m) return tryResolveAt(abs.slice(0, -m[0].length), false);
+    }
     return null;
   };
   // #3 fix + monorepo: tsconfig/jsconfig baseUrl+paths alias resolution ("@/x",
@@ -2248,6 +2279,25 @@ function nudgeMatcherWired(entries, matcher) {
 // files it WOULD touch and writes nothing. Throws on any failure so the caller
 // can stderr+exit 1.
 // ---------------------------------------------------------------------------
+// Does core.hooksPath send git somewhere other than `hooksDir`? Returns the
+// configured path when it redirects, else null. Compared through realpath where
+// possible so `.git/hooks` and an absolute spelling of the same dir agree.
+// A dead hook that reports "installed" is the failure this whole area exists to
+// prevent, so both the writer and --doctor consult this.
+function hooksPathRedirect(hooksDir) {
+  const configured = sh("git config --get core.hooksPath");
+  if (!configured) return null;
+  const abs = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  return abs(configured) === abs(hooksDir) ? null : configured;
+}
+
+function warnIfHooksPathRedirects(hooksDir) {
+  const redirect = hooksPathRedirect(hooksDir);
+  if (!redirect) return;
+  console.error(`# warning: core.hooksPath is set to ${redirect}, so git will NOT run the hook just written to ${hooksDir}.`);
+  console.error(`# warning: the map will not auto-refresh. Either copy ${hooksDir}/post-commit into ${redirect}/, or unset core.hooksPath.`);
+}
+
 function installHooks({ dryRun = false } = {}) {
   const src = new URL("./hooks/post-commit", import.meta.url);
   // The package hooks/ dir must ship alongside agentmap.mjs.
@@ -2257,10 +2307,22 @@ function installHooks({ dryRun = false } = {}) {
   const nudgeSrc = new URL("./hooks/agentmap-nudge.mjs", import.meta.url);
   if (!existsSync(nudgeSrc)) throw new Error(`packaged nudge not found at ${nudgeSrc.pathname} (is the hooks/ dir present?)`);
 
-  // Locate the git dir of the CURRENT repo (cwd), then copy in the hook.
-  const gitDir = sh("git rev-parse --git-dir");
-  if (!gitDir) throw new Error("not a git repository (cwd has no .git) — run inside the repo you want to wire up");
-  const hooksDir = `${gitDir}/hooks`;
+  // Locate the hooks dir of the CURRENT repo (cwd), then copy in the hook.
+  //
+  // `--git-common-dir`, NOT `--git-dir`. Inside a linked worktree the two differ:
+  // --git-dir is <main>/.git/worktrees/<name>, but git executes hooks from the
+  // COMMON dir. Installing against --git-dir wrote a hook git never runs, while
+  // --install-hooks printed "Done — the map auto-refreshes on commit" and --doctor
+  // reported "installed". The map then silently froze at install time — in the
+  // exact shape a parallel-agent workflow uses most.
+  //
+  // Deliberately NOT `--git-path hooks`, which additionally resolves core.hooksPath:
+  // under husky that points at a tracked .husky/ directory, and dropping a generated
+  // file into the user's committed hook directory is a different decision than
+  // fixing worktrees. That case is warned about below instead.
+  const commonDir = sh("git rev-parse --git-common-dir");
+  if (!commonDir) throw new Error("not a git repository (cwd has no .git) — run inside the repo you want to wire up");
+  const hooksDir = `${commonDir}/hooks`;
   const dest = `${hooksDir}/post-commit`;
 
   // The nudge is copied into the PROJECT (not referenced inside node_modules) so
@@ -2325,6 +2387,11 @@ function installHooks({ dryRun = false } = {}) {
   writeFileSync(dest, readFileSync(src, "utf8"), { mode: 0o755 });
   chmodSync(dest, 0o755); // explicit: writeFileSync mode is masked by umask
 
+  // core.hooksPath redirects git AWAY from the dir just written (husky sets it to
+  // .husky). The hook is on disk and inert — the same silent-freshness-death the
+  // worktree bug caused, so say it out loud rather than printing "Done".
+  warnIfHooksPathRedirects(hooksDir);
+
   // 2) nudge → .claude/hooks/agentmap-nudge.mjs (idempotent overwrite-on-rerun)
   mkdirSync(".claude/hooks", { recursive: true });
   writeFileSync(nudgeDestRel, readFileSync(nudgeSrc, "utf8"));
@@ -2377,12 +2444,24 @@ function collectHookStatus({ degradedOutsideGit = false } = {}) {
   if (!insideGit && !degradedOutsideGit) return { insideGit: false, checks };
 
   if (insideGit) {
-    const postCommitPath = `${gitDir}/hooks/post-commit`;
+    // Must match installHooks' `--git-common-dir` exactly. Deriving it from
+    // --git-dir instead is how --doctor came to greenlight a hook git never runs:
+    // in a linked worktree it checked <main>/.git/worktrees/<name>/hooks, found the
+    // file installHooks had just written there, and reported "installed" while the
+    // hook git actually executes was absent.
+    const hooksDir = `${sh("git rev-parse --git-common-dir")}/hooks`;
+    const postCommitPath = `${hooksDir}/post-commit`;
     let detail = "not installed";
     let status = "missing";
     if (existsSync(postCommitPath)) {
       const body = readFileSync(postCommitPath, "utf8");
-      if (body.includes(POST_COMMIT_MARKER)) {
+      const redirect = hooksPathRedirect(hooksDir);
+      if (body.includes(POST_COMMIT_MARKER) && redirect) {
+        // On disk, correct, and inert — git is looking somewhere else entirely.
+        // Reporting "installed" here is the same lie the worktree bug told.
+        detail = `installed but INERT — core.hooksPath=${redirect} redirects git away from ${hooksDir}`;
+        status = "degraded";
+      } else if (body.includes(POST_COMMIT_MARKER)) {
         detail = "installed";
         status = "installed";
       } else {
@@ -2395,7 +2474,13 @@ function collectHookStatus({ degradedOutsideGit = false } = {}) {
       status,
       detail,
       path: postCommitPath,
-      suggestion: status === "installed" ? null : "agentmap --install-hooks",
+      // Re-running --install-hooks cannot fix a core.hooksPath redirect — it would
+      // rewrite the same inert file. Name the fix that actually works.
+      suggestion: status === "installed"
+        ? null
+        : status === "degraded"
+          ? "git config --unset core.hooksPath  (or copy the hook into the configured hooksPath)"
+          : "agentmap --install-hooks",
     });
   } else {
     checks.push({
@@ -3433,7 +3518,13 @@ async function main() {
     const q = raw.toLowerCase();
     const data = ensureFresh();
     const name = Object.keys(data.features).find((k) => k.toLowerCase() === q) || Object.keys(data.features).find((k) => k.toLowerCase().includes(q));
-    if (!name) {
+    if (!Object.keys(data.features).length) {
+      // "no match" would be a lie here: there is nothing to match against, because
+      // the repo has no App Router at all. Distinguish the two.
+      process.exitCode = 1;
+      out({ command: "feature", query: raw, error: "not applicable", reason: NOT_APP_ROUTER, _code: 1 },
+        () => console.log(`feature "${raw}": no app/ or src/app/ directory — --feature is Next.js App Router only`));
+    } else if (!name) {
       process.exitCode = 1;
       out({ command: "feature", error: "no match", query: raw }, () => console.log(`feature: no match for "${raw}" — run --features to list them.`));
     } else {
@@ -3449,7 +3540,17 @@ async function main() {
   } else if (has("--features")) {
     const data = ensureFresh();
     const list = Object.entries(data.features).map(([k, v]) => [k, v.length]).sort((a, b) => b[1] - a[1]);
-    out({ command: "features", features: Object.fromEntries(list) }, () => {
+    if (!list.length) {
+      // A feature is the first route segment under app/ or src/app/ — this command
+      // is Next.js App Router only. Returning `{}` with exit 0 told every Vue, Nuxt,
+      // Remix, Astro and plain-Node repo "you have no features", which reads as a
+      // finding rather than as "not applicable". The consumer here is an LLM that
+      // reads payloads, not READMEs, so the payload has to say why. Same shape as
+      // --routes below.
+      out({ command: "features", features: {}, reason: NOT_APP_ROUTER, _code: 1 },
+        () => console.log("features: no app/ or src/app/ directory — --features is Next.js App Router only"));
+      process.exitCode = 1;
+    } else out({ command: "features", features: Object.fromEntries(list) }, () => {
       console.log(`features (${list.length}):`);
       for (const [k, n] of list) console.log(`  ${k} (${n} files)`);
     });
@@ -3636,7 +3737,15 @@ function invocationOf(id, SyntaxKind) {
   let call = id.getParentIfKind(SyntaxKind.CallExpression) ?? id.getParentIfKind(SyntaxKind.NewExpression);
   const pa = id.getParentIfKind(SyntaxKind.PropertyAccessExpression);
   if (!call && pa) call = pa.getParentIfKind(SyntaxKind.CallExpression) ?? pa.getParentIfKind(SyntaxKind.NewExpression);
-  if (call && call.getExpression() === (pa ?? id)) return call;
+  // When the reference sits under a member expression, it must be the NAME half.
+  // Without this guard `db.query()` was reported as a call site of `db`: the
+  // reference to `db` is the OBJECT, `pa` is `db.query`, and `call.getExpression()
+  // === pa` holds — so every exported object/array/singleton const collected every
+  // method call made on it, silently, with exit 0, under a "compiler-accurate"
+  // label. The sidecar edge builder already applies exactly this check
+  // (`callee.getNameNode()`), so the two walks disagreed and the answer depended
+  // on whether the background --build-edges had finished.
+  if (call && call.getExpression() === (pa ?? id) && (!pa || pa.getNameNode() === id)) return call;
 
   // `<Foo.Bar />` puts the identifier under a member expression; the element's
   // tag-name node is that member expression, not the bare identifier. TypeScript
@@ -3645,8 +3754,12 @@ function invocationOf(id, SyntaxKind) {
   // reading it off SyntaxKind yields `undefined`, so getParentIfKind never
   // matched and this whole branch was dead from 0.17.0). `pa` above already
   // holds that node.
-  const tagHolder = pa ?? id;
-  for (const kind of [SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxOpeningElement]) {
+  //
+  // Same name-half guard as the call branch above: for `<Dialog.Root />` the tag
+  // resolves to `Root`, and a reference to `Dialog` (the namespace object) is NOT
+  // a use of `Root`. Without it, every compound component credited its container.
+  const tagHolder = pa && pa.getNameNode() === id ? pa : (pa ? null : id);
+  for (const kind of tagHolder ? [SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxOpeningElement] : []) {
     const el = tagHolder.getParentIfKind(kind);
     if (el && el.getTagNameNode() === tagHolder) return el;
   }
@@ -3663,6 +3776,13 @@ const TEST_FILE_RE = /(^|\/)(__tests__|__mocks__|tests?)\/|\.(test|spec)\.[cm]?[
 // real code (barrels, type-only round-trips) and must terminate, not recurse.
 // Returns a Map of file -> hop distance so a caller can report how far away a
 // dependent is, which is what makes a long list triageable.
+//
+// Walks `dependents` UNION `typeOnlyDependents`. Type-only edges are excluded from
+// PageRank on purpose (a type import is not a runtime dependency), but "what breaks
+// if I change this" is exactly the question where they count: changing an exported
+// type breaks every `import type` consumer at compile time. Reading only the runtime
+// half made `--affected` report `covered:false` for files whose importers are all
+// type-only — directly contradicting `--relates` on the same cached map.
 function transitiveDependents(data, start) {
   const seen = new Map();
   let frontier = [start];
@@ -3671,7 +3791,9 @@ function transitiveDependents(data, start) {
     hop++;
     const next = [];
     for (const f of frontier) {
-      for (const d of data.files[f]?.dependents || []) {
+      const e = data.files[f];
+      if (!e) continue;
+      for (const d of [...(e.dependents || []), ...(e.typeOnlyDependents || [])]) {
         if (seen.has(d) || d === start) continue;
         seen.set(d, hop);
         next.push(d);
@@ -3696,6 +3818,11 @@ function transitiveDependents(data, start) {
 // because it looks authoritative.
 // ---------------------------------------------------------------------------
 const ROUTE_FILE_RE = /(^|\/)(page|route|layout)\.(t|j)sx?$/;
+
+// Why --routes/--features return nothing on most repos. Stated once and reused by
+// every surface (CLI + MCP) so the four commands cannot drift into disagreeing
+// about what "empty" means — an empty payload with no reason reads as a finding.
+const NOT_APP_ROUTER = "no Next.js App Router directory (app/ or src/app/) — this command is Next.js-only";
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 // One path segment -> its URL contribution, or null when it contributes none.
@@ -4390,20 +4517,27 @@ function mcpQuery(name, args) {
       const raw = String(a.query ?? "");
       if (!raw) return err(2, 'search needs a query, e.g. `{ query: "auth retry logic" }`');
       const data = mcpEnsureFresh();
+      // Same loose, case-insensitive kind match the CLI's --kind applies, so the
+      // two surfaces cannot answer the same narrowed query differently.
+      const mk = String(a.kind ?? "").toLowerCase();
+      const keep = (k) => !mk || String(k || "").toLowerCase().includes(mk);
       const lex = bm25Search(data.lexical, data.files, raw);
-      return ok({ command: "search", query: raw, total: lex.total, shown: lex.matches.length, truncated: lex.total > lex.matches.length, matches: lex.matches }, lex.matches.length ? 0 : 1);
+      const matches = mk ? lex.matches.filter((m) => keep(m.kind)) : lex.matches;
+      return ok({ command: "search", query: raw, ...(mk ? { kind: a.kind } : {}), total: mk ? matches.length : lex.total, shown: matches.length, truncated: !mk && lex.total > matches.length, matches }, matches.length ? 0 : 1);
     }
     case "find": {
       const raw = String(a.symbol ?? "");
       if (!raw) return err(2, "--find needs a symbol query, e.g. `--find PremiumCard`");
       const q = raw.toLowerCase();
+      const mk = String(a.kind ?? "").toLowerCase();
+      const keep = (k) => !mk || String(k || "").toLowerCase().includes(mk);
       const data = mcpEnsureFresh();
       const all = [];
       for (const [path, f] of Object.entries(data.files)) {
         for (const e of f.exports)
-          if (e.name.toLowerCase().includes(q)) all.push(symMatch(path, e));
+          if (e.name.toLowerCase().includes(q) && keep(e.kind)) all.push(symMatch(path, e));
         if (INCLUDE_LOCALS) for (const e of (f.locals || []))
-          if (e.name.toLowerCase().includes(q)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
+          if (e.name.toLowerCase().includes(q) && keep(e.kind)) all.push({ file: path, name: e.name, kind: e.kind, local: true });
       }
       const code = all.length ? 0 : 1;
       const ranked = rankMatches(data.files, all);
@@ -4491,6 +4625,10 @@ function mcpQuery(name, args) {
     case "features": {
       const data = mcpEnsureFresh();
       const list = Object.entries(data.features).map(([k, v]) => [k, v.length]).sort((x, y) => y[1] - x[1]);
+      // Mirrors the CLI: say "not applicable", never an empty result that reads
+      // as a finding. This surface matters more than the CLI's — the caller is
+      // always a model.
+      if (!list.length) return ok({ command: "features", features: {}, reason: NOT_APP_ROUTER }, 1);
       return ok({ command: "features", features: Object.fromEntries(list) });
     }
     case "feature": {
@@ -4498,6 +4636,7 @@ function mcpQuery(name, args) {
       if (!raw) return err(2, "--feature needs a name, e.g. `--feature dashboard` (run --features to list)");
       const q = raw.toLowerCase();
       const data = mcpEnsureFresh();
+      if (!Object.keys(data.features).length) return ok({ command: "feature", query: raw, error: "not applicable", reason: NOT_APP_ROUTER }, 1);
       const nm = Object.keys(data.features).find((k) => k.toLowerCase() === q) || Object.keys(data.features).find((k) => k.toLowerCase().includes(q));
       if (!nm) return ok({ command: "feature", error: "no match", query: raw }, 1);
       const fl = data.features[nm], set = new Set(fl), exts = new Set();
@@ -4510,6 +4649,49 @@ function mcpQuery(name, args) {
       const sn = parseInt(snRaw, 10); const n = Number.isFinite(sn) && sn > 0 ? sn : DEFAULT_SYMBOLS;
       const syms = rankedSymbolsFor(data, n);
       return ok({ command: "symbols", requested: n, shown: syms.length, truncated: syms.length < n, symbols: syms.map((s) => ({ rank: s.rank, file: s.file, name: s.name, kind: s.kind })) });
+    }
+    // --affected / --routes / --route shipped in 0.19.0-0.20.0 as CLI-only, which
+    // meant the three most agent-shaped queries this tool has ("what tests cover
+    // this", "what serves this URL") were unreachable from the surface every agent
+    // integration actually routes through. Payloads are byte-identical to the CLI.
+    case "affected": {
+      const raw = String(a.path ?? "");
+      if (!raw) return err(2, "the 'affected' tool needs a path, e.g. { path: 'lib/auth.ts' }");
+      const data = mcpEnsureFresh();
+      const exact = data.files[raw] ? [raw] : Object.keys(data.files).filter((p) => p === raw || p.endsWith(`/${raw}`));
+      if (!exact.length) return ok({ command: "affected", query: raw, error: "no match", candidates: [] }, 1);
+      if (exact.length > 1) return ok({ command: "affected", query: raw, error: "ambiguous", candidates: exact }, 1);
+      const file = exact[0];
+      const reach = transitiveDependents(data, file);
+      const tests = [...reach].filter(([p]) => TEST_FILE_RE.test(p))
+        .sort((x, y) => x[1] - y[1] || (x[0] < y[0] ? -1 : 1))
+        .map(([p, hop]) => ({ file: p, hop }));
+      return ok({
+        command: "affected", query: raw, file,
+        dependents: reach.size, tests: tests.length,
+        covered: tests.length > 0 || TEST_FILE_RE.test(file),
+        affected: tests,
+      });
+    }
+    case "routes": {
+      const data = mcpEnsureFresh();
+      const routes = buildRouteTable(data);
+      if (!routes) return ok({ command: "routes", routes: [], reason: NOT_APP_ROUTER }, 1);
+      return ok({ command: "routes", total: routes.length, routes });
+    }
+    case "route": {
+      const raw = String(a.path ?? "");
+      if (!raw) return err(2, "the 'route' tool needs a URL path, e.g. { path: '/dashboard' }");
+      const data = mcpEnsureFresh();
+      const routes = buildRouteTable(data);
+      if (!routes) return ok({ command: "route", query: raw, matches: [], reason: NOT_APP_ROUTER }, 1);
+      const hits = matchRoute(routes, raw);
+      if (!hits.length) return ok({ command: "route", query: raw, matches: [] }, 1);
+      const enriched = hits.map((r) => {
+        const f = data.files[r.file] || {};
+        return { ...r, imports: f.imports || [], serverModules: (f.imports || []).filter((i) => data.files[i]?.rsc === "server") };
+      });
+      return ok({ command: "route", query: raw, total: enriched.length, matches: enriched });
     }
     default:
       return err(2, `unknown tool: ${name}`);

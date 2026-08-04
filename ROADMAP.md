@@ -8,7 +8,7 @@
 > **How to use:** work the batches top-to-bottom (they're ordered by
 > effort-vs-impact and dependency). Batch 2 is the structural enabler for 3 and
 > 5 — do it before them. Within a batch, land one commit per logical fix with a
-> regression test, and keep `npm test` green (**396 tests** as of 2026-07-26).
+> regression test, and keep `npm test` green (**502 tests** across 126 files as of 2026-08-04).
 >
 > **[Part II](#part-ii--make-it-useful-for-the-majority-2026-07-26) (2026-07-26)**
 > is a second audit pass answering "make this useful for the majority of people —
@@ -152,10 +152,12 @@ rebuild, multi-language optionality, a documented API) is gated on this.
   touched in Batch 1)*
 
 ### Enabled once done (fold into this batch or Batch 3)
-- [ ] **In-process MCP** — `mcp.mjs:110` spawns a fresh Node process + re-parses
-  the whole map + 2 git subprocesses per tool call. After exports exist, run
-  queries in-process against a map parsed once, invalidated by (sha,
-  dirty-fingerprint). *(performance/low)*
+- [x] **In-process MCP** — DONE, and the checkbox was stale for a month. `mcp.mjs`
+  no longer spawns anything: `main()` injects `mcpQuery` into `serve()` (the import
+  is deliberately one-way to avoid a circular-module deadlock — see the comment at
+  `mcp.mjs:26-34`), and every tool is answered in-process against a map parsed once.
+  Anything still reasoning from "MCP spawns a process per call" — including the
+  memory-ceiling item at :288 — is built on a dead premise.
 - [x] **Direct unit tests** (started — `test/unit.test.mjs`, 9 in-process tests) —
   with pure functions exported, add real unit tests
   for `pagerank`, `rankSymbols`, `resolveFile`, `stripJsonComments` (no subprocess
@@ -659,10 +661,11 @@ post-distribution demand asks for Python (Batch 2's seam makes it a 1–2 week a
   with source URLs, completeness critique, contradictions) — generated
   2026-07-03. Ask Claude to regenerate from the workflow run, or see the session
   where this roadmap was created.
-- **Key numbers (refreshed 2026-07-26):** single-file CLI (`agentmap.mjs`, **3,669
-  lines**), one runtime dep (`ts-morph`), **Node ≥20**, **396 tests** green across
-  92 files. *(Previously recorded here as ~1831 lines / Node ≥18 / 165 tests —
-  stale on all three.)*
+- **Key numbers (refreshed 2026-08-04):** single-file CLI (`agentmap.mjs`, **4,746
+  lines**), one runtime dep (`ts-morph`), **Node ≥20**, **502 tests** green across
+  126 files (2026-08-04). *(This line has now been stale twice — it read ~1831 lines /
+  Node ≥18 / 165 tests, then 3,669 lines / 396 tests / 92 files. Treat any count here
+  as a date-stamped observation, not a fact.)*
 - **Competitive north star:** ⚠️ the old note read "CodeGraph (multi-language, 57k
   stars) owns breadth; agentmap wins on ts-morph compiler accuracy + honest eval +
   agent-loop wiring. Don't chase breadth; deepen TS." As of 2026-07-26 CodeGraph
@@ -901,8 +904,29 @@ patch release inside 48 hours regardless of which language strategy wins.
   `edgeCoverage` — so `--doctor` reports "Map cache: ok" with exit 0 for a map
   containing zero files. This is the single most dangerous thing to leave unfixed
   before any partial-resolution backend exists.
-- [ ] **Record the post-fix baseline on day 14** — downloads/week **and** inbound
-  non-security issue count. This pair is the denominator for every later gate.
+- [x] **Record the post-fix baseline on day 14** — RECORDED 2026-08-04 (day ~9 after
+  0.16.1; the weekly series below is the more useful artifact than a single day-14
+  point, so it is recorded early rather than waited for).
+
+  **Downloads are not readable as adoption, and this is the finding.** Weekly npm
+  downloads since the repo was created: 2056 · 69 · 434 · 1939 · 225 · 648 · 1925.
+  The spikes land on release weeks and the troughs sit at 69–225. That is a
+  mirror/CI signature, not humans. `scip-query` over the same window is flat
+  (1221 · 1941 · 1054 · 1017 · 787 · 791) — what real, declining usage looks like.
+  So the "5,157/month vs scip-query's 4,934" comparison Part II §1 leans on is
+  measuring release cadence on one side and usage on the other. **Do not quote it.**
+
+  **Inbound non-security issues from third parties since 0.16.1: ZERO.** Combined
+  with GitHub traffic (92 views of the repo root vs 6 of the issues tab over 14
+  days; 0 watchers), the picture is consistent: people install, and nothing comes
+  back as words. That makes silent wrong answers — not missing features — the
+  dominant risk, and it is why the 0.22.0 work went to four exit-0 wrong answers
+  instead of to strategy.
+
+  **Consequence for the gates below:** the download half of the distribution kill
+  criterion (:1338) is contaminated and the issue half has n=0. Neither is
+  readable, so **the day-90 gate needs a different instrument named before October,
+  not a verdict read off these two numbers.**
 
 ### Gate (binary, in CI, no interpretation) — ✅ MET 2026-07-26
 
@@ -934,6 +958,31 @@ caught the dead auto-refresh. Measured on the runner: `generatedSha 4be1c17 ->
 
 **Goal:** replace a demand detector that provably cannot fire (wait-for-an-issue)
 with one that can — and put the 90 days of waiting to work, not to idling.
+
+> ⚠️ **The replacement instrument returned a NULL, not a negative (recorded 2026-08-04).**
+> Issue [#43](https://github.com/raymondchins/agentmap/issues/43) has been pinned for
+> ~9 days with one comment per language and **zero reactions on every one of them**.
+>
+> That is not evidence that nobody wants Python. It is evidence that **the ballot is
+> in a room with nobody in it**: the repo has 0 watchers, and GitHub traffic shows 6
+> views of the issues tab against 92 of the repo root over 14 days — roughly 7% of
+> unique visitors ever reach issues, and the ballot is one click deeper than that.
+> The census (which prints the vote link on stderr from inside the tool) is the only
+> channel that reaches a user mid-task, and it fires only on repos that are ≥30%
+> some other language — i.e. exactly the population least likely to have installed
+> agentmap in the first place.
+>
+> This is the SAME failure as the original gate Part II §1 declared unfireable: a
+> detector wired to a channel the population does not pass through. Reading "0 votes"
+> as "no demand" in October would repeat the mistake this whole document was written
+> to correct.
+>
+> **So: do not let kill criterion #3 (:1345) fire on vote count.** Close the
+> multi-language question — if it is to be closed — on §7's maintenance arithmetic,
+> which needs no vote and was always the stronger argument: two non-TS languages ever,
+> each an unbounded ongoing tax, against a capability matrix where 0 of 11 MCP tools
+> run at TS fidelity. Write "null instrument" into the gate so a future reader does
+> not mistake this silence for a measurement.
 
 ### 1A — The demand instrument (2–3 d)
 

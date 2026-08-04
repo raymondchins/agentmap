@@ -16,7 +16,7 @@
 // ============================================================================
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeRepo, gitInit, run, cleanup } from "./helpers.mjs";
+import { makeRepo, gitInit, run, runErr, cleanup } from "./helpers.mjs";
 
 // One exported `target`, two real callers (B, C), one type-only/re-export
 // non-caller (D), and a decoy file with its OWN private `target` (name clash).
@@ -199,5 +199,56 @@ test("--callers with no symbol is a usage error (exit 2)", () => {
     gitInit(dir, { commit: true });
     const r = run(dir, "--callers");
     assert.equal(r.status, 2, `missing arg must exit 2 (stderr=${r.stderr})`);
+  } finally { cleanup(dir); }
+});
+
+// ---------------------------------------------------------------------------
+// A method call on a value is NOT a call of that value.
+//
+// `invocationOf()` matched any reference whose parent PropertyAccessExpression
+// was the callee of a CallExpression — without checking WHICH half of the member
+// expression the reference was. For `db.query()`, the reference to `db` is the
+// OBJECT half, `db.query` is the callee, and the check passed. Result: every
+// exported object / array / singleton const silently collected every method call
+// made on it, reported with exit 0 under a "compiler-accurate" label.
+//
+// Measured before the fix on a 3-file fixture: `--callers db` returned 2 call
+// sites for a symbol that is never called.
+test("a method call on an exported object is not a call of the object", () => {
+  const dir = makeRepo({
+    "src/db.ts": "export const db = { query() { return 1; } };\nexport function realFn() { return 2; }\n",
+    "src/user.ts":
+      'import { db, realFn } from "./db";\n' +
+      "export const a = () => db.query();\n" +
+      "export const b = () => realFn();\n",
+    "src/other.ts": 'import { db } from "./db";\nexport const c = () => db.query();\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const obj = JSON.parse(run(dir, "--callers", "db", "--in", "src/db.ts", "--json").stdout);
+    assert.equal(obj.callers.length, 0, "db is never called — only methods on it are");
+    // The control: a genuine function call in the same files still resolves.
+    const fn = JSON.parse(run(dir, "--callers", "realFn", "--in", "src/db.ts", "--json").stdout);
+    assert.deepEqual(fn.callers.map((c) => c.file), ["src/user.ts"]);
+  } finally { cleanup(dir); }
+});
+
+test("a dotted JSX tag credits the component, not its namespace", () => {
+  // `<Dialog.Root />` is one use of `Root`. Crediting `Dialog` as well would
+  // double-count every compound component in a design-system repo. The `Root`
+  // half must keep resolving — that was the 0.17.0 JSX fix and it stays green.
+  const dir = makeRepo({
+    "tsconfig.json": JSON.stringify({
+      compilerOptions: { jsx: "react-jsx", moduleResolution: "bundler", module: "esnext", target: "esnext" },
+    }),
+    "src/dialog.tsx": "export function Root() { return null; }\nexport function Trigger() { return null; }\n",
+    "src/app.tsx": 'import * as Dialog from "./dialog";\nexport function App() { return <Dialog.Root />; }\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const root = JSON.parse(run(dir, "--callers", "Root", "--in", "src/dialog.tsx", "--json").stdout);
+    assert.deepEqual(root.callers.map((c) => c.file), ["src/app.tsx"], "<Dialog.Root/> is a use of Root");
+    const unused = runErr(dir, "--callers", "Trigger", "--in", "src/dialog.tsx", "--json");
+    assert.equal(JSON.parse(unused.stdout).callers.length, 0, "Trigger is never used");
   } finally { cleanup(dir); }
 });

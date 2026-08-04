@@ -54,6 +54,16 @@ function repo() {
     "src/decoy.ts":
       "function target() { return 0; }\n" +
       "export function useDecoy() { return target(); }\n",
+    // A non-function export, which every shape above lacked — and that gap is why
+    // the parity assertion below could not catch the receiver bug. `db` is never
+    // called; only methods ON it are. The live walk used to count `db.query()` as
+    // a call site of `db` while the sidecar builder (which checks the name half)
+    // did not, so the two paths disagreed and the answer depended on whether the
+    // background --build-edges had finished.
+    "src/db.ts": "export const db = { query() { return 1; } };\n",
+    "src/useDb.ts":
+      'import { db } from "./db";\n' +
+      "export function readAll() { return db.query(); }\n",
   };
 }
 
@@ -93,6 +103,8 @@ test("cached --callers is byte-identical to the live walk", () => {
       ["--callers", "target", "--in", "src/target.ts"],
       ["--callers", "Widget", "--in", "src/Widget.tsx"],
       ["--callers", "target", "--in", "src/decoy.ts"],
+      // Non-function export: the shape that used to make the two paths disagree.
+      ["--callers", "db", "--in", "src/db.ts"],
     ]) {
       const [cached, live] = bothPaths(dir, ...q, "--json");
       assert.equal(cached, live, `sidecar diverged from live for: ${q.join(" ")}`);

@@ -74,6 +74,11 @@ test("--doctor: partial hooks reports exact gaps", () => {
 test("--doctor: healthy install via --install-hooks reports green hooks", () => {
   const dir = makeRepo({ "src/x.ts": "export const x = 1;\n" });
   gitInit(dir, { commit: true });
+  // "Healthy" has to mean a repo where the hook can actually fire. gitInit points
+  // core.hooksPath at a nonexistent dir so stray hooks never run in the harness —
+  // leave it set and --doctor correctly reports the hook as INERT, because git
+  // really would not run it. Unset it so this test describes the shape it claims.
+  git(dir, "config", "--unset", "core.hooksPath");
   assert.equal(run(dir, "--install-hooks").status, 0);
   const r = run(dir, "--doctor");
   assert.equal(r.status, 0, r.stderr);

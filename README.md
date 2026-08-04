@@ -57,8 +57,9 @@ live from real repos:
 | | agentmap | `git grep` |
 |---|:---:|:---:|
 | What depends on this file? | **100%** precision | 59.9% precision |
-| Where is this defined? *(top-3)* | **93.3%** | 80% |
-| Tokens to find a definition | **2.4× fewer** | — |
+| Where is this defined? *(top-1)* | **100%** | 32% |
+| Where is this defined? *(top-3)* | **100%** | 80% |
+| Tokens to find a definition | **1.9× fewer** | — |
 
 <sub>n=42 dependents / n=75 definitions across <a href="https://github.com/colinhacks/zod">zod</a>, <a href="https://github.com/pmndrs/zustand">zustand</a>, <a href="https://github.com/honojs/hono">hono</a>. Re-run: <code>npm run eval</code> · method → <a href="./EVAL.md">EVAL.md</a></sub>
 
@@ -724,6 +725,63 @@ features (4):
   register (1 files)
   chat (1 files)
 ```
+
+### `--affected <path>` — which tests cover this file
+
+Walks the reverse-dependency closure and reports the test files that reach the target,
+with hop distance. The useful answer is often the empty one: *nothing covers this*, which
+is what you want to know **before** a risky edit, not after CI.
+
+Type-only importers count. Changing an exported type breaks every `import type` consumer
+at compile time, so the walk follows `dependents` **and** `typeOnlyDependents`.
+
+```
+$ node agentmap.mjs --affected agentmap.mjs
+affected by agentmap.mjs: 3 test files (of 4 transitive dependents)
+  test/doctor.test.mjs  [1 hop]
+  test/pkg-imports.test.mjs  [1 hop]
+  test/unit.test.mjs  [1 hop]
+```
+
+A file with no reachable test says so in words, and `--json` carries `covered: false`.
+
+### `--routes` — the App Router route table
+
+Every URL the repo serves and the file that serves it. **Next.js App Router only** — on any
+other repo it exits 1 with an explicit `reason` rather than an empty list, so an agent can
+tell "not applicable" from "nothing found".
+
+```
+$ node agentmap.mjs --routes
+routes: no app/ or src/app/ directory — not a Next.js App Router project
+```
+
+### `--route <url>` — resolve a URL to the code that serves it
+
+Goes from a bug report naming a URL straight to the handler, its layout chain, and the
+server modules it can reach.
+
+```
+$ node agentmap.mjs --route /dashboard/settings
+/dashboard/settings  (page)
+  serves: app/dashboard/settings/page.tsx  boundary: 'client'
+  layouts (outer->inner): app/layout.tsx -> app/dashboard/layout.tsx
+  server modules: lib/server/settings.ts
+```
+
+### `--kind <k>` — narrow `--find` / `--search` by declaration kind
+
+A modifier, not a command. Matched loosely and case-insensitively against the ts-morph kind
+name, so `--kind function` finds `FunctionDeclaration` and `--kind type` finds
+`TypeAliasDeclaration` — you never have to know the enum spelling.
+
+```
+$ node agentmap.mjs --find pagerank --kind function
+find "pagerank" kind~function: 1 match
+  agentmap.mjs → pagerank (FunctionDeclaration)
+```
+
+Used alone it is a usage error (exit 2) — it has nothing to narrow.
 
 ### `--hubs` — most important files (PageRank)
 

@@ -280,9 +280,22 @@ export const VUE_PROJECT = {
 // canonical Vue path assertion (no virtual paths anywhere in the output).
 // ---------------------------------------------------------------------------
 
-// Run `agentmap` in `dir` with given args; assert exit 0; parse stdout as JSON.
+// Run `agentmap` in `dir` with given args; assert the exit is 0 or a documented
+// empty-result 1; parse stdout as JSON.
+//
+// Exit 1 means "no results", which for these fixtures is the CORRECT answer to
+// some queries — a Vue library has no Next.js App Router, so `--features` and
+// `--routes` legitimately return nothing and say why in `reason`. Treating that
+// as a harness failure would force those commands to keep exiting 0 with an empty
+// payload, which is the silent-degradation shape this project exists to avoid.
+// A payload carrying `reason` is an answer; anything else at exit 1 is still a bug.
 export function vueJson(dir, ...args) {
   const r = run(dir, "--json", ...args);
+  if (r.status === 1) {
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch { /* fall through to the throw */ }
+    if (parsed?.reason) return parsed;
+  }
   if (r.status !== 0) {
     const err = new Error(`agentmap --json ${args.join(" ")} exited ${r.status}\nstderr:\n${r.stderr}\nstdout:\n${r.stdout}`);
     err.result = r;

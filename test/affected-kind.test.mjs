@@ -139,3 +139,53 @@ test("--kind is a modifier, not a command — orphaned it is a usage error", () 
     assert.equal(r.status, 2, "--kind with no --find/--search must not silently build the map");
   } finally { cleanup(dir); }
 });
+
+// ---------------------------------------------------------------------------
+// Type-only importers count as affected.
+//
+// `import type { T } from "./types"` is deliberately excluded from PageRank — a
+// type import is not a runtime dependency and must not inflate the ranking. But
+// "what breaks if I change this" is the one question where it absolutely counts:
+// change an exported type and every `import type` consumer fails to compile.
+//
+// transitiveDependents() walked `dependents` only, so a file whose importers are
+// ALL type-only reported `dependents:0, tests:0, covered:false` — while --relates
+// on the SAME cached map printed those importers under `type-only dependents`.
+// Two shipped commands contradicting each other about one map.
+//
+// Measured on hono@51db313: --affected src/types.ts -> covered:false, against 61
+// typeOnlyDependents including 9 test files.
+test("--affected counts type-only dependents, including type-only tests", () => {
+  const dir = makeRepo({
+    "src/types.ts": "export type User = { id: string };\n",
+    // Every importer below is type-only: the runtime `dependents` array for
+    // types.ts is empty by construction.
+    "src/model.ts": 'import type { User } from "./types";\nexport const u = (x: User) => x.id;\n',
+    "test/model.test.ts": 'import type { User } from "./../src/types";\nexport const t = (u: User) => u;\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const r = JSON.parse(run(dir, "--affected", "src/types.ts", "--json").stdout);
+    assert.equal(r.dependents, 2, "type-only importers must be reachable");
+    assert.deepEqual(r.affected.map((a) => a.file), ["test/model.test.ts"]);
+    assert.equal(r.covered, true, "a type-only test still covers the file");
+  } finally { cleanup(dir); }
+});
+
+test("--affected still reaches through a type-only hop to a runtime test", () => {
+  // The closure must not stop at the type-only edge: types.ts <- model.ts is
+  // type-only, model.ts <- model.test.ts is a runtime import. The test is 2 hops
+  // away and only reachable if both edge kinds are walked.
+  const dir = makeRepo({
+    "src/types.ts": "export type User = { id: string };\n",
+    "src/model.ts": 'import type { User } from "./types";\nexport const u = (x: User) => x.id;\n',
+    "test/model.test.ts": 'import { u } from "../src/model";\nexport const t = u;\n',
+  });
+  try {
+    gitInit(dir, { commit: true });
+    const r = JSON.parse(run(dir, "--affected", "src/types.ts", "--json").stdout);
+    assert.deepEqual(r.affected.map((a) => a.file), ["test/model.test.ts"]);
+    assert.equal(r.affected[0].hop, 2, "reached through the type-only hop");
+    assert.equal(r.covered, true);
+  } finally { cleanup(dir); }
+});
