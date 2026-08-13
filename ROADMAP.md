@@ -349,9 +349,19 @@ discovered is trustworthy and fast.
   Codex fails open on it). **Guard:** a hard `deny` on grep must carry an
   allow-fallback (non-source paths, map-build-failed, repeat query) or it'll drive
   uninstalls — agentmap only covers TS/JS/Vue. Same pattern for Copilot CLI.
-- [ ] **Cursor `hooks.json` + Gemini CLI extension** — upgrade Cursor from
-  rule+MCP to a `beforeShellExecution` hook redirecting grep/rg to agentmap;
-  package a Gemini extension (`hooks.json` + GEMINI.md + MCP) for the gallery.
+- [~] **Cursor `hooks.json` + Gemini CLI extension** — **Cursor half DONE**
+  (2026-08-13): `hooks/agentmap-cursor-nudge.mjs` + `installCursorHooks()` write
+  a `beforeShellExecution` gate into `.cursor/hooks.json`, same soft-gate
+  contract as the Codex hook (deny only high-confidence structural greps, allow
+  everything else, `AGENTMAP_CURSOR_GATE=0` bypass). 27 tests. Two details were
+  deliberately NOT guessed: the command path follows Cursor's own project-level
+  example (`.cursor/hooks/…`, project-root-relative), and `timeout` is omitted
+  because Cursor documents the value with no unit. The deny payload carries the
+  message under BOTH `agent_message` and `agentMessage` — the official docs and
+  the community type definitions disagree, and picking wrong fails SILENTLY.
+  **Still open:** the Gemini CLI extension (`hooks.json` + GEMINI.md + MCP
+  packaged for the gallery) — that is a distribution artifact, not a hook, and
+  it did not belong in the same change.
 
 ### Release engineering (from the completeness critic — uncovered dimension)
 - [x] **Tag-triggered publish workflow** with `npm publish --provenance`

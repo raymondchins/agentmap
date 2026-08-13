@@ -303,7 +303,7 @@ npx skills add raymondchins/agentmap
 each platform's official skill-directory conventions. Options:
 
 ```bash
-agentmap --install-skill --platform cursor           # Cursor rule only (project)
+agentmap --install-skill --platform cursor           # Cursor rule + .cursor/hooks.json shell gate (project)
 agentmap --install-skill --platform claude           # .claude/skills/agentmap/SKILL.md
 agentmap --install-skill --platform codex            # .codex/skills/ (project) or ~/.codex/skills/ (global)
 agentmap --install-skill --platform opencode         # .opencode/skills/ (project) or ~/.config/opencode/skills/ (global)
@@ -324,6 +324,7 @@ Some platforms also get **always-on** docs and hooks in the same command:
 | `gemini` | `.gemini/skills/…/SKILL.md` | `GEMINI.md` + `.gemini/settings.json` BeforeTool nudge | `~/.gemini/GEMINI.md` |
 | `codex` | `.codex/skills/…/SKILL.md` | `AGENTS.md` merge-safe `<!-- agentmap:begin/end -->` block | `~/.codex/AGENTS.md` |
 | `opencode` | `.opencode/skills/…/SKILL.md` | `AGENTS.md` + `.opencode/plugins/agentmap-nudge.js` | `~/.config/opencode/AGENTS.md` |
+| `cursor` | `.cursor/rules/agentmap.mdc` | `.cursor/hooks.json` `beforeShellExecution` gate + `.cursor/hooks/agentmap-cursor-nudge.mjs` | — (project-scope only) |
 
 Codex and OpenCode share one repo-root `AGENTS.md` on project install. Existing content outside the marked block is preserved.
 
@@ -364,7 +365,7 @@ skill/rule the agent may or may not consult). Honest matrix:
 | **Claude Code** | `/plugin install agentmap@agentmap` (or `--install-hooks`) | **live hook** — `PreToolUse` nudge on `Grep` + Bash searchers | non-blocking (never denies grep); bare-symbol `Grep` nudge requires the #3 hook fix |
 | **Gemini CLI** | `--install-skill --platform gemini` | **live hook** — `.gemini/settings.json` nudge | fires on `BeforeTool` and emits a top-level `systemMessage`; Gemini parses and then **drops** `hookSpecificOutput.additionalContext` on `BeforeTool`, which is why the nudge used to vanish silently |
 | **OpenCode** | `--install-skill --platform opencode` | **log-only** — `.opencode/plugins/agentmap-nudge.js` writes to the log, does not inject context | plugin can't steer the model; relies on the `AGENTS.md` block being read |
-| **Cursor** | `--install-skill --platform cursor` + `.cursor/mcp.json` (below) | **MCP + docs** — `alwaysApply` rule + the MCP server | Cursor's own hooks aren't wired; the rule is advisory |
+| **Cursor** | `--install-skill --platform cursor` + `.cursor/mcp.json` (below) | **live gate** — `.cursor/hooks.json` `beforeShellExecution` hook, plus the `alwaysApply` rule and the MCP server | denies only high-confidence structural greps; allow-fallback for logs/pipes/non-TS-JS; `AGENTMAP_CURSOR_GATE=0` bypasses; project-scope only |
 | **Codex CLI** | `--install-skill --platform codex` | **live gate** — `.codex/config.toml` PreToolUse hook | denies only high-confidence structural greps; allow-fallback for logs/pipes/non-TS-JS; `AGENTMAP_CODEX_GATE=0` bypasses; needs a trusted dir + Codex hooks-GA |
 | **Copilot CLI** | `--install-skill --platform copilot` | **docs-only** — `.copilot/skills/` | same as Codex — no live hook yet |
 
@@ -396,7 +397,7 @@ leaves the rest of your `AGENTS.md` / `GEMINI.md` intact.
 | Platform | Remove |
 |----------|--------|
 | Claude Code | `.claude/skills/agentmap/` + the agentmap `PreToolUse` block in `.claude/settings.json` |
-| Cursor | `.cursor/rules/agentmap.mdc` + the `agentmap` entry in `.cursor/mcp.json` |
+| Cursor | `.cursor/rules/agentmap.mdc`, `.cursor/hooks/agentmap-cursor-nudge.mjs`, the `beforeShellExecution` entry in `.cursor/hooks.json`, + the `agentmap` entry in `.cursor/mcp.json` |
 | Codex | `.codex/skills/agentmap/`, the `# agentmap:begin/end` block in `.codex/config.toml`, `.codex/hooks/agentmap-codex-nudge.mjs`, and the fenced block in `AGENTS.md` |
 | OpenCode | `.opencode/skills/agentmap/`, `.opencode/plugins/agentmap-nudge.js`, the `AGENTS.md` block |
 | Gemini | `.gemini/skills/agentmap/`, `.gemini/hooks/agentmap-nudge.mjs`, the `BeforeTool` hook in `.gemini/settings.json`, the `GEMINI.md` block |
@@ -410,6 +411,8 @@ leaves the rest of your `AGENTS.md` / `GEMINI.md` intact.
 | Empty or wrong map | Usually no `tsconfig.json` / resolvable aliases in the target repo, so no edges resolved — run `agentmap --doctor` and check `edgeCoverage` in `--json`. |
 | Stale-looking results | By design the map rebuilds from disk on a dirty tree / SHA mismatch. Force a rebuild by just running `agentmap`. |
 | Codex/Gemini nudge never fires | Codex's gate is opt-in — set `[features] hooks = true` in `.codex/config.toml` (`AGENTMAP_CODEX_GATE=0` disables it). Gemini needs the `BeforeTool` hook that `--install-skill` writes. |
+| Cursor gate blocks a grep you meant | Re-run the same command with `AGENTMAP_CURSOR_GATE=0` prefixed. It only denies high-confidence structural searches; logs, pipes and non-structural sweeps already fall through. Remove the `beforeShellExecution` entry from `.cursor/hooks.json` to turn it off for good. |
+| Cursor gate never fires | It is project-scope only, so it must be installed from the repo root (`--install-skill --platform cursor`, not `--global`), and Cursor reads `.cursor/hooks.json` at startup — restart Cursor after installing. |
 | Installed the wrong `agentmap` | This is **`@raymondchins/agentmap`** (npm scope) — not the unrelated unscoped `agentmap` packages. |
 | Cursor MCP tools missing | `--mcp` doesn't auto-wire Cursor; add the copy-paste `.cursor/mcp.json` from the matrix above and restart Cursor. |
 | Hook works in your shell, not in the agent | Almost always **nvm**. Your interactive shell sources `~/.nvm/nvm.sh`; the git hook and the agent's tool runner do not, so `node` isn't on their `PATH`. Point the hook at an absolute node (`which node`) or install a system-wide node. |

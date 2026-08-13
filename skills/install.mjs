@@ -11,6 +11,7 @@ import {
   mergeGuidanceBlock,
   installGeminiHooks,
   installCodexHooks,
+  installCursorHooks,
   installOpencodePlugin,
 } from "./install-helpers.mjs";
 
@@ -34,6 +35,7 @@ function skillPath(root, _globalScope, ...segments) {
  *   docs?: (root: string, globalScope: boolean) => string;
  *   hooks?: boolean;
  *   codexHooks?: boolean;
+ *   cursorHooks?: boolean;
  *   plugin?: boolean;
  * }>} */
 const PLATFORMS = {
@@ -47,6 +49,7 @@ const PLATFORMS = {
     src: CURSOR_RULE,
     dest: (root) => skillPath(root, false, ".cursor", "rules", "agentmap.mdc"),
     projectOnly: true,
+    cursorHooks: true,
   },
   codex: {
     label: "OpenAI Codex",
@@ -193,6 +196,16 @@ function installExtrasForPlatform(name, cfg, { root, globalScope, dryRun, target
   }
   if (cfg.codexHooks && !globalScope) {
     const hookTargets = installCodexHooks(root, dryRun);
+    for (const t of hookTargets) {
+      if (dryRun) { if (!quiet) console.log(`  ${cfg.label} hooks: ${t}`); }
+      else {
+        console.log(`  ${cfg.label} hooks → ${t}`);
+        targets.push(t);
+      }
+    }
+  }
+  if (cfg.cursorHooks && !globalScope) {
+    const hookTargets = installCursorHooks(root, dryRun);
     for (const t of hookTargets) {
       if (dryRun) { if (!quiet) console.log(`  ${cfg.label} hooks: ${t}`); }
       else {

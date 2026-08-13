@@ -28,6 +28,7 @@ mcp.mjs               — MCP server wrapper
 hooks/                — the hooks themselves
   agentmap-nudge.mjs        (Claude Code)
   agentmap-codex-nudge.mjs  · agentmap-gemini-nudge.mjs
+  agentmap-cursor-nudge.mjs (Cursor beforeShellExecution gate)
   post-commit               — the auto-refresh hook shipped to consumers
   hooks.json · INSTALL.md
 skills/               — the skill payloads + the shared installer

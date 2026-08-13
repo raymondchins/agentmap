@@ -9,6 +9,7 @@ const SKILLS_DIR = dirname(fileURLToPath(import.meta.url));
 export const GUIDANCE = join(SKILLS_DIR, "guidance.md");
 const GEMINI_NUDGE_SRC = join(SKILLS_DIR, "..", "hooks", "agentmap-gemini-nudge.mjs");
 const CODEX_NUDGE_SRC = join(SKILLS_DIR, "..", "hooks", "agentmap-codex-nudge.mjs");
+const CURSOR_NUDGE_SRC = join(SKILLS_DIR, "..", "hooks", "agentmap-cursor-nudge.mjs");
 const OPENCODE_PLUGIN_SRC = join(SKILLS_DIR, "opencode-agentmap-nudge.js");
 
 export const MARK_BEGIN = "<!-- agentmap:begin -->";
@@ -208,6 +209,80 @@ export function installCodexHooks(root, dryRun) {
     console.log("  WARN Codex hooks: [features] hooks = false is set in .codex/config.toml — leaving it; the agentmap gate stays inactive until you enable hooks.");
   }
   atomicWrite(configDest, next);
+  return targets;
+}
+
+/**
+ * Cursor beforeShellExecution gate. Writes the hook script into .cursor/hooks/
+ * and registers it in .cursor/hooks.json. Project-scope only (root === cwd) —
+ * Cursor's rule file is already project-only, and a global gate would fire in
+ * repos that have no agentmap.
+ *
+ * `.cursor/hooks.json` is its own file with its own shape — NOT the Claude
+ * settings.json shape. Cursor entries are FLAT (`{command, matcher}`), where
+ * `command` is the hook program and `matcher` is a regex over the shell command
+ * text; Claude nests `{matcher, hooks: [{type, command}]}`. hookArray() is still
+ * the right validator (it only asserts hooks/hooks[event] shape) but do not
+ * copy the Claude entry shape in here.
+ *
+ * Two deliberate choices, both to avoid guessing an undocumented detail:
+ *
+ *  - The command path is `.cursor/hooks/...`, i.e. project-root-relative,
+ *    copied verbatim from the shape of Cursor's own project-level example
+ *    (`".cursor/hooks/approve-network.sh"`). Their user-level example uses
+ *    `"./hooks/script.sh"`, which is relative to `~/.cursor/` — the two are only
+ *    consistent if project-scope paths are root-relative, so that is what we
+ *    write. It is invoked as `node "<path>"` rather than relying on a shebang
+ *    plus the +x bit, which would not survive a Windows checkout.
+ *
+ *  - No `timeout` key. Cursor's example shows `"timeout": 30` with no unit
+ *    stated anywhere; 30 seconds is sane and 30 milliseconds would time out
+ *    mid-walk-up and fail open. Rather than encode a guess, omit it and take
+ *    Cursor's default.
+ *
+ * Idempotent: re-running does not duplicate the entry.
+ *
+ * @returns {string[]} relative paths touched
+ */
+export function installCursorHooks(root, dryRun) {
+  if (root !== process.cwd()) return [];
+  const hookRel = ".cursor/hooks/agentmap-cursor-nudge.mjs";
+  const hookDest = join(root, hookRel);
+  const configRel = ".cursor/hooks.json";
+  const configDest = join(root, configRel);
+  const targets = [hookRel, configRel];
+
+  const HOOK_CMD = `node ".cursor/hooks/agentmap-cursor-nudge.mjs"`;
+  const matcher = "rg|ripgrep|grep|egrep|fgrep|ag|ack";
+
+  let settings = {}, hadComments = false;
+  if (existsSync(configDest)) {
+    ({ settings, hadComments } = parseSettings(readFileSync(configDest, "utf8"), configRel));
+  }
+  // Cursor keys the file format itself; preserve a user's existing version
+  // rather than stamping ours over it. Set BEFORE hookArray() so a fresh file
+  // serialises with `version` first, the way Cursor's own examples read.
+  if (settings.version === undefined || settings.version === null) settings.version = 1;
+  // Validate shape before writing anything — runs on the dry-run preflight too,
+  // so a malformed hooks.json fails before the FIRST file of a multi-platform
+  // install lands.
+  const beforeShell = hookArray(settings, "beforeShellExecution", configRel);
+  const already = beforeShell.some(
+    (e) => typeof e?.command === "string" && e.command.includes("agentmap-cursor-nudge"),
+  );
+
+  if (dryRun) return targets;
+  if (!existsSync(CURSOR_NUDGE_SRC)) throw new Error(`packaged hook missing: ${CURSOR_NUDGE_SRC}`);
+  mkdirSync(dirname(hookDest), { recursive: true });
+  writeFileSync(hookDest, readFileSync(CURSOR_NUDGE_SRC, "utf8"));
+
+  if (!already) {
+    beforeShell.push({ command: HOOK_CMD, matcher });
+    if (hadComments) {
+      console.warn(`  ⚠ ${configRel} contained comments — JSON has no way to keep them, so they were dropped when agentmap added its hook. Re-add them if you need them.`);
+    }
+    atomicWrite(configDest, JSON.stringify(settings, null, 2) + "\n");
+  }
   return targets;
 }
 

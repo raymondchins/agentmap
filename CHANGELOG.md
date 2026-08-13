@@ -3,6 +3,43 @@
 All notable changes to agentmap are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Cursor now gets a live gate, not just advice.** `--install-skill --platform
+  cursor` writes `hooks/agentmap-cursor-nudge.mjs` into `.cursor/hooks/` and
+  registers it as a `beforeShellExecution` hook in `.cursor/hooks.json`. Until
+  now Cursor was the one platform whose entry in the enforcement matrix read
+  "the rule is advisory" — an `alwaysApply` rule the model was free to ignore.
+  Same soft-gate contract as the Codex hook and the same heuristic verbatim:
+  deny only high-confidence structural searches (dependency/import intent, a
+  PascalCase JSX tag, explicit where-is/who-uses wording, a bare multi-hump
+  identifier), and allow everything else — piped log filters, data-file
+  operands, Tailwind classes, lowercase terms, TS generics that look like tags.
+  `AGENTMAP_CURSOR_GATE=0` bypasses a false positive without uninstalling, and
+  the gate stays silent in any repo where the walk-up finds no agentmap.
+
+  The deny payload carries its message under **both** `agent_message` and
+  `agentMessage`. Cursor's own docs specify snake_case; community type
+  definitions specify camelCase; they cannot both be right, and picking wrong
+  fails silently — `permission: "deny"` still blocks, but the reason never
+  reaches the model, so the agent gets an unexplained refusal and retries the
+  same grep. That is the bug this project already shipped once with Gemini's
+  `additionalContext`. Unknown keys are ignored by any JSON consumer, so both
+  spellings cost two duplicated strings and remove the guess. A test pins it.
+
+  Two further details were left undecided rather than guessed: the hook command
+  path follows Cursor's own project-level example (`.cursor/hooks/…`,
+  project-root-relative, invoked via `node` so no shebang or +x bit is needed on
+  Windows), and no `timeout` key is written because Cursor documents the value
+  with no unit — 30 seconds is sane, 30 milliseconds would time out mid-walk-up.
+
+  Project-scope only: a global gate would fire in repos that have no agentmap.
+  27 tests (`test/cursor-nudge.test.mjs`, `test/install-cursor-hooks.test.mjs`),
+  covering the decision boundary, the wire format, injection safety, hooks.json
+  merge-vs-clobber, idempotency, and clean failure on a malformed hooks.json.
+
 ## [0.22.0] - 2026-08-04
 
 Four commands were answering confidently and wrongly with exit 0 — the exact class
